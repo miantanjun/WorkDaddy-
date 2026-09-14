@@ -5985,6 +5985,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<span class="wbs-sess-progress-icon" id="wbs-sess-progress-icon" aria-hidden="true"></span>' +
         '<span class="wbs-sess-progress-label" id="wbs-sess-progress-label">准备复制会话…</span>' +
         '<span class="wbs-sess-progress-count" id="wbs-sess-progress-count">0 / 0</span>' +
+        // 暂停/继续：跑动中显示「暂停」（停整条流水线）；已暂停显示「继续」（按同样的
+        // source/target 起一个新任务，已复制的行会被判 skipped，重跑等于只搬剩下的）。
+        '<button class="wbs-sess-progress-btn" type="button" id="wbs-sess-progress-btn" hidden></button>' +
         '</div>' +
         '<div class="wbs-sess-progress-track"><div class="wbs-sess-progress-fill" id="wbs-sess-progress-fill"></div></div>' +
         '<div class="wbs-sess-progress-sub" id="wbs-sess-progress-sub"></div>' +
@@ -5992,6 +5995,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<div class="wbs-sess-toolbar">' +
         '<button class="wbs-sess-bbtn" type="button" id="wbs-sess-batch">批量操作</button>' +
         '<button class="wbs-sess-bbtn" type="button" id="wbs-sess-import" title="从加密文件导入会话">' + IMPORT_ICON + '<span>导入</span></button>' +
+        // 立即同步：以当前账号为源，把已开启自动复制的会话同步到指定账号。不切号、不刷新页面。
+        '<button class="wbs-sess-bbtn" type="button" id="wbs-sess-sync-now" title="立即同步：不切换账号，把当前账号已开启自动复制的会话同步到指定账号"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg><span>立即同步</span></button>' +
         '<button class="wbs-sess-auto-all" type="button" id="wbs-sess-auto-all" role="checkbox" aria-checked="false" aria-label="自动复制所有会话" title="切换账号时自动复制当前账号的所有会话，包括之后新增的会话">' +
         '<span class="wbs-sess-auto-all-box" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="12" height="12" rx="2"/><path class="wbs-sess-auto-all-check" d="m4.5 8 2.2 2.2L11.5 5.5"/></svg></span>' +
         '<span class="wbs-sess-auto-all-label">自动复制所有会话</span>' +
@@ -6385,6 +6390,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var cnt = sessionsPane.querySelector('#wbs-sess-count');
       if (bb) { bb.style.display = on ? 'none' : ''; bb.classList.toggle('active', on); }
       if (importBtn) importBtn.style.display = on ? 'none' : '';
+      var syncNowBtn = sessionsPane.querySelector('#wbs-sess-sync-now');
+      if (syncNowBtn) syncNowBtn.style.display = on ? 'none' : '';
       if (autoCopyAllBtn) autoCopyAllBtn.style.display = on ? 'none' : '';
       if (cnt) cnt.style.display = on ? 'none' : '';
       if (bar) bar.style.display = on ? 'flex' : 'none';
@@ -6395,6 +6402,22 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (autoCopyAllBtn) {
         autoCopyAllBtn.addEventListener('click', function () {
           toggleAutoCopyAll(autoCopyAllBtn.getAttribute('aria-checked') !== 'true');
+        });
+      }
+      // 立即同步：不切号，把当前账号已开启自动复制的会话同步到指定账号。
+      var syncNowBtn = sessionsPane.querySelector('#wbs-sess-sync-now');
+      if (syncNowBtn) {
+        syncNowBtn.addEventListener('click', function () { openSyncNowModal(); });
+      }
+      // 暂停 / 继续同步：按钮在进度条内。动作由 renderAutoCopyProgress 写进 data-ac-action，
+      // 跑动中=暂停、已暂停=继续。stopPropagation 防止冒泡到面板其它点击处理。
+      var acProgBtn = sessionsPane.querySelector('#wbs-sess-progress-btn');
+      if (acProgBtn) {
+        acProgBtn.addEventListener('click', function (e) {
+          if (e && e.stopPropagation) e.stopPropagation();
+          var action = acProgBtn.dataset.acAction;
+          if (action === 'pause') pauseAutoCopy();
+          else if (action === 'resume') resumeAutoCopy();
         });
       }
       // 时间 Segment 组件
@@ -6622,6 +6645,105 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         };
       }).catch(function (e) {
         toast('加载账号失败: ' + (e.message || e), true, root);
+      });
+    }
+    // 「立即同步」：以当前账号为源，把已开启自动复制的会话（含产物目录）同步到目标账号。
+    // 不切号、不刷新页面；复用后端同一个任务队列，因此进度条 / 暂停 / 继续 三个能力天然连通。
+    function openSyncNowModal() {
+      var titleEl = sessionsPane.querySelector('#wbs-sess-modal-title');
+      var body = sessionsPane.querySelector('#wbs-sess-modal-body');
+      var okBtn = sessionsPane.querySelector('#wbs-sess-modal-ok');
+      var cancelBtn = sessionsPane.querySelector('#wbs-sess-modal-cancel');
+      okBtn.textContent = '开始同步';
+      okBtn.disabled = true;
+      titleEl.textContent = '立即同步到…';
+      body.innerHTML = '<div class="wbs-empty">加载账号…</div>';
+      showSessModal(true);
+      okBtn.onclick = null;
+      if (cancelBtn && cancelBtn.focus) cancelBtn.focus();
+      api('/api/accounts').then(function (d) {
+        var accts = (d && d.accounts) || [];
+        var curUid = (d && d.current && d.current.uid) || '';
+        var cur = accts.filter(function (a) { return a.uid === curUid; })[0];
+        if (!curUid) {
+          body.innerHTML = '<div class="wbs-empty">当前没有已登录的账号，无法作为同步源</div>';
+          return;
+        }
+        var targets = accts.filter(function (a) { return a.uid !== curUid; });
+        if (!targets.length) {
+          body.innerHTML = '<div class="wbs-empty">没有其它账号可作为同步目标</div>';
+          return;
+        }
+        body.innerHTML = '<p>源账号：' + esc(cur ? (cur.nickname || cur.uid) : curUid) + '</p>'
+          + '<div class="wbs-modal-warn">只同步<b>已开启「自动复制」</b>的会话及其产物目录；'
+          + '已完成的部分会被自动跳过，可反复点。</div>'
+          + '<select class="wbs-sess-select wbs-sess-target" id="wbs-sess-sync-target" title="选择目标账号">'
+          + '<option value="">选择目标账号…</option>'
+          + targets.map(function (a) {
+            return '<option value="' + escAttr(a.uid) + '">' + esc(a.nickname || a.uid) + (a.phone ? '（' + esc(a.phone) + '）' : '') + '</option>';
+          }).join('')
+          + '</select>';
+        okBtn.disabled = false;
+        okBtn.onclick = function () {
+          var sel = body.querySelector('#wbs-sess-sync-target');
+          if (!sel || !sel.value) { toast('请选择目标账号', true, root); return; }
+          okBtn.disabled = true;
+          api('/api/sessions/sync-now', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ targetUid: sel.value }),
+          }).then(function (res) {
+            showSessModal(false);
+            var j = res && res.job;
+            if (j) { autoCopyWatch.job = j; renderAutoCopyProgress(j); }
+            toast(res && res.reused ? '已有同向同步任务在跑，已接入进度' : '已开始同步', false, root);
+            watchAutoCopyProgress();
+          }).catch(function (e) {
+            okBtn.disabled = false;
+            toast('同步失败: ' + (e && e.message || e), true, root);
+          });
+        };
+      }).catch(function (e) {
+        body.innerHTML = '<div class="wbs-empty">加载账号失败</div>';
+        toast('加载账号失败: ' + (e && e.message || e), true, root);
+      });
+    }
+    // 暂停同步：停下正在跑的（以及队列里排着的）复制任务。后端只置标记，实际收尾由 worker
+    // 在下一个检查点完成（单个产物目录可能 32 万文件，文件级回调里也埋了检查点），
+    // 所以这里先提示，下一轮轮询就会拿到 paused 状态。
+    function pauseAutoCopy() {
+      var job = autoCopyWatch.job;
+      var body = (job && job.id && (job.status === 'running' || job.status === 'queued')) ? { jobId: job.id } : {};
+      api('/api/sessions/auto-copy/cancel', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(function (d) {
+        var j = d && d.job;
+        if (j) { autoCopyWatch.job = j; renderAutoCopyProgress(j); }
+        toast('已请求暂停，正在收尾当前文件…', false, root);
+        watchAutoCopyProgress();
+      }).catch(function (e) {
+        toast('暂停失败: ' + (e && e.message || e), true, root);
+      });
+    }
+    // 继续同步：不是「恢复」同一个任务，而是按同样的 source/target 起一个新任务。
+    // 复制本身幂等（已完成的行按 mapping 判 skipped），重跑等于只搬剩下的。
+    function resumeAutoCopy() {
+      var job = autoCopyWatch.job;
+      var targetUid = job && job.targetUid;
+      if (!targetUid) { toast('找不到可继续的目标账号，请用「立即同步」重选', true, root); return; }
+      api('/api/sessions/sync-now', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ targetUid: targetUid, sourceUid: job.sourceUid || '' }),
+      }).then(function (d) {
+        var j = d && d.job;
+        if (j) { autoCopyWatch.job = j; renderAutoCopyProgress(j); }
+        toast('已继续同步', false, root);
+        watchAutoCopyProgress();
+      }).catch(function (e) {
+        toast('继续同步失败: ' + (e && e.message || e), true, root);
       });
     }
     // 删除弹窗：确认框（真实删除，弹窗内警示不可恢复）
@@ -11946,9 +12068,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
 
     // 已完成的任务只在结束后 2 分钟内保留展示，避免每次打开面板都弹旧结果。
+    // 「已暂停」是用户主动留下的待续状态，不受 2 分钟窗口限制：只要任务还在（服务端
+    // 30 分钟后回收），面板就应当显示它并提供「继续同步」。
     function shouldShowAutoCopy(job) {
       if (!job) return false;
-      if (job.status === 'queued' || job.status === 'running') return true;
+      if (job.status === 'queued' || job.status === 'running' || job.status === 'paused') return true;
       return !!(job.finishedAt && (Date.now() - job.finishedAt) < 120000);
     }
 
@@ -11961,6 +12085,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         count: sessionsPane.querySelector('#wbs-sess-progress-count'),
         fill: sessionsPane.querySelector('#wbs-sess-progress-fill'),
         sub: sessionsPane.querySelector('#wbs-sess-progress-sub'),
+        btn: sessionsPane.querySelector('#wbs-sess-progress-btn'),
       };
     }
 
@@ -11973,6 +12098,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // 保证 15/22 这样的比例在任何时刻含义都一致。
     function renderAutoCopyProgress(job) {
       var running = job.status === 'queued' || job.status === 'running';
+      var paused = job.status === 'paused';
       var payloadPhase = job.phase === 'payload';
       var total = Number(job.total) || 0;
       var processed = Number(job.processed) || 0;
@@ -11980,7 +12106,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var payloadProcessed = Number(job.payloadProcessed) || 0;
       var numerator = payloadPhase ? payloadProcessed : processed;
       var denominator = payloadPhase ? payloadTotal : total;
-      if (!running) { numerator = total; denominator = total; if (payloadPhase) { numerator = payloadTotal; denominator = payloadTotal; } }
+      // 已暂停保留真实进度（不能像「已完成」那样强行拉到 100%）。
+      if (!running && !paused) { numerator = total; denominator = total; if (payloadPhase) { numerator = payloadTotal; denominator = payloadTotal; } }
       var percent = denominator ? Math.round(numerator / denominator * 100) : (running ? 0 : 100);
       var headLabel = '';
       var sub = '';
@@ -12001,6 +12128,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             + ' · 已复制 ' + job.copied + ' · 跳过 ' + job.skipped + ' · 失败 ' + job.failed
             + ' · 已用 ' + fmtDuration(Date.now() - (job.startedAt || Date.now()));
         }
+      } else if (paused) {
+        headLabel = '同步已暂停';
+        sub = '正文 ' + processed + '/' + total
+          + (payloadTotal ? ' · 产物 ' + payloadProcessed + '/' + payloadTotal : '')
+          + ' · 已复制 ' + job.copied + ' · 跳过 ' + job.skipped
+          + ' · 点「继续同步」只搬剩下的';
       } else if (job.status === 'done') {
         headLabel = '会话复制完成';
         sub = '共 ' + total + ' 个 · 已复制 ' + job.copied + ' · 跳过 ' + job.skipped
@@ -12020,13 +12153,30 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
       var els = autoCopyProgressEls();
       if (els && els.box) {
-        var state = running ? '' : (job.status === 'done' ? ' ok settled' : ' err settled');
+        var state = running ? '' : (paused ? ' paused settled' : (job.status === 'done' ? ' ok settled' : ' err settled'));
         els.box.className = 'wbs-sess-progress on' + state;
-        if (els.icon) els.icon.textContent = running ? '' : (job.status === 'done' ? '✓' : '!');
+        if (els.icon) els.icon.textContent = running ? '' : (paused ? '⏸' : (job.status === 'done' ? '✓' : '!'));
         if (els.label) els.label.textContent = headLabel;
         if (els.count) els.count.textContent = numerator + ' / ' + denominator;
         if (els.fill) els.fill.style.width = Math.max(0, Math.min(100, percent)) + '%';
         if (els.sub) els.sub.textContent = sub;
+        // 按钮只在「跑动中」和「已暂停」两态出现；queued 也算跑动中（点暂停=整条流水线停）。
+        if (els.btn) {
+          if (running) {
+            els.btn.hidden = false;
+            els.btn.textContent = '暂停';
+            els.btn.dataset.acAction = 'pause';
+            els.btn.title = '暂停同步：停下正在搬运的会话，之后可以「继续同步」接着搬';
+          } else if (paused) {
+            els.btn.hidden = false;
+            els.btn.textContent = '继续同步';
+            els.btn.dataset.acAction = 'resume';
+            els.btn.title = '继续同步：只搬运尚未完成的部分（已复制的会话会被跳过）';
+          } else {
+            els.btn.hidden = true;
+            els.btn.dataset.acAction = '';
+          }
+        }
       }
     }
 
@@ -12035,8 +12185,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       autoCopyWatch.hideTimer = setBuildTimeout(function () {
         autoCopyWatch.hideTimer = null;
         var current = autoCopyWatch.job;
-        // 隐藏前再确认一次：期间可能已经开始下一个任务。
-        if (current && (current.status === 'queued' || current.status === 'running')) return;
+        // 隐藏前再确认一次：期间可能已经开始下一个任务，或用户把任务暂停了。
+        if (current && (current.status === 'queued' || current.status === 'running' || current.status === 'paused')) return;
         autoCopyWatch.job = null;
         hideAutoCopyProgress();
       }, delay || 15000);
@@ -12067,6 +12217,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           renderAutoCopyProgress(job);
           if (stillRunning) {
             if (Date.now() < autoCopyWatch.deadline) autoCopyWatch.timer = setBuildTimeout(tick, 1500);
+            return;
+          }
+          // 已暂停：不弹结果提示、不刷新列表、不自动隐藏 —— 保持轮询（放慢到 5s）。
+          // 用户点「继续同步」起了新任务后，下一轮就会切回 1.5s 快轮询。
+          if (job.status === 'paused') {
+            if (Date.now() < autoCopyWatch.deadline) autoCopyWatch.timer = setBuildTimeout(tick, 5000);
             return;
           }
           // 任务刚结束：刷新列表并提示结果（保留旧 pollAutoCopyJob 的 toast 行为）。
@@ -13347,12 +13503,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-sess-progress.settled .wbs-sess-progress-icon{display:inline}',
     '.wbs-sess-progress.ok .wbs-sess-progress-icon{color:#1a9c50}',
     '.wbs-sess-progress.err .wbs-sess-progress-icon{color:#e5484d}',
+    '.wbs-sess-progress.paused .wbs-sess-progress-icon{color:#c98a20}',
+    // 暂停/继续按钮：贴在被压成 flex:1 的标题右侧。仅在其所在态（跑动中/已暂停）显示。
+    '.wbs-sess-progress-btn{flex:0 0 auto;height:24px;padding:0 10px;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:7px;background:var(--wb-bg-popover,#fff);color:var(--wb-color-text-primary,#1f1f1f);font-size:12px;font-weight:600;line-height:1;cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s}',
+    '.wbs-sess-progress-btn:hover{background:var(--wb-bg-hover,#f5f5f5)}',
+    '.wbs-sess-progress-btn:disabled{opacity:.6;cursor:wait}',
     '.wbs-sess-progress-label{flex:1;min-width:0;font-size:12px;font-weight:600;color:var(--wb-color-text-primary,#1f1f1f);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.wbs-sess-progress-count{flex:0 0 auto;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--wb-color-text-primary,#1f1f1f)}',
     '.wbs-sess-progress-track{position:relative;height:5px;border-radius:999px;background:var(--wb-border-default,#e5e5e5);overflow:hidden}',
     '.wbs-sess-progress-fill{height:100%;width:0;border-radius:999px;background:var(--wb-accent-blue,#4f86ff);transition:width .3s ease}',
     '.wbs-sess-progress.ok .wbs-sess-progress-fill{background:#1a9c50}',
     '.wbs-sess-progress.err .wbs-sess-progress-fill{background:#e5484d}',
+    '.wbs-sess-progress.paused .wbs-sess-progress-fill{background:#c98a20}',
     '.wbs-sess-progress-sub{margin-top:6px;font-size:11px;line-height:1.45;color:var(--wb-icon-tertiary,#999);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     // 说明：曾尝试在 FAB 上挂「15/22」角标，实测 FAB 在安静模式下会被
     // --wbs-fab-quiet-shift 右推出视口（右侧最多出屏 33px），挂在它上面的角标

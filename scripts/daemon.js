@@ -387,7 +387,7 @@ const DAEMON_VERSION = '1.3.0';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-cascade-delete';
+const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-sync-pause-resume';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -5157,6 +5157,25 @@ async function buildAutoCopyPlan(sourceUid, targetUid) {
 const autoCopyJobs = new Map();
 const autoCopyQueue = [];
 let autoCopyWorkerRunning = false;
+
+/**
+ * 「暂停同步」的哨兵异常。
+ * 复制单个大会话（产物目录可达 32 万文件）时，外层的「下一个会话」检查点要等整棵
+ * 目录树搬完才轮到 —— 用户点了暂停却要再等十几分钟才生效，等于没暂停。
+ * 所以文件级回调 onFile 里也要查一次，用这个异常把控制流从目录递归里**立即**弹出来，
+ * 由任务的 catch 识别后收尾成 status='paused'，而不是记成一次失败。
+ */
+class AutoCopyPausedError extends Error {
+  constructor() {
+    super('auto-copy paused');
+    this.name = 'AutoCopyPausedError';
+    this.autoCopyPaused = true;
+  }
+}
+
+function isAutoCopyPausedError(error) {
+  return !!(error && error.autoCopyPaused === true);
+}
 const rendererReloadPriorityTokens = new Set();
 let rendererReloadPriorityPromise = null;
 let resolveRendererReloadPriority = null;
@@ -5187,7 +5206,7 @@ function hasPendingAutoCopyTo(uid) {
 
 function pruneAutoCopyJobs() {
   const completed = Array.from(autoCopyJobs.values())
-    .filter((job) => job.status === 'done' || job.status === 'partial' || job.status === 'error')
+    .filter((job) => job.status === 'done' || job.status === 'partial' || job.status === 'error' || job.status === 'paused')
     .sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0));
   while (completed.length > 100) {
     const oldest = completed.shift();
@@ -5257,6 +5276,11 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
     payloadFileTotal: 0,
     payloadFileProcessed: 0,
     error: null,
+    // 暂停：UI 点「暂停同步」置 true，worker 在下一个检查点收尾并置 status='paused'。
+    // 「继续同步」不是恢复这个 job，而是按同样的 source/target 起一个新 job ——
+    // 复制本身是幂等的（已完成的行会被 mapping 判成 skipped），重跑等于「只搬剩下的」。
+    cancelRequested: false,
+    pausedAt: null,
     startedAt: Date.now(),
     updatedAt: Date.now(),
     finishedAt: null,
@@ -5267,9 +5291,31 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
     job.startedAt = Date.now();
     job.updatedAt = job.startedAt;
     const wbHome = PROFILE.dataRoot;
+    // 暂停收尾：置 paused（不是 error），并保留 finishedAt 让 activeAutoCopyJob 在 5 分钟内
+    // 仍能取到它，前端据此显示「已暂停 · 继续同步」。继续 = 按同样的 source/target 起一个新
+    // 任务（复制本身幂等：已完成的行按 mapping 判 skipped），重跑等于只搬剩下的。
+    const finishPaused = () => {
+      job.status = 'paused';
+      job.phase = 'paused';
+      job.cancelRequested = true;
+      job.pausedAt = Date.now();
+      job.finishedAt = job.pausedAt;
+      job.updatedAt = job.pausedAt;
+      job.currentId = null;
+      job.currentLabel = '';
+      job.currentBytes = 0;
+      log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 已暂停：正文 ${job.processed}/${job.total}，产物 ${job.payloadProcessed}/${job.payloadTotal}`);
+      const cleanup = setTimeout(() => autoCopyJobs.delete(id), 30 * 60 * 1000);
+      if (cleanup.unref) cleanup.unref();
+      pruneAutoCopyJobs();
+    };
+    // worker 取到这个任务时若已被标记暂停，直接收尾，不做任何复制。
+    // 「暂停同步」要停的是整条流水线：当前这个停下，后面排队的也不应再跑。
+    if (job.cancelRequested) { finishPaused(); return; }
     // 账号切换响应、CDP 导航和注入事件必须先有机会完成；Node SQLite 与文件复制
     // 的 Promise 可能同步结算，连续微任务会在 macOS 上长期饿死 I/O 事件。
     await yieldAutoCopyToRenderer();
+    if (job.cancelRequested) { finishPaused(); return; }
     // A rapid switch chain may enqueue this job before the previous copy has
     // created the target rows. Re-plan after the queue reaches this job.
     // 先量体积再排序：小会话（无产物/产物很小）优先复制，大会话排到最后。
@@ -5290,6 +5336,9 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
       job.updatedAt = Date.now();
       log(`[sessions-auto-copy] (${index + 1}/${job.total}) 复制 ${job.currentLabel} [${formatByteSize(job.currentBytes)}]`);
       await yieldAutoCopyToRenderer();
+      // 检查点：每个会话开始前查一次暂停。已完成的行已落库，重跑时按 mapping 判 skipped，
+      // 所以这里中断不会留下半截状态。
+      if (job.cancelRequested) { finishPaused(); return; }
       try {
         let result;
         if (src.lineageId) {
@@ -5344,6 +5393,7 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
           });
         }
       } catch (e) {
+        if (isAutoCopyPausedError(e)) { finishPaused(); return; }
         job.failed++;
         log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 会话 ${src.id} 失败: ${e.message}`);
       }
@@ -5373,10 +5423,16 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
       const linkedBytesBase = job.payloadLinkedBytes;
       log(`[sessions-auto-copy] 产物 (${index + 1}/${job.payloadTotal}) ${item.label} [${formatByteSize(item.bytes)} / ${item.files || 0} 文件]`);
       await yieldAutoCopyToRenderer();
+      // 检查点：每个产物目录开始前查一次暂停。
+      if (job.cancelRequested) { finishPaused(); return; }
       try {
         const result = await copySessionWorkspacePayload(wbHome, item.sourceId, item.targetId, {
           // 每处理一个文件回写一次：32 万文件的目录只靠字节量看不出是否还在动
           onFile: (counters) => {
+            // 再查一次暂停：单个产物目录可能有 32 万文件，只靠外层循环的检查点，
+            // 用户点暂停后仍要等整棵树搬完才停得下来。这里抛哨兵异常，把控制流从
+            // 目录递归里立即弹出，交给下面的 catch 收尾成 paused。
+            if (job.cancelRequested) throw new AutoCopyPausedError();
             job.payloadFileProcessed = counters.files;
             job.payloadLinked = linkedBase + counters.linked;
             job.payloadLinkedBytes = linkedBytesBase + counters.linkedBytes;
@@ -5392,6 +5448,8 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
         job.payloadSkippedFiles += result.skipped || 0;
         job.payloadFailedFiles += result.failed || 0;
       } catch (e) {
+        // 暂停是用户主动行为，不是失败：收尾成 paused 而不是记一次 payloadFailed。
+        if (isAutoCopyPausedError(e)) { finishPaused(); return; }
         job.payloadFailed++;
         log(`[sessions-auto-copy] 产物处理失败 ${item.sourceId}: ${e.message}`);
       }
@@ -5443,6 +5501,11 @@ function publicAutoCopyJob(job) {
     id: job.id,
     status: job.status,
     phase: job.phase || 'meta',
+    // 源/目标账号：前端「继续同步」按钮据此按同样的 source/target 起一个新任务。
+    sourceUid: job.sourceUid || '',
+    targetUid: job.targetUid || '',
+    cancelRequested: !!job.cancelRequested,
+    pausedAt: job.pausedAt || null,
     total: job.total,
     processed: job.processed,
     copied: job.copied,
@@ -9462,6 +9525,68 @@ function handleApi(req, res) {
   if (req.method === 'GET' && p === '/api/sessions/auto-copy/active') {
     const job = activeAutoCopyJob();
     return json(res, 200, { ok: true, job: job ? publicAutoCopyJob(job) : null });
+  }
+  // 暂停同步：POST /api/sessions/auto-copy/cancel { jobId? }
+  //   带 jobId：只停那一个；不带：停「当前正在跑 + 队列里排着的」全部 —— 用户点
+  //   「暂停同步」期望的是整条流水线停下，而不是停一个、后面排队的接着跑。
+  //   只置 cancelRequested 标记，实际收尾由 worker 在下一个检查点完成（不在这里改 status，
+  //   避免出现「标记了但还在写盘」的中间态；worker 会在下轮检查点把它置成 paused）。
+  if (req.method === 'POST' && p === '/api/sessions/auto-copy/cancel') {
+    return readBody(req).then((body) => {
+      try {
+        const wanted = String((body && body.jobId) || '').trim();
+        const cancelled = [];
+        if (wanted) {
+          const job = autoCopyJobs.get(wanted);
+          if (!job) return json(res, 404, { ok: false, error: '自动复制任务不存在' });
+          if (job.status === 'running' || job.status === 'queued') {
+            job.cancelRequested = true;
+            job.updatedAt = Date.now();
+            cancelled.push(job.id);
+          }
+        } else {
+          for (const job of autoCopyJobs.values()) {
+            if (job.status === 'running' || job.status === 'queued') {
+              job.cancelRequested = true;
+              job.updatedAt = Date.now();
+              cancelled.push(job.id);
+            }
+          }
+        }
+        const active = activeAutoCopyJob();
+        return json(res, 200, { ok: true, cancelled, job: active ? publicAutoCopyJob(active) : null });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: e.message });
+      }
+    });
+  }
+  // 立即同步：POST /api/sessions/sync-now { targetUid }
+  //   不切号、不刷新页面 —— 以「当前账号」为源，把已开启自动复制的会话同步到 targetUid。
+  //   复用同一个任务队列（startAutoCopyJob），因此与切号触发的复制共享串行语义和进度接口。
+  if (req.method === 'POST' && p === '/api/sessions/sync-now') {
+    return readBody(req).then((body) => {
+      try {
+        const targetUid = String((body && body.targetUid) || '').trim();
+        if (!targetUid) return json(res, 400, { ok: false, error: '缺少目标账号' });
+        const account = listAccounts(DATA_DIR).find((a) => a.uid === targetUid) || null;
+        if (!account) return json(res, 404, { ok: false, error: '目标账号不存在' });
+        const current = currentAccount();
+        const sourceUid = String((body && body.sourceUid) || '').trim() || (current && current.uid) || '';
+        if (!sourceUid) return json(res, 409, { ok: false, error: '当前没有已登录的账号' });
+        if (sourceUid === targetUid) return json(res, 400, { ok: false, error: '源账号与目标账号相同' });
+        // 已在跑 / 排队的同向任务：直接复用它，避免用户连点造成重复排队。
+        for (const job of autoCopyJobs.values()) {
+          if ((job.status === 'running' || job.status === 'queued')
+            && job.sourceUid === sourceUid && job.targetUid === targetUid) {
+            return json(res, 200, { ok: true, reused: true, job: publicAutoCopyJob(job) });
+          }
+        }
+        const job = startAutoCopyJob(sourceUid, targetUid, []);
+        return json(res, 200, { ok: true, reused: false, job: publicAutoCopyJob(job) });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: e.message });
+      }
+    });
   }
   // Stream the completed encrypted archive; clean up even if the download disconnects.
   if (req.method === 'POST' && p === '/api/sessions/export') {
