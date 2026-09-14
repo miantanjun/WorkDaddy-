@@ -377,7 +377,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 const DAEMON_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 直接对齐发布版本号，否则 About 页会显示 1.2.42、且更新检查会误判已是最新。
-const DAEMON_BUILD_ID = 'release-1.2.2-20260914-streaming-session-transfer-local-quitfix-autocopy-progress';
+const DAEMON_BUILD_ID = 'release-1.2.2-20260914-streaming-session-transfer-local-quitfix-autocopy-progress-delacct-idem';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -4290,6 +4290,38 @@ async function importSessionArchives(payload, targetUid, staged = false) {
   return { imported, failed: errors.length, errors: summarizeSessionImportErrors(errors) };
 }
 
+/**
+ * 登记丢失时的兜底认领。
+ *
+ * 幂等判定原本只看 meta 里的两处登记（copies 映射 + lineage 成员），它们都是「uid 维度」的
+ * 元数据；一旦被外部原因破坏（例如删除账号备份时被清、meta 被重建），代码就会把「目标账号
+ * 明明已经有这个会话」误判成「没有副本」，于是新建一份 —— 这正是重复复制的来源。
+ *
+ * 这里提供第三条、不依赖 meta 的依据：insertCopiedSession 会把源会话的 created_at（13 位
+ * 毫秒）原样复制给副本，副本的副本也如此。因此「同一 uid + 同 created_at + 尚未被任何
+ * lineage 认领」是可靠的同源判据。多个候选取 updated_at 最早的那个（最接近原始那份，避免
+ * 认领到后来产生的重复）。
+ *
+ * 正常路径（登记完好）走不到这里；这里只在两处登记都查不到时才生效，属于自愈防线。
+ */
+async function adoptOrphanAutoCopyTarget(src, targetUid) {
+  const created = Number(src && src.created_at || 0);
+  const uid = String(targetUid || '').trim();
+  if (!created || !uid) return null;
+  const rows = await sqliteQuery(
+    'SELECT id FROM sessions WHERE user_id = ? AND created_at = ? AND deleted_at IS NULL ORDER BY updated_at LIMIT 4;',
+    [uid, created]
+  );
+  if (!rows.length) return null;
+  const claimed = new Set(Object.keys(getAutoCopyRules(DATA_DIR, uid).allLineages || {}));
+  const sourceId = String(src && src.id || '');
+  const orphans = rows
+    .map((row) => String(row.id || ''))
+    .filter((id) => id && id !== sourceId && !claimed.has(id));
+  if (!orphans.length) return null;
+  return orphans[0];
+}
+
 async function copySessionRecord(src, targetUid, options = {}) {
   const sourceUid = String(options.sourceUid || src.user_id || '').trim();
   const auto = !!options.auto;
@@ -4357,6 +4389,23 @@ const files = await copySessionFiles(wbHome, src.id, canonicalId, ownerIds, { sk
         return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: canonicalId, failedFiles: files.failed, workspacePending: files.workspacePending };
       }
     }
+  }
+
+  // 兜底：两处登记都查不到时，先看目标账号里是否已存在同源会话（见 adoptOrphanAutoCopyTarget）。
+  // 命中就认领它，而不是再造一份重复会话 —— 修的是「登记被外部清掉后重新复制」这一类问题。
+  const adoptedId = await adoptOrphanAutoCopyTarget(src, targetUid);
+  if (adoptedId) {
+    const files = await copySessionFiles(wbHome, src.id, adoptedId, ownerIds, { skipWorkspaceSessions: auto });
+    if (lineageId) {
+      addAutoCopySessionMember(DATA_DIR, lineageId, targetUid, adoptedId);
+      setAutoCopyMapping(DATA_DIR, lineageId, targetUid, {
+        targetId: adoptedId,
+        status: files.failed ? 'partial' : 'copied',
+        failedFiles: files.failed,
+      });
+    }
+    log(`[sessions-auto-copy] 登记缺失但目标账号已有同源会话，复用 ${String(adoptedId).slice(0, 8)}（源 ${String(src.id).slice(0, 8)}），未新建副本`);
+    return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: adoptedId, failedFiles: files.failed, workspacePending: files.workspacePending };
   }
 
   const newId = crypto.randomUUID();

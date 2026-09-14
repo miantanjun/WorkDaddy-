@@ -1023,29 +1023,22 @@ function removeAutoCopyAccount(dataDir, uid) {
   const meta = readMeta(dataDir);
   const config = ensureAutoCopyMeta(meta);
   const index = config.sessionIndex[sourceUid] || {};
-  const entries = Object.keys(index).map((sessionId) => ({ sessionId, lineageId: index[sessionId] }));
-  let removed = 0;
-  for (const entry of entries) {
-    delete index[entry.sessionId];
-    const lineage = config.sessions[entry.lineageId];
-    if (!lineage) continue;
-    lineage.members = (lineage.members || []).filter((member) => !(member && member.uid === sourceUid && member.id === entry.sessionId));
-    if (!lineage.members.length) {
-      delete config.sessions[entry.lineageId];
-      for (const key of Object.keys(config.copies)) {
-        try {
-          const parts = JSON.parse(key);
-          if (Array.isArray(parts) && parts[0] === entry.lineageId) delete config.copies[key];
-        } catch (_) {}
-      }
-    }
-    removed++;
-  }
+  const entries = Object.keys(index);
+  // 只清「规则」，不清「事实」。
+  //   sessionIndex[uid] = 该账号作为源时、逐会话的自动复制开关 —— 账号删了，规则该清。
+  //   lineage.members / copies = 该账号名下确实存在这个会话的物理副本 —— 删掉账号备份并不会
+  //   让这些会话消失（它们仍在 WorkBuddy 的会话库里）。
+  // 旧实现把两者一起摘掉，于是：当某会话的「原始版本」就在被删账号里时（该账号从未当过复制
+  //   目标，因此根本没有 copies 映射可兜底），重新登录后再触发复制，两处登记都是空 →
+  //   copySessionRecord 判定「没有副本」→ insertCopiedSession 新建一份 = 重复复制。
+  // 实测：原始在被删账号的 2 个 lineage 全部产生重复会话，原始在另一账号的 26 个因 copies
+  //   映射尚存而幸免 —— 与「只有几个会话被重复」的现象完全吻合。
+  for (const sessionId of entries) delete index[sessionId];
   if (entries.length) {
     delete config.sessionIndex[sourceUid];
     writeMeta(dataDir, meta);
   }
-  return removed;
+  return entries.length;
 }
 
 function resolveMappingLineage(config, lineageOrUid, maybeSessionId) {
