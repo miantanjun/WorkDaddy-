@@ -86,12 +86,12 @@ ok(fs.readdirSync(logDir).filter((n) => n.indexOf('账号切换日志') >= 0).le
 ok(logMod.appendReport({ dir: '', at: ts, text: 'x' }).ok === false, 'H8h 没有目录时不抛异常，返回 ok:false');
 
 const trig = logMod.buildTriggerReport({
-  at: ts, fromUid: '1d80c722-dff7', fromNickname: '面瘫君', toUid: '827977d7-77ca', toNickname: '18688296454',
+  at: ts, fromUid: '1d80c722-dff7', fromNickname: '账号甲', toUid: '827977d7-77ca', toNickname: '账号乙',
   modelId: 'claude-sonnet-4-5', taskSource: 'lastUserMessage', taskText: '帮我看看这份合同的付款条款' + '啊'.repeat(100), triedCount: 2,
 });
 ok(trig.indexOf('什么情况') >= 0 && trig.indexOf('怎么处理') >= 0 && trig.indexOf('结果') >= 0 && trig.indexOf('接下来') >= 0,
   'H9a 触发段含四要素（什么情况/怎么处理/结果/接下来）');
-ok(trig.indexOf('面瘫君（1d80c722）') >= 0 && trig.indexOf('18688296454（827977d7）') >= 0, 'H9b 用昵称 + uid 前 8 位，不暴露全 uid');
+ok(trig.indexOf('账号甲（1d80c722）') >= 0 && trig.indexOf('账号乙（827977d7）') >= 0, 'H9b 用昵称 + uid 前 8 位，不暴露全 uid');
 ok(trig.indexOf('1d80c722-dff7') < 0, 'H9c 正文里不出现完整 uid');
 ok(trig.indexOf('自动把账号切回主账号') >= 0, 'H9d 明说「接下来会自动切回主账号」');
 ok(trig.indexOf('试了 2 个账号才成功') >= 0, 'H9e 多次尝试要写出来');

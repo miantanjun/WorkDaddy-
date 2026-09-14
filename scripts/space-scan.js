@@ -67,7 +67,7 @@ const KEYED_BY_REL = new Map(KEYED_TOPS.map((entry) => [entry.rel, entry]));
  *   ③ 其余 `\` 与 `/` 各换一个 `-`；空格、点、中文等一律原样保留。
  *
  * 例：`D:\WorkBuddy date\2026-08-11-17-57-19` → `d-WorkBuddy date-2026-08-11-17-57-19`
- *     `C:\Users\Lyon\WorkBuddy\2026-08-11-14-13-10` → `c-Users-Lyon-WorkBuddy-2026-08-11-14-13-10`
+ *     `C:\Users\<用户>\WorkBuddy\2026-08-11-14-13-10` → `c-Users-<用户>-WorkBuddy-2026-08-11-14-13-10`
  *
  * ⚠️ 早期写成 `replace(/[:\\/]/g, '-')` 是**错的**：会把 `D:\` 变成 `D--`，于是
  * projects/ 下每一个目录都解析不出 cwd（全部落到 resolved:false），空间归属静默失效。
