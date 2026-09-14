@@ -395,6 +395,7 @@ function waitSettled(jobs, ms) {
       'selfhost-1.3.0-20260914-idle-switchback',
       'selfhost-1.3.0-20260914-switch-sync',
       'selfhost-1.3.0-20260914-switch-sync-log',
+      'selfhost-1.3.0-20260914-failover-sync',
     ];
     ok(KNOWN_BUILDS.indexOf(live) >= 0, 'D0 daemon 已加载本阶段（或更晚）的构建', live);
 

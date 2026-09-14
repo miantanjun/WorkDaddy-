@@ -106,7 +106,7 @@ function reset() {
 }
 
 function makePorts(overrides = {}) {
-  const calls = { switched: [], setModel: [], sent: [], notified: [], panel: [], newTask: 0 };
+  const calls = { switched: [], setModel: [], sent: [], notified: [], panel: [], newTask: 0, afterSwitch: [] };
   const ports = {
     calls,
     readBanner: async () => ({ ok: true, hit: false, count: 0, hits: [] }),
@@ -115,6 +115,8 @@ function makePorts(overrides = {}) {
     setModel: async (m) => { calls.setModel.push(m); return { ok: true, model: m, changed: true }; },
     readTaskText: async () => ({ ok: true, text: '请把这段合同的关键条款列出来' }),
     switchAccount: async (acct) => { calls.switched.push(acct.uid); world.current = acct; return { ok: true }; },
+    // 切号完成后的会话同步（daemon 侧真实实现是 autoCopyAfterAccountSwitch，这里只记录调用）
+    afterAccountSwitch: (fromUid, toUid) => { calls.afterSwitch.push([fromUid, toUid]); },
     ensureNewTask: async () => { calls.newTask += 1; return { ok: true }; },
     sendPhrase: async (t) => { calls.sent.push(t); return { ok: true }; },
     guard: async () => {},
@@ -144,6 +146,15 @@ function makePorts(overrides = {}) {
     'T1e 原任务文本被原样重发', p.calls.sent);
   check(p.calls.newTask === 1, 'T1f 先新建任务再发送', p.calls.newTask);
   check(p.calls.switched.length === 1 && p.calls.switched[0] === 'B', 'T1g 只切了一次账号', p.calls.switched);
+  check(p.calls.afterSwitch.length === 1 && p.calls.afterSwitch[0][0] === 'A' && p.calls.afterSwitch[0][1] === 'B',
+    'T1j 切号完成后触发了「切号复制同步会话」（源=原账号 A → 新账号 B）', p.calls.afterSwitch);
+  check(readState() && true, 'T1k 复制调用不影响限流状态登记');
+
+  /* 复制只发起、不等待：即使同步返回一个永远 pending 的 Promise，续跑也必须走完 */
+  reset();
+  p = makePorts({ afterAccountSwitch: () => new Promise(() => {}) });
+  r = await core.runLimitFailoverCore({}, p);
+  check(r.ok === true && r.toUid === 'B', 'T1l 同步任务是「只发起不等待」——挂住也不阻塞限流续跑', { ok: r.ok, to: r.toUid });
   let st = readState();
   check(st.A && st.A.reason === 'detected', 'T1h 源账号被标记限流', st);
   check(!st.B, 'T1i 接管成功的账号不留限流记录', st);
@@ -174,6 +185,8 @@ function makePorts(overrides = {}) {
   r = await core.runLimitFailoverCore({}, p);
   check(r.ok === true && r.toUid === 'C', 'T4a 第一个目标 B 失败后换到 C', { ok: r.ok, toUid: r.toUid });
   check(p.calls.switched.join(',') === 'B,C', 'T4b 切换顺序 B→C', p.calls.switched);
+  check(p.calls.afterSwitch.length === 2 && p.calls.afterSwitch[0].join('→') === 'A→B' && p.calls.afterSwitch[1].join('→') === 'B→C',
+    'T4d 每次真的换了号都触发同步（含中途那次「换了但目标仍限流」）', p.calls.afterSwitch);
   check(p.calls.setModel.length === 2, 'T4c 两次尝试都设了模型', p.calls.setModel);
   st = readState();
   check(st.B && st.B.reason === 'still-limited', 'T4d B 被记为 still-limited', st);

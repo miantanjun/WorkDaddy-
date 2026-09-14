@@ -389,7 +389,7 @@ const DAEMON_VERSION = '1.3.0';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-switch-sync-log';
+const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-failover-sync';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -3450,6 +3450,9 @@ async function runLimitFailoverCore(detail, ports) {
     ports.log('limit-failover:start ' + JSON.stringify({ fromUid: current.uid, modelId, taskSource, textLength: taskText.length, at: new Date(now).toISOString() }));
     const tried = [];
     let lastError = '';
+    // 「刚刚离开的账号」每轮都会变：第 1 轮离开的是最初那个限流账号，第 2 轮离开的是上一轮的候选。
+    // 复制任务的源必须用它 —— 传 current.uid 会让第二轮把「早就不在用的账号」当源。
+    let liveUid = current.uid;
     for (let round = 0; round < 6; round++) {
       const pick = limitFailover.pickFailoverTarget(limitFailoverAccounts(), current.uid, readLimitFailoverState(), Date.now());
       if (!pick || tried.includes(pick.account.uid)) break;
@@ -3459,6 +3462,14 @@ async function runLimitFailoverCore(detail, ports) {
       try {
         await ports.guard();
         await ports.switchAccount(target);
+        // 切号完成后同步会话（与手动切号 / 闲置切回共用同一份实现，daemon 侧注入）。
+        // ⚠️ 只**发起**、不等它跑完：一次复制可能要搬几十万文件、几分钟，等它会把「限流救火」
+        // 本身拖死（救火的意义就是尽快在那个账号上把任务跑起来）。复制在后台排队，进度看会话页。
+        if (typeof ports.afterAccountSwitch === 'function') {
+          try { ports.afterAccountSwitch(liveUid, target.uid); }
+          catch (error) { ports.log('limit-failover:afterAccountSwitch 失败 ' + String((error && error.message) || error)); }
+        }
+        liveUid = target.uid;
         await ports.guard();
         await ports.ensureNewTask();
         if (modelId) {
@@ -4229,6 +4240,7 @@ function startAutomationRun(task, event = null) {
       setModel: setLiveModel,
       readTaskText: readLastUserTaskText,
       switchAccount: (account) => automationSwitchAccount(account),
+      afterAccountSwitch: (fromUid, toUid) => autoCopyAfterAccountSwitch(fromUid, toUid, 'limit-failover'),
       ensureNewTask: () => ensureAutomationNewTask({ guard: async () => { if (isCancelled()) throw new Error('任务已停止'); } }),
       sendPhrase: (text) => acSendPhrase(text, { requireEmpty: true, isCancelled }),
       guard: async () => { if (isCancelled()) throw new Error('任务已停止'); },
