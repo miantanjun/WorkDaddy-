@@ -884,6 +884,10 @@ async function executeTask(taskInput, options = {}) {
         prompt: resolveValue(step.prompt, ctx),
         modelId: resolveValue(step.modelId, ctx),
         verifyMs: step.verifyMs,
+        // 等副本同步的上限（秒）。默认 120、下限 60 —— 用户要求至少等一分钟，超时才降级为新建任务
+        syncWaitMs: resolveValue(step.syncWaitSeconds, ctx) !== undefined && resolveValue(step.syncWaitSeconds, ctx) !== null
+          ? Number(resolveValue(step.syncWaitSeconds, ctx)) * 1000
+          : undefined,
       };
       const result = await options.limitFailover(detail);
       ctx.failover = result;

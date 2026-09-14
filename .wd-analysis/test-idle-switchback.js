@@ -353,9 +353,10 @@ ok(src.indexOf("require('./idle-switchback.js')") >= 0, 'J11a daemon 已加载 i
 ok(/startIdleSwitchbackTicker\(\);/.test(src), 'J11b 启动流程里调了 startIdleSwitchbackTicker');
 ok(src.indexOf("p === '/api/idle-switchback'") >= 0, 'J11c 有 /api/idle-switchback 端点');
 ok(/patch\.minutes = minutes;/.test(src) && /MIN_MINUTES/.test(src), 'J11d 端点校验阈值范围');
-// 别钉死具体后缀（每落地一个阶段都要回来改一次）：只要求「本轮之后的自建构建」。
+// 别钉死具体后缀（每落地一个阶段都要回来改一次）：只要求「本轮之后的构建」。
+// 命名约定 2026-09-14 起回归上游的 release-x.y.z-…（打包脚本校验这个格式）。
 const daemonBuildId = (src.match(/const DAEMON_BUILD_ID = '([^']+)'/) || [])[1] || '';
-ok(/^selfhost-1\.3\.0-20260914-/.test(daemonBuildId) && daemonBuildId !== 'selfhost-1.3.0-20260914-space-scan-slug-fix',
+ok(/^(selfhost|release)-1\.3\.0-20260914-/.test(daemonBuildId) && daemonBuildId.indexOf('space-scan-slug-fix') < 0,
   'J11e DAEMON_BUILD_ID 已提升', daemonBuildId);
 
 /* ==================================================================== */

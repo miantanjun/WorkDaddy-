@@ -132,16 +132,41 @@ function autoCopyLine(outcome, fromLabel) {
  * 触发段（交接成功）。
  * @param {object} t {at, fromUid, fromNickname, toUid, toNickname, modelId, taskSource, taskText, triedCount}
  */
+/** 降级原因 → 人话（副本续跑没走成时，日志里要说明白为什么） */
+const SURFACE_REASONS = {
+  'no-source-session': '读不到被限流的那条会话',
+  'no-lineage': '那条会话没有开启「自动复制」',
+  'no-target': '没找到可接管的账号',
+  'same-account': '接管的就是原账号',
+  'sync-timeout': '等会话同步超时了',
+  'copy-settled-without-copy': '同步任务结束了，但没等到这份会话的副本',
+  'open-failed': '没能在界面上打开那份会话副本',
+  'cdp-offline': '界面暂时连不上',
+  'prepare-error': '准备过程中出错',
+  'bad-surface': '准备过程中出错',
+  'unavailable': '副本还没就绪',
+};
+
+/** 触发段（交接成功）。surface = 副本续跑的结果（existing=在原会话里继续 / new=降级新建任务） */
 function buildTriggerReport(t) {
   const d = t || {};
   const out = [RULE, '【' + formatClock(d.at) + '】模型限流 → 自动换账号续跑', ''];
+  const surface = d.surface && typeof d.surface === 'object' ? d.surface : null;
+  const existing = !!surface && surface.mode === 'existing';
   out.push(line('什么情况', '账号「' + accountLabel(d.fromUid, d.fromNickname) + '」被限流了 —— WorkBuddy 在输入框上方弹出了限流提示。'));
   out.push(line('怎么处理', '自动切到账号「' + accountLabel(d.toUid, d.toNickname) + '」' +
-    (d.modelId ? '，模型保持不变（' + d.modelId + '）' : '（模型沿用切换前的）') +
-    '，把上一条任务原样重发了一遍。'));
+    (d.modelId ? '，模型保持不变（' + d.modelId + '）' : '（模型沿用切换前的）') + '。'));
   const brief = snippet(d.taskText, SNIPPET_CHARS);
   if (brief) {
-    out.push(line('重发的内容', (d.taskSource === 'prompt' ? '任务变量里指定的内容 —— ' : '上一条消息 —— ') + '“' + brief + '”'));
+    out.push(line('任务内容', (d.taskSource === 'prompt' ? '任务变量里指定的内容 —— ' : '上一条消息 —— ') + '“' + brief + '”'));
+  }
+  if (existing) {
+    out.push(line('续跑方式', '先等会话同步过去，再在原会话的副本里继续（等了 ' +
+      formatDuration(Number(surface.waitedMs) || 0) + '）—— 上下文都在，没有开新任务。'));
+  } else {
+    const reason = String(surface && surface.reason || '');
+    out.push(line('续跑方式', '新建了一个任务把内容重发一遍（原会话的副本没就绪：' +
+      (SURFACE_REASONS[reason] || reason || '未知') + '）—— 上下文带不过去，这条任务的名字会和原来那条不一样。'));
   }
   const tried = Number(d.triedCount) || 1;
   out.push(line('结果', '新账号已经接手，任务在那边继续跑' + (tried > 1 ? '（试了 ' + tried + ' 个账号才成功）' : '') + '。'));

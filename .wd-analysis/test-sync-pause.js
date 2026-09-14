@@ -386,16 +386,9 @@ function waitSettled(jobs, ms) {
     // 因此用**名单**：本阶段及其之后（含本阶段改动的）自建构建都算通过。每落地一个新阶段，
     // 把新 buildId 追加进来即可，否则测试会在新阶段误报 D0 失败。
     const KNOWN_BUILDS = [
-      'selfhost-1.3.0-20260914-sync-pause-resume',
-      'selfhost-1.3.0-20260914-cascade-delete',
-      'selfhost-1.3.0-20260914-space-scan-backend',
-      'selfhost-1.3.0-20260914-space-scan-nested-fix',
-      'selfhost-1.3.0-20260914-space-scan-slug-fix',
-      'selfhost-1.3.0-20260914-limit-switchback',
-      'selfhost-1.3.0-20260914-idle-switchback',
-      'selfhost-1.3.0-20260914-switch-sync',
-      'selfhost-1.3.0-20260914-switch-sync-log',
-      'selfhost-1.3.0-20260914-failover-sync',
+      // 2026-09-14 起改回上游命名约定 release-x.y.z-…（打包脚本会校验这个格式）；
+      // 旧的 selfhost-1.3.0-… 系列已全部并入 release-1.3.0-20260914-failover-continue
+      'release-1.3.0-20260914-failover-continue',
     ];
     ok(KNOWN_BUILDS.indexOf(live) >= 0, 'D0 daemon 已加载本阶段（或更晚）的构建', live);
 

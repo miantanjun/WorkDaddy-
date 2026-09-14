@@ -106,7 +106,7 @@ function reset() {
 }
 
 function makePorts(overrides = {}) {
-  const calls = { switched: [], setModel: [], sent: [], notified: [], panel: [], newTask: 0, afterSwitch: [] };
+  const calls = { switched: [], setModel: [], sent: [], notified: [], panel: [], newTask: 0, afterSwitch: [], prepare: [] };
   const ports = {
     calls,
     readBanner: async () => ({ ok: true, hit: false, count: 0, hits: [] }),
@@ -115,6 +115,10 @@ function makePorts(overrides = {}) {
     setModel: async (m) => { calls.setModel.push(m); return { ok: true, model: m, changed: true }; },
     readTaskText: async () => ({ ok: true, text: '请把这段合同的关键条款列出来' }),
     switchAccount: async (acct) => { calls.switched.push(acct.uid); world.current = acct; return { ok: true }; },
+    // 切号完成后的会话同步（daemon 侧真实实现是 autoCopyAfterAccountSwitch，这里只记录调用）
+    afterAccountSwitch: (fromUid, toUid) => { calls.afterSwitch.push([fromUid, toUid]); return null; },
+    // 副本续跑准备：默认走降级（新建任务）；测试里可以改成「副本就绪」
+    prepareContinuation: async (ctx) => { calls.prepare.push(ctx); return { mode: 'new', reason: 'stub' }; },
     // 切号完成后的会话同步（daemon 侧真实实现是 autoCopyAfterAccountSwitch，这里只记录调用）
     afterAccountSwitch: (fromUid, toUid) => { calls.afterSwitch.push([fromUid, toUid]); },
     ensureNewTask: async () => { calls.newTask += 1; return { ok: true }; },
@@ -148,6 +152,12 @@ function makePorts(overrides = {}) {
   check(p.calls.switched.length === 1 && p.calls.switched[0] === 'B', 'T1g 只切了一次账号', p.calls.switched);
   check(p.calls.afterSwitch.length === 1 && p.calls.afterSwitch[0][0] === 'A' && p.calls.afterSwitch[0][1] === 'B',
     'T1j 切号完成后触发了「切号复制同步会话」（源=原账号 A → 新账号 B）', p.calls.afterSwitch);
+  check(p.calls.prepare.length === 1 && p.calls.prepare[0].originUid === 'A' && p.calls.prepare[0].toUid === 'B' &&
+    p.calls.prepare[0].sourceSessionId === 'conv-1',
+    'T1m 副本续跑准备拿到了「源会话归属账号（固定为最初被限流的那个）」与接管账号', p.calls.prepare);
+  check(r.surface && r.surface.mode === 'new', 'T1n 默认桩走降级：新建任务重发', r.surface);
+  check(p.calls.afterSwitch.length === 1 && p.calls.afterSwitch[0][0] === 'A' && p.calls.afterSwitch[0][1] === 'B',
+    'T1j 切号完成后触发了「切号复制同步会话」（源=原账号 A → 新账号 B）', p.calls.afterSwitch);
   check(readState() && true, 'T1k 复制调用不影响限流状态登记');
 
   /* 复制只发起、不等待：即使同步返回一个永远 pending 的 Promise，续跑也必须走完 */
@@ -158,6 +168,20 @@ function makePorts(overrides = {}) {
   let st = readState();
   check(st.A && st.A.reason === 'detected', 'T1h 源账号被标记限流', st);
   check(!st.B, 'T1i 接管成功的账号不留限流记录', st);
+
+  /* ---------- T1b2 副本就绪：在原会话的副本里继续（不新建任务） ---------- */
+  console.log('T11 副本续跑（不新建任务）');
+  reset();
+  let lastPrepare = null;
+  p = makePorts({ prepareContinuation: async (ctx) => { lastPrepare = ctx; return { mode: 'existing', conversationId: 'copy-1', waitedMs: 42000 }; } });
+  r = await core.runLimitFailoverCore({ syncWaitMs: 90000 }, p);
+  check(r.ok === true && r.surface && r.surface.mode === 'existing', 'T11a 副本就绪 → 在原会话里继续', r.surface);
+  check(p.calls.newTask === 0, 'T11b 不新建任务（这正是用户要的行为）', p.calls.newTask);
+  check(p.calls.sent.length === 1 && p.calls.sent[0] === '请把这段合同的关键条款列出来', 'T11c 任务文本仍会发到那份副本里', p.calls.sent);
+  check(p.calls.setModel.length === 1, 'T11d 模型仍保持不变', p.calls.setModel);
+  check(p.calls.notified.some((n) => (n[1] || '').indexOf('原会话') >= 0), 'T11e 通知里写明是「原会话继续」', p.calls.notified);
+  check(lastPrepare && lastPrepare.syncWaitMs === 90000, 'T11f 步骤参数 syncWaitSeconds 会透传成毫秒上限', lastPrepare);
+  check(r.surface.waitedMs === 42000, 'T11g 等待时长记录在返回值里', r.surface);
 
   /* ---------- T2 modelId 由任务变量给出时优先 ---------- */
   console.log('T2 变量指定模型优先');

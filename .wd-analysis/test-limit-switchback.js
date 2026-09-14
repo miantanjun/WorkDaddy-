@@ -474,10 +474,10 @@ clearLogs(); clockOffset = 0;
   ok(src.indexOf("p === '/api/limit-failover/switchback'") >= 0, 'W16k 只读状态端点 /api/limit-failover/switchback 在位');
   ok(/switchBack: \{[\s\S]{0,400}?logDir: limitFailoverDesktopLogDir\(\)/.test(src), 'W16l /api/limit-failover/status 透出切回状态与日志路径');
   ok(src.indexOf("require('./account-switch-log.js')") >= 0, 'W16m daemon 已加载日志模块');
-  // 别钉死具体后缀：每落地一个阶段都要回来改一次（§6 里 D0 那条教训同样适用）。
-  // 只要求「是本轮之后的自建构建」——即前缀对、且不是引入本功能之前的那个 buildId。
+  // 别钉死具体后缀（每落地一个阶段都要回来改一次）：只要求「本轮之后的自建构建」。
+  // 命名约定 2026-09-14 起回归上游的 release-x.y.z-…（打包脚本校验这个格式），selfhost- 系列已弃用。
   const buildId = (src.match(/const DAEMON_BUILD_ID = '([^']+)'/) || [])[1] || '';
-  ok(/^selfhost-1\.3\.0-20260914-/.test(buildId) && buildId !== 'selfhost-1.3.0-20260914-space-scan-slug-fix',
+  ok(/^(selfhost|release)-1\.3\.0-20260914-/.test(buildId) && buildId.indexOf('space-scan-slug-fix') < 0,
     'W16n DAEMON_BUILD_ID 已提升（不提升改了也不生效）', buildId);
 }
 

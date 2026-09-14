@@ -389,7 +389,7 @@ const DAEMON_VERSION = '1.3.0';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-failover-sync';
+const DAEMON_BUILD_ID = 'release-1.3.0-20260914-failover-continue';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -3430,6 +3430,8 @@ async function runLimitFailoverCore(detail, ports) {
 
     const modelInfo = await ports.readModel().catch(() => null);
     const modelId = String(d.modelId || '').trim() || String((modelInfo && modelInfo.model) || '').trim();
+    // 被限流的那个会话：副本续跑要以它为源（同步过去之后在它的副本里继续）
+    const sourceSessionId = String((modelInfo && modelInfo.conversationId) || '').trim();
     let taskText = String(d.prompt || '').trim();
     let taskSource = 'prompt';
     if (!taskText) {
@@ -3463,15 +3465,40 @@ async function runLimitFailoverCore(detail, ports) {
         await ports.guard();
         await ports.switchAccount(target);
         // 切号完成后同步会话（与手动切号 / 闲置切回共用同一份实现，daemon 侧注入）。
-        // ⚠️ 只**发起**、不等它跑完：一次复制可能要搬几十万文件、几分钟，等它会把「限流救火」
-        // 本身拖死（救火的意义就是尽快在那个账号上把任务跑起来）。复制在后台排队，进度看会话页。
+        // ⚠️ 这里只**发起**：等不等、等多久由下面的 prepareContinuation 决定
+        // （它等的是「目标账号里出现这份副本」，不是整个复制任务跑完）。
+        let copyJob = null;
         if (typeof ports.afterAccountSwitch === 'function') {
-          try { ports.afterAccountSwitch(liveUid, target.uid); }
+          try { copyJob = ports.afterAccountSwitch(liveUid, target.uid); }
           catch (error) { ports.log('limit-failover:afterAccountSwitch 失败 ' + String((error && error.message) || error)); }
         }
         liveUid = target.uid;
+
+        // 续跑落点：**优先「等同步完成 → 打开原会话的副本、在原会话里继续」**；
+        // 任何一步不满足（该会话没开自动复制 / 等待超时 / 打不开副本）才降级为「新建任务重发」。
+        let surface = { mode: 'new', reason: 'unavailable' };
+        if (typeof ports.prepareContinuation === 'function') {
+          try {
+            surface = (await ports.prepareContinuation({
+              originUid: current.uid,   // 最初被限流的账号：源会话的归属，**全程固定**（多轮换号也不变）
+              toUid: target.uid,        // 接管账号：副本要在它那边出现
+              copyJob,
+              sourceSessionId,
+              syncWaitMs: d.syncWaitMs,
+            })) || surface;
+            if (!surface || (surface.mode !== 'existing' && surface.mode !== 'new')) {
+              surface = { mode: 'new', reason: 'bad-surface' };
+            }
+          } catch (error) {
+            ports.log('limit-failover:prepareContinuation 失败 ' + String((error && error.message) || error));
+            surface = { mode: 'new', reason: 'prepare-error' };
+          }
+        }
+        ports.log('limit-failover:surface ' + JSON.stringify({ mode: surface.mode, reason: surface.reason || '', conversationId: surface.conversationId || '', waitedMs: surface.waitedMs || 0 }));
         await ports.guard();
-        await ports.ensureNewTask();
+        if (surface.mode !== 'existing') {
+          await ports.ensureNewTask();
+        }
         if (modelId) {
           const setResult = await ports.setModel(modelId);
           if (!setResult || setResult.ok !== true) {
@@ -3489,9 +3516,11 @@ async function runLimitFailoverCore(detail, ports) {
         }
         state = limitFailover.clearAccountBlocked(readLimitFailoverState(), target.uid);
         writeLimitFailoverState(state);
-        await ports.notify('success', '已在账号 ' + (target.nickname || target.uid) + ' 上继续执行任务' + (modelId ? '（模型 ' + modelId + '）' : ''));
-        ports.log('limit-failover:done ' + JSON.stringify({ toUid: target.uid, modelId }));
-        return { ok: true, fromUid: current.uid, toUid: target.uid, toNickname: target.nickname || '', modelId, modelSource: modelInfo && modelInfo.model ? 'live' : 'none', taskSource, tried, verdict };
+        await ports.notify('success', (surface.mode === 'existing'
+          ? '已在账号 ' + (target.nickname || target.uid) + ' 的原会话里继续任务'
+          : '已在账号 ' + (target.nickname || target.uid) + ' 上继续执行任务') + (modelId ? '（模型 ' + modelId + '）' : ''));
+        ports.log('limit-failover:done ' + JSON.stringify({ toUid: target.uid, modelId, surface: surface.mode, conversationId: surface.conversationId || '' }));
+        return { ok: true, fromUid: current.uid, toUid: target.uid, toNickname: target.nickname || '', modelId, modelSource: modelInfo && modelInfo.model ? 'live' : 'none', taskSource, tried, verdict, surface };
       } catch (error) {
         lastError = String((error && error.message) || error);
         ports.log('limit-failover:target-failed ' + JSON.stringify({ uid: target.uid, error: lastError }));
@@ -3833,6 +3862,7 @@ function handleLimitFailoverOutcome(result, context) {
       taskSource: result.taskSource,
       taskText: String(ctx.taskText || ''),
       triedCount: Array.isArray(result.tried) ? result.tried.length : 1,
+      surface: result.surface || null,
     }), at);
     scheduleLimitFailoverSwitchBack(result, { at, taskText: String(ctx.taskText || ''), fromNickname });
     return result;
@@ -4241,6 +4271,7 @@ function startAutomationRun(task, event = null) {
       readTaskText: readLastUserTaskText,
       switchAccount: (account) => automationSwitchAccount(account),
       afterAccountSwitch: (fromUid, toUid) => autoCopyAfterAccountSwitch(fromUid, toUid, 'limit-failover'),
+      prepareContinuation: (ctx) => prepareFailoverContinuation(ctx),
       ensureNewTask: () => ensureAutomationNewTask({ guard: async () => { if (isCancelled()) throw new Error('任务已停止'); } }),
       sendPhrase: (text) => acSendPhrase(text, { requireEmpty: true, isCancelled }),
       guard: async () => { if (isCancelled()) throw new Error('任务已停止'); },
@@ -5860,6 +5891,125 @@ function resolveSyncNowSources(accountUids, targetUid, explicitSource) {
   }
   const sources = all.filter((uid) => uid !== target);
   return { sources, explicit: false, error: sources.length ? '' : '除目标账号外没有其它账号可以作为同步源' };
+}
+
+/* ---------------- 限流切号后的「副本续跑」 ---------------- */
+//
+// 期望行为（2026-09-14）：切号后**先等会话同步完成，再在原会话的副本里继续**，而不是
+// 新建一个任务把提示词重发一遍（那样会丢掉原会话的全部上下文，任务名也会变得对不上）。
+//
+// 等什么：等「目标账号里出现这份会话的副本」—— 判据是 lineage 成员登记里有目标 uid，
+// 且该副本的内容文件已落盘（sessionContentMtime > 0）。**不要求整个复制任务跑完**：
+// 自动复制任务的产物搬运（phase=payload）动辄几分钟甚至几十万文件，会话正文（projects jsonl）
+// 在第一阶段就搬完了，等正文就够，产物让它继续在后台搬。
+//
+// 上限：可配（步骤参数 syncWaitSeconds，秒），默认 120 秒、**下限 60 秒**（用户要求至少等一分钟）。
+// 超时/任何一步不满足 → 降级为「新建任务重发」（旧行为），并在日志里写明降级原因。
+
+const LIMIT_FAILOVER_SYNC_WAIT_MS_DEFAULT = 120000;
+const LIMIT_FAILOVER_SYNC_WAIT_MS_MIN = 60000;
+
+function limitFailoverSyncWaitMs(requested) {
+  const n = Number(requested);
+  if (!Number.isFinite(n) || n <= 0) return LIMIT_FAILOVER_SYNC_WAIT_MS_DEFAULT;
+  // 单位是秒（步骤参数），下限 60 秒 = 用户要求的「至少等一分钟」
+  return Math.max(LIMIT_FAILOVER_SYNC_WAIT_MS_MIN, Math.round(n * 1000));
+}
+
+/** 打开指定会话（按 id 精确定位侧栏行 → 点击 → 轮询确认已选中）。虚拟列表要滚动扫描。 */
+async function openConversationById(sessionId, timeoutMs) {
+  const id = String(sessionId || '').trim();
+  if (!id || !cdp.connected) return false;
+  const deadline = Date.now() + (Number(timeoutMs) || 15000);
+  let scrollTop = 0;
+  while (Date.now() < deadline) {
+    const expr =
+      '(function(){try{' +
+      'var id=' + JSON.stringify(id) + ';' +
+      'var list=document.querySelector(".conversation-list");' +
+      'if(!list)return {ok:false,reason:"no-list"};' +
+      'var hit=document.querySelector("[data-conversation-id=\\""+id+"\\"]");' +
+      'if(!hit){' +
+      '  var headers=list.querySelectorAll(".collapsible-section-header");' +
+      '  for(var k=0;k<headers.length;k++){if((headers[k].className||"").indexOf("expanded")===-1)headers[k].click();}' +
+      '  var c=document.querySelector(".conversation-list-content");' +
+      '  if(c)c.scrollTop=' + String(scrollTop) + ';' +
+      '  return {ok:true,found:false};' +
+      '}' +
+      'var row=hit;' +
+      'for(var d=0;d<8&&row&&row.parentElement;d++){var rc=row.className||"";if(rc.indexOf("conversation-item")!==-1||rc.indexOf("_card_")!==-1)break;row=row.parentElement;}' +
+      'var card=(row&&row!==list&&(row.className||"").indexOf("conversation-item")!==-1)?row:(hit.querySelector(".conversation-item")||hit);' +
+      'card.click();' +
+      'return {ok:true,found:true};' +
+      '}catch(e){return {ok:false,reason:String(e&&e.message||e)}}})()';
+    const res = await runCdpExpression(expr, { awaitPromise: false }).catch(() => null);
+    if (res && res.found) {
+      // 点了之后等控制器真的切到目标会话（点错/没点上都能被这里发现）
+      const until = Date.now() + 8000;
+      while (Date.now() < until) {
+        await sleep(400);
+        const live = await readLiveModel().catch(() => null);
+        if (live && live.ok && String(live.conversationId || '') === id) return true;
+      }
+    }
+    scrollTop += 480;
+    if (scrollTop > 40000) break;
+    await sleep(400);
+  }
+  return false;
+}
+
+/**
+ * 限流切号后的续跑准备：等副本出现 → 打开它。
+ * 返回 { mode:'existing', conversationId, waitedMs } 或 { mode:'new', reason }（降级）。
+ * **任何异常都收敛成降级**，绝不往外抛 —— 抛出去会被当成「目标账号失败」而错误拉黑。
+ */
+async function prepareFailoverContinuation(ctx) {
+  const c = ctx && typeof ctx === 'object' ? ctx : {};
+  const originUid = String(c.originUid || '');
+  const toUid = String(c.toUid || '');
+  const sourceSessionId = String(c.sourceSessionId || '');
+  const capMs = limitFailoverSyncWaitMs(c.syncWaitMs);
+  const degrade = (reason) => ({ mode: 'new', reason });
+  try {
+    if (!cdp.connected) return degrade('cdp-offline');
+    if (!sourceSessionId) return degrade('no-source-session');
+    if (!toUid) return degrade('no-target');
+    if (toUid === originUid) return degrade('same-account');
+    // 血缘归属固定在「最初被限流的账号」上：源会话在它的 sessionIndex 里登记。
+    // 多轮换号（B→C）时也不能换成中间账号 —— 那边的副本 id 是另一串。
+    const lineageId = getAutoCopyRules(DATA_DIR, originUid).allLineages[sourceSessionId];
+    if (!lineageId) return degrade('no-lineage');
+
+    // ① 等目标账号里出现这份副本（成员登记 + 内容文件落盘）
+    const startedAt = Date.now();
+    let targetSessionId = '';
+    let jobSettled = false;
+    while (true) {
+      const members = getAutoCopySessionMemberRecords(DATA_DIR, lineageId);
+      const hit = members.find((m) => String(m && m.uid || '') === toUid);
+      if (hit && hit.id && sessionContentMtime(PROFILE.dataRoot, hit.id) > 0) {
+        targetSessionId = String(hit.id);
+        break;
+      }
+      const jobStatus = c.copyJob ? String(c.copyJob.status || '') : '';
+      jobSettled = ['done', 'partial', 'failed', 'paused'].indexOf(jobStatus) >= 0;
+      const waitedMs = Date.now() - startedAt;
+      if (jobSettled || waitedMs >= capMs) break;
+      await sleep(Math.min(2000, Math.max(250, capMs - waitedMs)));
+    }
+    if (!targetSessionId) {
+      return degrade(jobSettled ? 'copy-settled-without-copy' : 'sync-timeout');
+    }
+
+    // ② 打开副本会话（切号刚 reload 过页面，侧栏需要滚动才能找到目标行）
+    const opened = await openConversationById(targetSessionId, 15000);
+    if (!opened) return degrade('open-failed');
+    return { mode: 'existing', conversationId: targetSessionId, waitedMs: Date.now() - startedAt, lineageId };
+  } catch (error) {
+    log('[limit-failover] 副本续跑准备失败: ' + String((error && error.message) || error));
+    return degrade('prepare-error');
+  }
 }
 
 function startAutoCopyJob(sourceUid, targetUid, plan) {
