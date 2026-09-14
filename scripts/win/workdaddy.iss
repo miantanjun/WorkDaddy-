@@ -783,7 +783,9 @@ var
   Description: TNewStaticText;
   ContinueButton, CancelButton: TNewButton;
 begin
-  Dialog := CreateCustomForm();
+  // CreateCustomForm 是 Inno 内置支持函数，签名固定 4 参（宽/高/可缩放/双击缩放）——
+  // 空参调用会在编译期报「Invalid number of parameters」（列 31）。尺寸与下面的 ClientWidth/ClientHeight 一致。
+  Dialog := CreateCustomForm(ScaleX(500), ScaleY(265), False, False);
   try
     Dialog.Caption := '管理员会话兼容安装';
     Dialog.ClientWidth := ScaleX(500);
