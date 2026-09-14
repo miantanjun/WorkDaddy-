@@ -822,6 +822,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     "会话输入框非空，未覆盖草稿、未发送": "The composer contains a draft. Nothing was overwritten or sent.",
     '页面就绪': 'Page ready', '删除选中的': 'Delete selected', '删除该自动化任务？': 'Delete this automation task?', '删除选中的自动化任务？': 'Delete selected automation tasks?', '删除后无法恢复。': 'This cannot be undone.', '清除': 'Clear', '清除日志': 'Clear logs', '清除运行日志？': 'Clear run logs?', '仅清除已结束的运行记录。': 'Only completed run records will be cleared.', '清除日志失败': 'Failed to clear logs', '任务已启用': 'Task enabled', '任务已停用': 'Task disabled', '发送中': 'Sending',
     '账号': 'Accounts', '主题': 'Theme', '会话': 'Sessions', '模型': 'Models', '增强': 'Enhance', '自动化': 'Automation', '电脑': 'Computer', '关于': 'About', '设置': 'Settings',
+    // 空间占用页（只读）。长句说明有意不译：与其它页一样，翻译只覆盖短标签，
+    // 避免整段中文被拆成半英半中。新增文案时把短标签补在这里即可。
+    '空间占用': 'Storage usage', '重新扫描': 'Rescan', '开始扫描': 'Start scan', '中断扫描': 'Cancel scan', '正在中断…': 'Cancelling…',
+    '实际占用（去重后）': 'On disk (deduped)', '文件数': 'Files', '目录数': 'Folders', '去重前（含重复）': 'Before dedupe',
+    '实际占用': 'On disk', '空间（工作目录）': 'Workspaces (working folders)', '其它占用（不属于任何账号或空间）': 'Other data (no account or workspace)',
+    '未归属': 'Unattributed', '其余空间': 'Other workspaces', '其余共享项': 'Other shared items',
+    '正准备扫描…': 'Preparing…', '准备扫描…': 'Preparing…', '正在启动扫描…': 'Starting…', '正在扫描空间占用…': 'Scanning storage usage…',
+    '扫描完成': 'Scan complete', '扫描已中断': 'Scan cancelled', '扫描失败': 'Scan failed', '无法启动扫描': 'Could not start the scan',
+    '读不到扫描进度': 'Cannot read scan progress', '还没有扫描结果。': 'No scan result yet.', '正在读取扫描结果…': 'Loading scan result…',
+    '认不出账号的会话数据': 'Session data with no known account', '会话记录已被删或不属于任何已保存账号': 'Its session was deleted, or belongs to no saved account',
     '导出': 'Export', '导入': 'Import', '删除': 'Delete', '编辑': 'Edit', '保存': 'Save', '内置': 'Built-in', '取消': 'Cancel', '确定': 'Confirm', '确认': 'Confirm', '复制': 'Copy', '切换': 'Switch', '启用': 'Enable', '停用': 'Disable', '停止': 'Stop', '立即运行': 'Run now', '新建任务': 'New task', '刷新': 'Refresh', '步骤 JSON': 'Steps JSON', '任务说明': 'Task description', '任务名称': 'Task name', '调度': 'Schedule', '手动运行': 'Manual', '手动': 'Manual', '每小时': 'Hourly', '每天': 'Daily', '选择任务': 'Select tasks', '查看接口': 'View capabilities', '拾取元素': 'Pick element', '复制 XPath': 'Copy XPath', '运行中': 'Running', '已成功': 'Succeeded', '失败': 'Failed', '未运行': 'Not run', '页面加载完成': 'Page loaded', '账号切换完成': 'Account switched', '新自动化任务': 'New automation task', '任务已保存': 'Task saved', '任务已开始运行': 'Task started', '步骤 JSON 格式无效': 'Invalid steps JSON', '步骤 JSON 必须是数组': 'Steps JSON must be an array', '查看接口说明': 'View interface docs', '自动化接口协议': 'Automation interface protocol', '复制全部': 'Copy all', '接口协议已复制': 'Interface protocol copied', '暂无自动化任务，点击“新建任务”开始。': 'No automation tasks yet. Click “New task” to start.', '编辑任务': 'Edit task', '触发方式': 'Trigger', '插入点击步骤': 'Insert click step', 'XPath 已复制': 'XPath copied', '点击步骤已插入': 'Click step inserted', '请先拾取元素': 'Pick an element first', '加载自动化失败': 'Failed to load automations', '读取接口失败': 'Failed to read interfaces', '批量操作失败': 'Batch operation failed', '删除失败': 'Delete failed', '确认删除该任务？': 'Delete this task?', '执行': 'Apply', '已拾取': 'Picked', '运行失败': 'Run failed', '（副本）': ' (copy)', '查看提示词': 'View prompt', '交给 WorkBuddy 创建': 'Ask WorkBuddy to create', '正在打开新任务…': 'Opening a new task…', '已创建新会话，WorkBuddy 完成后任务会自动出现': 'New session created. The task will appear after WorkBuddy finishes.', 'WorkBuddy 创建失败': 'WorkBuddy creation failed', '加载示例失败': 'Failed to load examples', '暂无示例': 'No examples available', '运行日志': 'Run logs', '暂无运行日志': 'No run logs yet', '开始时间': 'Started', '结束时间': 'Finished', '捕获错误': 'Caught error', '暂无执行日志': 'No execution log entries', '执行日志': 'Execution log', '尚未结束': 'Still running',
     '暂存提示词': 'Stash prompt', '暂存': 'Stashed', '引用文本': 'Quote text', '快捷短语': 'Quick phrases', '点击后发送': 'Send on click', '编辑 →': 'Edit →', '新增': 'Add', '批量操作': 'Batch actions', '批量管理': 'Batch manage', '全选': 'Select all', '取消全选': 'Deselect all', '已选 0': 'Selected 0',
     '账号汇总': 'Account summary', '账号数': 'Accounts', '总积分': 'Total credits', '手机': 'Phone', '有效期至': 'Expires', '当前使用中': 'Currently active', '隐藏敏感信息': 'Mask sensitive info', '显示明文': 'Show plaintext', '登录新账号': 'Log in a new account', '没有可导出的账号备份': 'No account backups to export', '还没有备份账号。打开/登录一次 WorkBuddy 后会自动备份，稍后再来查看。': 'No account backups yet. Open or log in to WorkBuddy once and check again later.',
@@ -2223,6 +2233,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       '<button class="wbs-tab active" type="button" data-tab="account"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg><span>账号</span></button>',
       '<button class="wbs-tab" type="button" data-tab="theme"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 10 10c0-1.5-1-2-2-2h-3a2 2 0 0 1-2-2c0-1.5 1-2 1-2h2c0-3-2-4-6-4z"/><circle cx="13.5" cy="6.5" r="1"/><circle cx="17.5" cy="10.5" r="1"/><circle cx="8.5" cy="7.5" r="1"/><circle cx="6.5" cy="12.5" r="1"/></svg><span>主题</span></button>',
       '<button class="wbs-tab" type="button" data-tab="sessions"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span>会话</span></button>',
+      '<button class="wbs-tab" type="button" data-tab="spaces"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 15a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M7 7.5h.01M7 16.5h.01"/></svg><span>空间</span></button>',
       '<button class="wbs-tab" type="button" data-tab="models"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg><span>模型</span></button>',
       '<button class="wbs-tab" type="button" data-tab="enhance"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg><span>增强</span></button>',
       '<button class="wbs-tab" type="button" data-tab="automations"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H9"/><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M2 12v4M22 12v4M9 12v2M15 12v2M9 17h6"/></svg><span>自动化</span></button>',
@@ -2233,6 +2244,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       '<div class="wbs-pane active" data-pane="account"></div>',
       '<div class="wbs-pane" data-pane="theme"></div>',
       '<div class="wbs-pane" data-pane="sessions"></div>',
+      '<div class="wbs-pane" data-pane="spaces"></div>',
       '<div class="wbs-pane" data-pane="models"></div>',
       '<div class="wbs-pane" data-pane="enhance"></div>',
       '<div class="wbs-pane" data-pane="automations"></div>',
@@ -4625,6 +4637,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var accountsPane = root.querySelector('[data-pane="account"]');
     var themePane = root.querySelector('[data-pane="theme"]');
     var sessionsPane = root.querySelector('[data-pane="sessions"]');
+    var spacesPane = root.querySelector('[data-pane="spaces"]');
     var modelsPane = root.querySelector('[data-pane="models"]');
     var enhancePane = root.querySelector('[data-pane="enhance"]');
     var automationPane = root.querySelector('[data-pane="automations"]');
@@ -5471,6 +5484,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         syncWallpaperCardVisibility(themeBtn ? themeBtn.getAttribute('data-wbs-theme-option') : 'default');
       }
       if (name === 'sessions' && sessionsPane && !sessionsPane.dataset.built) buildSessionsPane();
+      if (name === 'spaces' && spacesPane && !spacesPane.dataset.built) buildSpacesPane();
+      // 空间页只读：进入时先取缓存秒出，没有缓存就给「开始扫描」，同时接管正在跑的任务进度。
+      if (name === 'spaces') { try { refreshSpaceScan(); } catch (e) {} }
       // 每次进入会话页都补一次进度探测（面板可能刚重建，定时器已被清理）
       if (name === 'sessions') { try { watchAutoCopyProgress(); } catch (e) {} }
       if (name === 'models' && modelsPane && !modelsPane.dataset.built) buildModelsPane();
@@ -12192,6 +12208,368 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }, delay || 15000);
     }
 
+    // ===== 空间占用页（Phase 4）=====
+    // 只读分析：总量 / 按账号 / 按空间 / 其它占用，并显式标注统计口径。
+    // **不提供任何删除入口** —— 真实删除路径是 lineage 级联的（见 SKILL §4.5 / §16.3），
+    // 按「文件」维度删会让同源副本变孤儿、或误删别的账号的原始会话。清理仍走「会话」页。
+    // attempted：本次会话里点过「开始扫描」没有。用来决定空态下要不要露出工具栏的「重新扫描」——
+    // 从没扫过就只给一个「开始扫描」，避免两个语义重复的按钮并排。
+    var spaceWatch = { timer: null, jobId: '', pollMs: 1200, misses: 0, attempted: false };
+
+    function spaceNum(n) {
+      var v = Math.max(0, Math.round(Number(n) || 0));
+      return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    }
+
+    function spaceShare(part, whole) {
+      if (!whole) return '0%';
+      var pct = (Number(part) || 0) / whole * 100;
+      return (pct >= 10 ? pct.toFixed(0) : pct.toFixed(1)) + '%';
+    }
+
+    function spaceTimeText(ms) {
+      var value = Number(ms);
+      if (!value || !isFinite(value)) return '';
+      var d = new Date(value);
+      function pad(n) { return n < 10 ? '0' + n : '' + n; }
+      return pad(d.getHours()) + ':' + pad(d.getMinutes());
+    }
+
+    function spaceBaseName(value) {
+      var parts = String(value == null ? '' : value).split(/[\\/]/).filter(function (item) { return !!item; });
+      return parts.length ? parts[parts.length - 1] : String(value || '');
+    }
+
+    function spaceScanEls() {
+      if (!spacesPane) return null;
+      return {
+        body: spacesPane.querySelector('#wbs-space-body'),
+        stamp: spacesPane.querySelector('#wbs-space-stamp'),
+        rescan: spacesPane.querySelector('#wbs-space-rescan'),
+        box: spacesPane.querySelector('#wbs-space-scan'),
+        icon: spacesPane.querySelector('#wbs-space-scan-icon'),
+        label: spacesPane.querySelector('#wbs-space-scan-label'),
+        count: spacesPane.querySelector('#wbs-space-scan-count'),
+        fill: spacesPane.querySelector('#wbs-space-scan-fill'),
+        sub: spacesPane.querySelector('#wbs-space-scan-sub'),
+        btn: spacesPane.querySelector('#wbs-space-scan-btn'),
+      };
+    }
+
+    // state: '' 跑动中 / 'ok' / 'err' / 'paused'，与 .wbs-sess-progress 的修饰类一致。
+    function setSpaceScanBox(state, icon, label, count, sub) {
+      var els = spaceScanEls();
+      if (!els || !els.box) return;
+      var busy = !state;
+      els.box.className = 'wbs-sess-progress wbs-space-scan on' + (busy ? ' wbs-space-indet' : ' ' + state + ' settled');
+      if (els.icon) els.icon.textContent = icon || '';
+      if (els.label) els.label.textContent = label || '';
+      if (els.count) els.count.textContent = count || '';
+      if (els.sub) els.sub.textContent = sub || '';
+      // 总量事先不可知，所以跑动中走「不确定进度条」动画，不伪造百分比；
+      // 收尾时才把条填满，颜色沿用 .ok / .err / .paused 三态。
+      if (els.fill) els.fill.style.width = busy ? '' : '100%';
+      // 跑动中收掉工具栏按钮（此时的动作是「中断扫描」）；收尾后露出来，让用户能重扫。
+      if (els.rescan) els.rescan.hidden = busy;
+      if (els.btn) {
+        els.btn.hidden = !busy;
+        els.btn.disabled = false;
+        els.btn.textContent = '中断扫描';
+        els.btn.title = '中断扫描：停在下一个检查点，部分结果不保存';
+      }
+    }
+
+    function hideSpaceScanBox() {
+      var els = spaceScanEls();
+      if (els && els.box) els.box.className = 'wbs-sess-progress wbs-space-scan';
+      if (els && els.fill) els.fill.style.width = '';
+    }
+
+    function stopSpacePolling() {
+      if (spaceWatch.timer) { clearTimeout(spaceWatch.timer); spaceWatch.timer = null; }
+      spaceWatch.misses = 0;
+    }
+
+    function spaceJobSub(job) {
+      var parts = ['文件 ' + spaceNum(job.files), '目录 ' + spaceNum(job.dirs)];
+      if (Number(job.dedupedFiles)) parts.push('硬链接去重 ' + spaceNum(job.dedupedFiles));
+      if (job.current) parts.push('当前位置 ' + job.current);
+      return parts.join(' · ');
+    }
+
+    function renderSpaceJob(job) {
+      var running = job.status === 'running' || job.status === 'queued';
+      if (running) {
+        setSpaceScanBox('', '', '正在扫描空间占用…', spaceNum(job.processed) + ' 个条目', spaceJobSub(job));
+        return;
+      }
+      if (job.status === 'cancelled') {
+        setSpaceScanBox('paused', '⏸', '扫描已中断', spaceNum(job.processed) + ' 个条目', '部分结果不保存；需要数据时重新扫描一次即可。');
+        return;
+      }
+      if (job.status === 'error') {
+        setSpaceScanBox('err', '!', '扫描失败', '', String(job.error || '未知错误'));
+        return;
+      }
+      setSpaceScanBox('ok', '✓', '扫描完成', spaceNum(job.processed) + ' 个条目', spaceJobSub(job) + ' · 用时 ' + fmtDuration(job.elapsedMs));
+    }
+
+    function spaceRowHtml(name, sub, bytes, files, basis) {
+      var size = Number(bytes) || 0;
+      var bar = basis ? '<span class="wbs-space-bar"><i style="width:' + Math.max(1, Math.min(100, Math.round(size / basis * 100))) + '%"></i></span>' : '';
+      return '<div class="wbs-space-row">' +
+        '<div class="wbs-space-name"><b title="' + escAttr(name) + '">' + esc(name) + '</b>' +
+        '<i title="' + escAttr(sub || '') + '">' + esc(sub || '') + '</i>' + bar + '</div>' +
+        '<div class="wbs-space-size"><b>' + esc(fmtBytes(size)) + '</b>' + (basis ? '<i>' + esc(spaceShare(size, basis)) + '</i>' : '') + '</div>' +
+        '<div class="wbs-space-files">' + esc(spaceNum(files)) + '</div>' +
+        '</div>';
+    }
+
+    function spaceRestRow(label, count, bytes, files) {
+      return '<div class="wbs-space-row wbs-space-row-more">' +
+        '<div class="wbs-space-name"><b>' + esc(label) + '（' + esc(spaceNum(count)) + ' 项）</b></div>' +
+        '<div class="wbs-space-size"><b>' + esc(fmtBytes(bytes)) + '</b></div>' +
+        '<div class="wbs-space-files">' + esc(spaceNum(files)) + '</div>' +
+        '</div>';
+    }
+
+    function renderSpaceEmpty() {
+      var els = spaceScanEls();
+      if (!els || !els.body) return;
+      // 第一次进来：只留「开始扫描」一个入口；已经试过一次（哪怕失败/中断）才露出「重新扫描」。
+      if (els.rescan) els.rescan.hidden = !spaceWatch.attempted;
+      els.body.innerHTML = '<div class="wbs-space-empty">' +
+        '<div>还没有扫描结果。</div>' +
+        '<div>扫描全程只读，不改动任何文件；本机约 90 万条目，全量约 40 秒，可以随时中断。</div>' +
+        '<button class="wbs-sess-bbtn" type="button" id="wbs-space-start">开始扫描</button>' +
+        '</div>';
+      var start = els.body.querySelector('#wbs-space-start');
+      if (start) start.addEventListener('click', function () { startSpaceScan(); });
+    }
+
+    function renderSpaceResult(result, meta) {
+      var els = spaceScanEls();
+      if (!els || !els.body) return;
+      if (!result || !result.totals) { renderSpaceEmpty(); return; }
+      if (els.rescan) { els.rescan.hidden = false; els.rescan.disabled = false; }
+      var totals = result.totals || {};
+      var accounts = result.accounts || [];
+      var spaces = result.spaces || [];
+      var shared = result.shared || [];
+      var unattr = result.unattributed || {};
+      var totalBytes = Number(totals.bytes) || 0;
+      var rawBytes = Number(totals.rawBytes) || 0;
+
+      if (els.stamp) {
+        var when = spaceTimeText(result.finishedAt);
+        els.stamp.textContent = when ? ('扫描于 ' + when + ' · 用时 ' + fmtDuration(result.elapsedMs)) : '';
+      }
+
+      var html = '<div class="wbs-space-hero">' +
+        '<div><span>实际占用（去重后）</span><strong>' + esc(fmtBytes(totalBytes)) + '</strong></div>' +
+        '<div><span>文件数</span><strong>' + esc(spaceNum(totals.files)) + '</strong></div>' +
+        '<div><span>目录数</span><strong>' + esc(spaceNum(totals.dirs)) + '</strong></div>' +
+        '<div><span>去重前（含重复）</span><strong>' + esc(fmtBytes(rawBytes)) + '</strong></div>' +
+        '</div>';
+
+      // 口径说明必须写在最上面：不说清「账号之和 ≠ 总数」是口径重叠，用户会当成统计 bug。
+      html += '<div class="wbs-space-note">「实际占用」按 (设备号, inode) 去重 —— 同一份产物被多个账号共用时只算一次，与资源管理器里的文件夹大小一致'
+        + (Number(totals.dedupedFiles) ? '（本次去重 ' + esc(spaceNum(totals.dedupedFiles)) + ' 个 / ' + esc(fmtBytes(totals.dedupedBytes)) + '）' : '')
+        + '。下面的「账号」与「空间」是同一批文件的两种切法，互相重叠，因此不能相加；总数只看上面的实际占用。</div>';
+
+      if (Number(totals.unreadable)) {
+        html += '<div class="wbs-space-note warn">有 ' + esc(spaceNum(totals.unreadable)) + ' 个条目读不到（被其它进程占用或权限不足），实际占用会比真实值略小。</div>';
+      }
+
+      var i, j;
+      if (accounts.length) {
+        html += '<div class="wbs-space-sec"><div class="wbs-space-sec-head"><span>账号</span><span>实际占用</span><span>文件</span></div>';
+        for (i = 0; i < accounts.length; i++) {
+          html += spaceRowHtml(accounts[i].nickname || accounts[i].uid,
+            (accounts[i].sessions || 0) + ' 个会话', accounts[i].bytes, accounts[i].files, totalBytes);
+        }
+        html += '</div>';
+      }
+
+      if (spaces.length) {
+        html += '<div class="wbs-space-sec"><div class="wbs-space-sec-head"><span>空间（工作目录）</span><span>实际占用</span><span>文件</span></div>';
+        var top = spaces.slice(0, 15);
+        for (i = 0; i < top.length; i++) {
+          var space = top[i];
+          var sub = (space.resolved === false ? '目录已不存在，仅剩历史数据 · ' : '')
+            + (space.sessions ? space.sessions + ' 个会话 · ' : '') + (space.cwd || '');
+          html += spaceRowHtml(spaceBaseName(space.cwd || space.slug), sub, space.bytes, space.files, totalBytes);
+        }
+        if (spaces.length > top.length) {
+          var sBytes = 0, sFiles = 0;
+          for (i = top.length; i < spaces.length; i++) { sBytes += Number(spaces[i].bytes) || 0; sFiles += Number(spaces[i].files) || 0; }
+          html += spaceRestRow('其余空间', spaces.length - top.length, sBytes, sFiles);
+        }
+        html += '</div>';
+      }
+
+      if (shared.length) {
+        html += '<div class="wbs-space-sec"><div class="wbs-space-sec-head"><span>其它占用（不属于任何账号或空间）</span><span>实际占用</span><span>文件</span></div>';
+        var topShared = shared.slice(0, 12);
+        for (i = 0; i < topShared.length; i++) {
+          html += spaceRowHtml(topShared[i].name, sharedHint(topShared[i]), topShared[i].bytes, topShared[i].files, totalBytes);
+        }
+        if (shared.length > topShared.length) {
+          var hBytes = 0, hFiles = 0;
+          for (i = topShared.length; i < shared.length; i++) { hBytes += Number(shared[i].bytes) || 0; hFiles += Number(shared[i].files) || 0; }
+          html += spaceRestRow('其余共享项', shared.length - topShared.length, hBytes, hFiles);
+        }
+        html += '</div>';
+      }
+
+      if (Number(unattr.files)) {
+        html += '<div class="wbs-space-sec"><div class="wbs-space-sec-head"><span>未归属</span><span>实际占用</span><span>文件</span></div>' +
+          '<div class="wbs-space-row"><div class="wbs-space-name"><b>认不出账号的会话数据</b>' +
+          '<i>会话记录已被删或不属于任何已保存账号</i></div>' +
+          '<div class="wbs-space-size"><b>' + esc(fmtBytes(unattr.bytes)) + '</b></div>' +
+          '<div class="wbs-space-files">' + esc(spaceNum(unattr.files)) + '</div></div></div>';
+      }
+
+      html += '<div class="wbs-space-note">本页只读，不提供删除入口：真实删除会牵动同一会话在多个账号里的副本（lineage 级联），请到「会话」页操作，那里有级联保护。</div>';
+
+      els.body.innerHTML = html;
+    }
+
+    // 共享项是 dataRoot 的直接子项，给几个高频的补一句人话解释，其余留空。
+    function sharedHint(item) {
+      var name = String((item && item.name) || '');
+      var table = {
+        logs: '运行日志，可按需清理',
+        traces: '链路追踪，可按需清理',
+        binaries: '内置运行时与工具二进制',
+        plugins: '插件与技能包',
+        blobs: '内容寻址的大对象缓存',
+        app: '客户端静态资源',
+        cache: '可重建的缓存',
+        'shell-snapshots': '终端快照',
+        'clipboard-images': '剪贴板图片历史',
+      };
+      if (table[name]) return table[name];
+      if (Number(item && item.dirs) === 0) return '位于数据根目录的文件';
+      return '无法归属到账号或空间';
+    }
+
+    function scheduleSpacePoll(delay) {
+      stopSpacePolling();
+      spaceWatch.timer = setBuildTimeout(function () {
+        spaceWatch.timer = null;
+        pollSpaceScan();
+      }, delay || spaceWatch.pollMs);
+    }
+
+    function pollSpaceScan() {
+      api('/api/space/scan/status').then(function (res) {
+        spaceWatch.misses = 0;
+        var job = (res && res.job) || null;
+        if (!job) { hideSpaceScanBox(); return; }
+        renderSpaceJob(job);
+        if (job.status === 'running' || job.status === 'queued') { scheduleSpacePoll(); return; }
+        if (job.status !== 'done') return;
+        return api('/api/space/scan/result').then(function (body) {
+          if (body && body.result) renderSpaceResult(body.result, { ageMs: body.ageMs });
+        });
+      }).catch(function () {
+        // 单次失败（daemon 重启中）不打断轮询，但连续失败要停，避免无限打日志。
+        spaceWatch.misses += 1;
+        if (spaceWatch.misses >= 5) {
+          setSpaceScanBox('err', '!', '读不到扫描进度', '', '守护进程可能正在重启，稍后重新扫描。');
+          stopSpacePolling();
+          return;
+        }
+        scheduleSpacePoll();
+      });
+    }
+
+    function startSpaceScan() {
+      var els = spaceScanEls();
+      spaceWatch.attempted = true;
+      if (els && els.rescan) { els.rescan.disabled = true; els.rescan.hidden = true; }
+      stopSpacePolling();
+      setSpaceScanBox('', '', '正在启动扫描…', '', '只读扫描，不改动任何文件；全程可中断。');
+      api('/api/space/scan/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) })
+        .then(function (res) {
+          var job = (res && res.job) || null;
+          spaceWatch.jobId = (job && job.id) || '';
+          if (els && els.rescan) els.rescan.disabled = false;
+          if (job) renderSpaceJob(job);
+          scheduleSpacePoll(700);
+        })
+        .catch(function (error) {
+          if (els && els.rescan) els.rescan.disabled = false;
+          setSpaceScanBox('err', '!', '无法启动扫描', '', String((error && error.message) || error));
+          toast('无法启动空间扫描：' + ((error && error.message) || error), true, root);
+        });
+    }
+
+    function cancelSpaceScan() {
+      var els = spaceScanEls();
+      if (els && els.btn) { els.btn.disabled = true; els.btn.textContent = '正在中断…'; }
+      api('/api/space/scan/cancel', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId: spaceWatch.jobId || '' }) })
+        .then(function () { toast('已请求中断，扫描器会在下一个检查点收尾', false, root); scheduleSpacePoll(500); })
+        .catch(function (error) {
+          if (els && els.btn) { els.btn.disabled = false; els.btn.textContent = '中断扫描'; }
+          toast('中断失败：' + ((error && error.message) || error), true, root);
+        });
+    }
+
+    // 进入空间页：正在跑就接管进度，否则用缓存结果秒出；没有缓存才提示扫描。
+    function refreshSpaceScan() {
+      if (!spacesPane) return;
+      api('/api/space/scan/status').then(function (res) {
+        var job = (res && res.job) || null;
+        if (job && (job.status === 'running' || job.status === 'queued')) {
+          spaceWatch.jobId = job.id || '';
+          renderSpaceJob(job);
+          scheduleSpacePoll(500);
+          return null;
+        }
+        return api('/api/space/scan/result').then(function (body) {
+          if (body && body.result) { renderSpaceResult(body.result, { ageMs: body.ageMs }); hideSpaceScanBox(); }
+          else renderSpaceEmpty();
+        });
+      }).catch(function (error) {
+        var els = spaceScanEls();
+        if (els && els.body) {
+          els.body.innerHTML = '<div class="wbs-space-empty"><div>读取扫描结果失败：' + esc((error && error.message) || error) + '</div></div>';
+        }
+      });
+    }
+
+    function buildSpacesPane() {
+      if (!spacesPane) return;
+      spacesPane.dataset.built = '1';
+      spacesPane.innerHTML =
+        '<div class="wbs-pcard wbs-space-card">' +
+        '<div class="wbs-space-toolbar">' +
+        '<div class="wbs-pcard-title">空间占用<span class="wbs-pcard-sub" id="wbs-space-stamp"></span></div>' +
+        '<div class="wbs-space-actions">' +
+        '<button class="wbs-sess-bbtn" type="button" id="wbs-space-rescan" title="重新扫描：只读，不改动任何文件">重新扫描</button>' +
+        '</div>' +
+        '</div>' +
+        '<div class="wbs-sess-progress wbs-space-scan" id="wbs-space-scan" role="status" aria-live="polite">' +
+        '<div class="wbs-sess-progress-head">' +
+        '<span class="wbs-sess-progress-spin" aria-hidden="true"></span>' +
+        '<span class="wbs-sess-progress-icon" id="wbs-space-scan-icon" aria-hidden="true"></span>' +
+        '<span class="wbs-sess-progress-label" id="wbs-space-scan-label">准备扫描…</span>' +
+        '<span class="wbs-sess-progress-count" id="wbs-space-scan-count">0</span>' +
+        '<button class="wbs-sess-progress-btn" type="button" id="wbs-space-scan-btn" hidden>中断扫描</button>' +
+        '</div>' +
+        '<div class="wbs-sess-progress-track"><div class="wbs-sess-progress-fill" id="wbs-space-scan-fill"></div></div>' +
+        '<div class="wbs-sess-progress-sub" id="wbs-space-scan-sub"></div>' +
+        '</div>' +
+        '<div class="wbs-space-body" id="wbs-space-body"></div>' +
+        '</div>';
+      var els = spaceScanEls();
+      if (els && els.body) els.body.innerHTML = '<div class="wbs-space-empty">正在读取扫描结果…</div>';
+      if (els && els.rescan) els.rescan.addEventListener('click', function () { startSpaceScan(); });
+      if (els && els.btn) els.btn.addEventListener('click', function () { cancelSpaceScan(); });
+    }
+
     // 观察当前活跃的复制任务。可在任何时刻重复调用（切号、打开面板、注入完成）。
     function watchAutoCopyProgress(options) {
       if (!alive || !autoCopyWatch) return;
@@ -13086,6 +13464,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   css.textContent = [
     '.wbs-root{position:fixed;right:22px;bottom:22px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;font-size:13px;color:#1f1f1f;-webkit-font-smoothing:antialiased}',
     '.wbs-root.wbs-no-stash .wbs-stash-inline{display:none !important}',
+    // `hidden` 属性必须始终生效：本插件大量用 el.hidden = true/false 控制显隐，
+    // 但只要元素自己的类规则里写了 display（如 .wbs-sess-bbtn{display:inline-flex}），
+    // author 样式就会盖掉 UA 的 [hidden]{display:none}，按钮「藏不住」（空间页「重新扫描」踩过）。
+    '.wbs-root [hidden]{display:none !important}',
     /* 会话消息索引：跟随官方消息视口定位，tooltip 使用主题感知的毛玻璃表面 */
     '.wbs-message-nav-root{position:fixed;width:24px;z-index:1000;pointer-events:none;user-select:none;-webkit-user-select:none;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--wb-color-text-primary,#1f1f1f)}',
     '.wbs-message-nav-rail{display:flex;width:24px;height:100%;box-sizing:border-box;flex-direction:column;align-items:center;justify-content:flex-start;gap:0;overflow:hidden;padding:6px 0;border:1px solid transparent;border-radius:8px;background:color-mix(in srgb,var(--wb-bg-popover,#fff) 16%,transparent);box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;pointer-events:auto;touch-action:none;cursor:pointer;scrollbar-width:none;transition:background-color .18s ease,border-color .18s ease,box-shadow .18s ease,backdrop-filter .18s ease}',
@@ -13962,6 +14344,42 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-body{max-height:calc(min(78vh,660px) - 118px)}',
     // 账号页填满面板剩余空间：少量账号时登录按钮靠底部，长列表仍在列表内滚动。
     '.wbs-body:has(>[data-pane="account"].active){max-height:none;overflow:hidden}',
+    /* ===== 空间占用页（只读）===== */
+    // 与账号页同理：让面板填满高度，由 .wbs-space-body 自己滚，避免整页跟着滚。
+    '.wbs-body:has(>[data-pane="spaces"].active){max-height:none;overflow:hidden}',
+    '.wbs-space-card{display:flex;flex:1;flex-direction:column;min-height:0;margin-bottom:0}',
+    '.wbs-space-toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px;flex-shrink:0}.wbs-space-toolbar .wbs-pcard-title{margin-bottom:0}',
+    '.wbs-space-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}',
+    '.wbs-space-body{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:9px;margin-top:10px;padding-right:2px}',
+    '.wbs-space-hero{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;flex:0 0 auto}',
+    '.wbs-space-hero>div{min-width:0;padding:8px 10px;border:1px solid var(--wb-border-subtle,#f0f0f0);border-radius:11px;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 16%,transparent)}',
+    '.wbs-space-hero span{display:block;margin-bottom:3px;font-size:10.5px;color:var(--wb-icon-tertiary,#999);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.wbs-space-hero strong{display:block;font-size:15px;font-weight:700;line-height:1.2;color:var(--wb-color-text-primary,#1f1f1f);overflow:hidden;text-overflow:ellipsis}',
+    '.wbs-space-note{flex:0 0 auto;padding:8px 10px;border-radius:10px;font-size:11px;line-height:1.6;color:var(--wb-icon-secondary,#666);background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 14%,transparent)}',
+    '.wbs-space-note.warn{color:#a35b00;background:rgba(255,176,32,.12)}',
+    '.wbs-space-sec{flex:0 0 auto;min-width:0;border:1px solid var(--wb-border-subtle,#f0f0f0);border-radius:12px;overflow:hidden}',
+    '.wbs-space-sec-head,.wbs-space-row{display:grid;grid-template-columns:minmax(0,1fr) auto 62px;align-items:center;gap:10px}',
+    '.wbs-space-sec-head{padding:7px 10px;font-size:10.5px;font-weight:600;color:var(--wb-icon-tertiary,#999);background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 12%,transparent)}',
+    '.wbs-space-sec-head span:nth-child(2),.wbs-space-sec-head span:nth-child(3){text-align:right}',
+    '.wbs-space-row{padding:8px 10px;border-top:1px solid var(--wb-border-subtle,#f0f0f0)}',
+    '.wbs-space-row:first-of-type{border-top:none}',
+    '.wbs-space-row-more{color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-space-name{min-width:0}',
+    '.wbs-space-name b{display:block;font-size:12px;font-weight:650;color:var(--wb-color-text-primary,#1f1f1f);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.wbs-space-row-more .wbs-space-name b{font-weight:500;color:var(--wb-icon-secondary,#666)}',
+    '.wbs-space-name i{display:block;margin-top:2px;font-style:normal;font-size:10.5px;color:var(--wb-icon-tertiary,#999);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.wbs-space-size{text-align:right;white-space:nowrap}',
+    '.wbs-space-size b{display:block;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-space-size i{display:block;margin-top:2px;font-style:normal;font-size:10px;color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-space-files{text-align:right;white-space:nowrap;font-size:11px;font-variant-numeric:tabular-nums;color:var(--wb-icon-secondary,#666)}',
+    '.wbs-space-bar{display:block;height:3px;margin-top:5px;border-radius:999px;background:color-mix(in srgb,var(--wb-border-subtle,#f0f0f0) 70%,transparent);overflow:hidden}',
+    '.wbs-space-bar i{display:block;height:100%;border-radius:999px;background:var(--wb-accent-blue,#4f86ff)}',
+    '.wbs-space-empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:22px 10px;text-align:center;font-size:12px;line-height:1.6;color:var(--wb-icon-tertiary,#999)}',
+    // 总量事先不可知 → 跑动中用「不确定进度条」来回滑，不伪造百分比。
+    // 段宽给到 55%、行程只走 -100%→180%：可见时间约占整个周期的 55%，
+    // 否则（段窄 + 行程长）会有一半时间只剩空轨道，看起来像卡在 0%。
+    '.wbs-space-indet .wbs-sess-progress-fill{width:55%!important;animation:wbs-space-slide 1.5s ease-in-out infinite}',
+    '@keyframes wbs-space-slide{0%{transform:translateX(-100%)}100%{transform:translateX(180%)}}',
   ].join('');
   (document.head || document.documentElement).appendChild(css);
   start();
