@@ -3562,6 +3562,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var messageNavigation = createMessageNavigation();
     function onDomChange() {
       if (!alive) return;
+      acLimitWatchTick(); // 限流横幅监听：内部有 1.5s 时间闸，不会每帧都查 DOM
       guardSessionChange();
       if (messageNavigation) messageNavigation.sync();
       scheduleFabPos();
@@ -3612,6 +3613,56 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       bodyObserver = new MutationObserver(scheduleDomChange);
       bodyObserver.observe(document.body, { childList: true, subtree: true });
     }
+
+    // ===== 限流横幅监听（快路入口：供 daemon 的「切账号 + 同一模型续跑」）=====
+    // 官方限流提示只出现在 composer 上方的 banner 里，不在消息流中（见 limit-failover.js 的真机取证）。
+    // 这里只做**粗匹配**（元素存在即可），精确判定交给 daemon：它收到通知后会用带文案正则的探针复核，
+    // 复核不过就返回 skipped。这样选择器清单和文案正则只有 daemon 一份，不会两边漂移。
+    var acLimitWatchOn = false, acLimitWatchFiredAt = 0, acLimitWatchTickAt = 0;
+    var AC_LIMIT_WATCH_MIN_GAP = 1500;    // DOM 变化极其频繁，内部按 1.5s 限频
+    var AC_LIMIT_WATCH_COOLDOWN = 20000;  // 同一次限流 20s 内只上报一次
+    var AC_LIMIT_BANNER_SELECTORS = [
+      '[data-testid="rate-limit-info-banner"]',
+      '.rate-limit-info-banner',
+      '.cb-input-banner--error',
+      '.cb-input-banner--warning',
+      '.cb-queue-banner--full',
+      '.cb-queue-banner--user_limit',
+    ];
+    function acLimitBannerPresent() {
+      try {
+        for (var i = 0; i < AC_LIMIT_BANNER_SELECTORS.length; i++) {
+          var el = document.querySelector(AC_LIMIT_BANNER_SELECTORS[i]);
+          if (!el) continue;
+          if (el.closest && (el.closest('.wbs-root') || el.closest('.wbs-toast'))) continue;
+          var r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) return true;
+        }
+      } catch (_) {}
+      return false;
+    }
+    function acLimitWatchTick() {
+      var now = Date.now();
+      if (now - acLimitWatchTickAt < AC_LIMIT_WATCH_MIN_GAP) return;
+      acLimitWatchTickAt = now;
+      if (!acLimitBannerPresent()) { acLimitWatchOn = false; return; }
+      if (acLimitWatchOn) return;                                  // 同一次限流只上报一次
+      if (now - acLimitWatchFiredAt < AC_LIMIT_WATCH_COOLDOWN) return;
+      acLimitWatchOn = true;
+      acLimitWatchFiredAt = now;
+      try {
+        fetch(API + '/api/limit-failover/trigger', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'X-WorkDaddy-Token': WBS_API_TOKEN },
+          body: JSON.stringify({ source: 'renderer-watch' }),
+        }).then(function (r) { return r.json(); }).then(function (j) {
+          // daemon 复核判定不是限流（粗匹配误报）或无可用任务 → 解除闩锁，允许下次重新上报
+          if (!j || j.ok !== true || j.skipped) acLimitWatchOn = false;
+        }).catch(function () { acLimitWatchOn = false; });
+      } catch (_) { acLimitWatchOn = false; }
+    }
+    setBuildTimeout(acLimitWatchTick, 4000); // 首屏兜底：注入时页面可能已经有横幅
+
     syncStash(); // 初始检查
     setBuildTimeout(wrapQueueReorder, 800);
 

@@ -380,7 +380,7 @@ const DAEMON_VERSION = '1.3.0';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-dualversion-final2';
+const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-limit-failover-phase0b';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -418,6 +418,7 @@ const creditHistorySync = createCreditHistorySync({
 const CREDIT_USAGE_REFRESH_MS = 15000;
 const creditUsageSyncInFlight = new Map();
 const { selectRotationCandidate } = require('./credit-rotation.js');
+const limitFailover = require('./limit-failover.js');
 const creditRotationCache = new Map();
 const WATCH_INTERVAL = 3000; // 文件监听兜底
 const BACKUP_DEBOUNCE = 1500; // CDP 事件触发的备份防抖
@@ -3272,6 +3273,216 @@ async function automationNotifyToast(detail) {
   return response.result.value;
 }
 let automationAccountSwitchTail = Promise.resolve();
+/* ---------------- 模型限流自动切号续跑 ---------------- */
+//
+// 语义（与 WorkBuddy 官方内置的「切模型 + 续跑」不同）：官方只切模型；
+// 这里要的是**切到另一个账号、保持同一个模型、把同一条任务续跑下去**。
+//
+// 触发有两条路，共用这一份实现：
+//   快路：renderer 侧 MutationObserver 侦测到限流横幅 → POST /api/limit-failover/trigger
+//   兜底：自动化任务按 schedule 轮询 limit.probe
+//
+// 状态文件记录「哪些账号在窗口内被判过限流」，避免来回横跳，也取代了旧任务里
+// 那个 scope=task、不按账号隔离、且永不复位的 lastSwitchedFrom 守卫。
+
+const LIMIT_FAILOVER_STATE_FILE = path.join(DATA_DIR, 'limit-failover-state.json');
+const LIMIT_FAILOVER_VERIFY_MS = 20000;
+let limitFailoverInFlight = null;
+
+function readLimitFailoverState() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(LIMIT_FAILOVER_STATE_FILE, 'utf8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeLimitFailoverState(state) {
+  try {
+    const tmp = LIMIT_FAILOVER_STATE_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(state || {}, null, 2));
+    fs.renameSync(tmp, LIMIT_FAILOVER_STATE_FILE);
+  } catch (e) {
+    log('[limit-failover] 写入状态失败: ' + e.message);
+  }
+}
+
+// 全量账号（保证顺序）+ 已缓存的积分段（若该账号被查过积分）。
+function limitFailoverAccounts() {
+  const cached = new Map(cachedCreditRotationAccounts().map((a) => [String(a.uid), a]));
+  return listAccounts(DATA_DIR).map((account) => {
+    const hit = cached.get(String(account.uid));
+    return hit && Array.isArray(hit.creditSegments) && hit.creditSegments.length
+      ? { ...account, creditSegments: hit.creditSegments }
+      : account;
+  });
+}
+
+async function runCdpExpression(expression, options = {}) {
+  if (!cdp.connected) throw new Error('WorkBuddy 未连接，无法读取页面状态');
+  const response = await cdpSend('Runtime.evaluate', {
+    expression,
+    returnByValue: true,
+    awaitPromise: options.awaitPromise !== false,
+  });
+  if (response && response.exceptionDetails) throw new Error('页面执行失败：' + String(response.exceptionDetails.text || '').slice(0, 200));
+  return response && response.result ? response.result.value : null;
+}
+
+function readLimitBanner() {
+  return runCdpExpression(limitFailover.limitBannerProbeExpression(), { awaitPromise: false });
+}
+
+function readLiveModel() {
+  return runCdpExpression(limitFailover.liveModelExpression('get'), { awaitPromise: false });
+}
+
+function setLiveModel(modelId) {
+  return runCdpExpression(limitFailover.liveModelExpression('set', modelId));
+}
+
+function readLastUserTaskText() {
+  return runCdpExpression(limitFailover.lastUserTaskTextExpression(20000), { awaitPromise: false });
+}
+
+// 续跑是否已经"跑起来"：消息流里出现流式请求，或最后一条是 assistant。
+function limitReplyStartedExpression() {
+  return '(function(){try{var c=window.__wbsWorkBuddyCompat;if(!c)return false;' +
+    'var list=c.findConversationControllers(document);if(!list||!list.length)return false;' +
+    'var st=list[0].messageStore.getState();' +
+    'if(st.streamingRequestId||st.streamingMessageId)return true;' +
+    'var msgs=st.messages||[];for(var i=msgs.length-1;i>=0;i--){var m=msgs[i];' +
+      'if(!m)continue;return m.messageType==="assistant"&&!m.loading}' +
+    'return false}catch(e){return false}})()';
+}
+
+function limitReplyStarted() {
+  return runCdpExpression(limitReplyStartedExpression(), { awaitPromise: false });
+}
+
+// 找出启用中、且带 account.failoverContinue 步骤的任务（不写死 id，用户改名换 id 也能用）。
+function taskHasFailoverStep(value) {
+  if (Array.isArray(value)) return value.some(taskHasFailoverStep);
+  if (!value || typeof value !== 'object') return false;
+  if (value.op === 'account.failoverContinue') return true;
+  return Object.values(value).some(taskHasFailoverStep);
+}
+
+function findLimitFailoverTask() {
+  return readAutomations(DATA_DIR).find((task) => task && task.enabled && taskHasFailoverStep([task.steps, task.onSuccess, task.onFailure])) || null;
+}
+
+function runningLimitFailoverRun(taskId) {
+  return Array.from(automationRuns.values()).find((run) => run.taskId === taskId && run.status === 'running') || null;
+}
+
+async function waitLimitVerdict(ports, timeoutMs) {
+  const end = Date.now() + (Number(timeoutMs) || LIMIT_FAILOVER_VERIFY_MS);
+  let sawReply = false;
+  let round = 0;
+  while (Date.now() < end) {
+    const banner = await ports.readBanner().catch(() => null);
+    if (banner && banner.hit) return { hit: true, hits: banner.hits || [], afterMs: Date.now() - (end - timeoutMs) };
+    if (!sawReply) sawReply = await ports.replyStarted().catch(() => false);
+    // 已经看到正常回复在跑、且 8 秒内都没冒出限流横幅 → 判定接管成功。
+    if (sawReply && round >= 6) return { hit: false, afterMs: Date.now() - (end - timeoutMs) };
+    round += 1;
+    await sleep(700);
+  }
+  return { hit: false, timedOut: true };
+}
+
+/**
+ * 限流交接核心。所有副作用通过 ports 注入，本身不直接碰 CDP / 账号 / 面板，
+ * 便于单测与在不同触发路径下复用。
+ *
+ * ports 需要提供：
+ *   readBanner / replyStarted / readModel / setModel / readTaskText
+ *   switchAccount(account) / ensureNewTask() / sendPhrase(text) / guard()
+ *   log(message) / notify(level, message) / setPanelOpen(open) / wasPanelOpen
+ */
+async function runLimitFailoverCore(detail, ports) {
+  const d = detail && typeof detail === 'object' ? detail : {};
+  if (limitFailoverInFlight) return { ok: false, skipped: true, reason: '已有一次切号续跑正在进行' };
+  let resolveInFlight;
+  limitFailoverInFlight = new Promise((resolve) => { resolveInFlight = resolve; });
+  const restorePanelTo = ports.wasPanelOpen === true;
+  try {
+    if (restorePanelTo) await ports.setPanelOpen(false).catch(() => {});
+    const current = currentAccount();
+    if (!current || !current.uid) throw new Error('读不到当前账号，无法判断限流归属');
+    const now = Date.now();
+    let state = readLimitFailoverState();
+    state = limitFailover.markAccountBlocked(state, current.uid, now, 'detected');
+    writeLimitFailoverState(state);
+
+    const modelInfo = await ports.readModel().catch(() => null);
+    const modelId = String(d.modelId || '').trim() || String((modelInfo && modelInfo.model) || '').trim();
+    let taskText = String(d.prompt || '').trim();
+    let taskSource = 'prompt';
+    if (!taskText) {
+      const last = await ports.readTaskText().catch(() => null);
+      taskText = String((last && last.text) || '').trim();
+      taskSource = 'lastUserMessage';
+    }
+    if (!taskText) {
+      await ports.notify('warning', '检测到模型限流，但当前会话里没有可续跑的用户消息');
+      return { ok: false, reason: 'no-task-text', modelId, fromUid: current.uid };
+    }
+
+    ports.log('limit-failover:start ' + JSON.stringify({ fromUid: current.uid, modelId, taskSource, textLength: taskText.length, at: new Date(now).toISOString() }));
+    const tried = [];
+    let lastError = '';
+    for (let round = 0; round < 6; round++) {
+      const pick = limitFailover.pickFailoverTarget(limitFailoverAccounts(), current.uid, readLimitFailoverState(), Date.now());
+      if (!pick || tried.includes(pick.account.uid)) break;
+      const target = pick.account;
+      tried.push(target.uid);
+      ports.log('limit-failover:try ' + JSON.stringify({ uid: target.uid, nickname: target.nickname || '', reason: pick.reason }));
+      try {
+        await ports.guard();
+        await ports.switchAccount(target);
+        await ports.guard();
+        await ports.ensureNewTask();
+        if (modelId) {
+          const setResult = await ports.setModel(modelId);
+          if (!setResult || setResult.ok !== true) {
+            ports.log('limit-failover:setModel 失败 ' + String((setResult && setResult.error) || ''));
+          }
+        }
+        await ports.guard();
+        await ports.sendPhrase(taskText);
+        const verdict = await waitLimitVerdict(ports, LIMIT_FAILOVER_VERIFY_MS);
+        if (verdict.hit) {
+          state = limitFailover.markAccountBlocked(readLimitFailoverState(), target.uid, Date.now(), 'still-limited');
+          writeLimitFailoverState(state);
+          await ports.notify('warning', '账号 ' + (target.nickname || target.uid) + ' 仍处于限流，继续尝试下一个账号');
+          continue;
+        }
+        state = limitFailover.clearAccountBlocked(readLimitFailoverState(), target.uid);
+        writeLimitFailoverState(state);
+        await ports.notify('success', '已在账号 ' + (target.nickname || target.uid) + ' 上继续执行任务' + (modelId ? '（模型 ' + modelId + '）' : ''));
+        ports.log('limit-failover:done ' + JSON.stringify({ toUid: target.uid, modelId }));
+        return { ok: true, fromUid: current.uid, toUid: target.uid, toNickname: target.nickname || '', modelId, modelSource: modelInfo && modelInfo.model ? 'live' : 'none', taskSource, tried, verdict };
+      } catch (error) {
+        lastError = String((error && error.message) || error);
+        ports.log('limit-failover:target-failed ' + JSON.stringify({ uid: target.uid, error: lastError }));
+        state = limitFailover.markAccountBlocked(readLimitFailoverState(), target.uid, Date.now(), 'error');
+        writeLimitFailoverState(state);
+      }
+    }
+
+    await ports.notify('error', '其他账号都无法接管本次任务，已停止自动切号');
+    ports.log('limit-failover:exhausted ' + JSON.stringify({ tried, lastError }));
+    return { ok: false, reason: 'no-usable-target', tried, error: lastError, modelId, fromUid: current.uid };
+  } finally {
+    try { if (restorePanelTo) await ports.setPanelOpen(true); } catch (_) {}
+    resolveInFlight();
+    limitFailoverInFlight = null;
+  }
+}
+
 function automationSwitchAccount(account) {
   const target = account && typeof account === 'object' ? account : { uid: String(account || '').trim() };
   const run = automationAccountSwitchTail.then(async () => {
@@ -3446,7 +3657,24 @@ function startAutomationRun(task, event = null) {
     appendRunLog('account:checkin:' + (result.skipped ? 'skipped' : result.ok ? 'success' : 'failed'));
     if (cdp.connected) cdpSend('Runtime.evaluate', { expression: "window.dispatchEvent(new CustomEvent('workdaddy:accounts-updated'))" }).catch(() => {});
     return result;
-  }, httpRequest: automationHttpRequest, domAction: (op, locator, detail) => ['dom.click','dom.type','dom.clear','dom.press'].includes(op) ? withInput(() => automationDomAction(op, locator, { ...detail, isCancelled })) : automationDomAction(op, locator, { ...detail, isCancelled }), sessionSendCurrent, sessionWaitReply, getState: runScopedState, setState: setRunState, isCancelled, notifyToast: async (level, message, detail) => { const result = await runNotifier.show(level, message, detail); appendRunLog('notify:toast:' + level); return result; }, notifySession: async () => { throw new Error('主账号会话通知尚未启用，请先验证 WorkBuddy 会话 API'); }, log: appendRunLog };
+  }, httpRequest: automationHttpRequest, domAction: (op, locator, detail) => ['dom.click','dom.type','dom.clear','dom.press'].includes(op) ? withInput(() => automationDomAction(op, locator, { ...detail, isCancelled })) : automationDomAction(op, locator, { ...detail, isCancelled }), sessionSendCurrent, sessionWaitReply, getState: runScopedState, setState: setRunState, isCancelled, notifyToast: async (level, message, detail) => { const result = await runNotifier.show(level, message, detail); appendRunLog('notify:toast:' + level); return result; }, notifySession: async () => { throw new Error('主账号会话通知尚未启用，请先验证 WorkBuddy 会话 API'); }, log: appendRunLog, limitProbe: () => readLimitBanner(), modelGet: () => readLiveModel(), modelSet: (modelId) => withInput(() => setLiveModel(modelId)), limitFailover: (detail) => withInput(async () => {
+    const wasPanelOpen = await automationPanelIsOpen().catch(() => false);
+    return runLimitFailoverCore(detail, {
+      readBanner: readLimitBanner,
+      replyStarted: limitReplyStarted,
+      readModel: readLiveModel,
+      setModel: setLiveModel,
+      readTaskText: readLastUserTaskText,
+      switchAccount: (account) => automationSwitchAccount(account),
+      ensureNewTask: () => ensureAutomationNewTask({ guard: async () => { if (isCancelled()) throw new Error('任务已停止'); } }),
+      sendPhrase: (text) => acSendPhrase(text, { requireEmpty: true, isCancelled }),
+      guard: async () => { if (isCancelled()) throw new Error('任务已停止'); },
+      log: appendRunLog,
+      notify: (level, message) => runNotifier.show(level, message, { duration: 6000, id: 'rl-failover' }),
+      setPanelOpen: (open) => automationPanelSetOpen(open),
+      wasPanelOpen,
+    });
+  }) };
   // 等「收起面板」完成后才开始执行任务（executeTask 内部第一步就点新建任务/聚焦 composer，
   // 若面板还没收会抢焦点）。结束按 run.wasPanelOpen 恢复展开，若运行前本就收起则保持收起。
   run.completion = panelPrepare
@@ -7882,6 +8110,73 @@ function handleApi(req, res) {
   if (req.method === 'GET' && p === '/api/automations/run-status') {
     const run = automationRuns.get(String(url.searchParams.get('id') || ''));
     return run ? json(res, 200, { ok: true, run: automationPublicRun(run) }) : json(res, 404, { ok: false, error: '运行记录不存在' });
+  }
+
+  // ── 模型限流自动切号续跑 ───────────────────────────────────────────────
+  // 快路入口：renderer 侧的 MutationObserver 侦测到限流横幅后调这里。
+  // 默认会再复核一次页面（防止误报），带 force:true 可跳过复核（用于手动/自测）。
+  if (req.method === 'POST' && p === '/api/limit-failover/trigger') {
+    return readBody(req).then(async (body) => {
+      try {
+        const force = !!(body && body.force);
+        const source = String((body && body.source) || 'api').slice(0, 40);
+        const task = findLimitFailoverTask();
+        if (!task) return json(res, 404, { ok: false, error: '没有启用中的限流续跑任务（需要 account.failoverContinue 步骤）' });
+        const running = runningLimitFailoverRun(task.id);
+        if (running) return json(res, 200, { ok: true, skipped: true, reason: '任务正在运行', run: automationPublicRun(running) });
+        if (limitFailoverInFlight) return json(res, 200, { ok: true, skipped: true, reason: '已有一次切号续跑正在进行' });
+        let banner = null;
+        if (!force) {
+          banner = await readLimitBanner().catch(() => null);
+          if (!banner || !banner.hit) {
+            // renderer 侧是粗匹配（横幅元素存在即上报），精确判定在这里 —— 复核不过就跳过。
+            // 记一条日志，便于回答「横幅出现了但为什么没切号」。
+            log('[limit-failover] source=' + source + ' 复核未通过，跳过' + (banner ? ' (ok=' + banner.ok + ' count=' + (banner.count || 0) + (banner.error ? ' error=' + banner.error : '') + ')' : ' (探针无返回)'));
+            return json(res, 200, { ok: true, skipped: true, reason: '当前页面没有限流横幅', banner });
+          }
+        }
+        const run = startAutomationRun(task, { type: 'limit', source });
+        log('[limit-failover] 侦测到限流横幅，已触发任务 ' + task.id + ' (source=' + source + (force ? ', force' : '') + ')');
+        return json(res, 202, { ok: true, run: automationPublicRun(run), banner });
+      } catch (error) {
+        return json(res, 400, { ok: false, error: error.message });
+      }
+    });
+  }
+
+  if (req.method === 'GET' && p === '/api/limit-failover/status') {
+    return (async () => {
+      const task = findLimitFailoverTask();
+      const banner = await readLimitBanner().catch(() => null);
+      const runs = task
+        ? Array.from(automationRuns.values()).filter((run) => run.taskId === task.id).sort((a, b) => b.startedAt - a.startedAt).slice(0, 5).map(automationPublicRun)
+        : [];
+      return json(res, 200, {
+        ok: true,
+        task: task ? { id: task.id, name: task.name, enabled: task.enabled, schedule: task.schedule || null } : null,
+        inFlight: !!limitFailoverInFlight,
+        banner,
+        state: readLimitFailoverState(),
+        windowMs: limitFailover.LIMIT_FAILOVER_WINDOW_MS,
+        selectors: limitFailover.LIMIT_BANNER_SELECTORS,
+        runs,
+      });
+    })().catch((error) => json(res, 500, { ok: false, error: error.message }));
+  }
+
+  // 清掉窗口内的"该账号已被判定限流"记录（例如用户手动确认某账号其实还能用）。
+  if (req.method === 'POST' && p === '/api/limit-failover/clear') {
+    return readBody(req).then((body) => {
+      const uid = String(body && body.uid || '').trim();
+      const state = readLimitFailoverState();
+      if (uid) {
+        if (!state[uid]) return json(res, 404, { ok: false, error: '该账号没有限流记录' });
+        writeLimitFailoverState(limitFailover.clearAccountBlocked(state, uid));
+      } else {
+        writeLimitFailoverState({});
+      }
+      return json(res, 200, { ok: true, uid: uid || null, state: readLimitFailoverState() });
+    });
   }
 
   if (req.method === 'POST' && p === '/api/automations/stop') {

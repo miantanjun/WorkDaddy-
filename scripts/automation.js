@@ -43,6 +43,10 @@ const CAPABILITIES = [
   { id: 'account.forEach', zh: '循环账号', en: 'Iterate accounts', descriptionZh: '对全部或指定账号依次执行步骤；switch:true 会真实切换登录账号，并在循环结束后恢复原账号。', descriptionEn: 'Run steps for all or selected accounts; switch:true physically switches the logged-in account and restores the original account when the loop ends.', example: { op: 'account.forEach', accounts: 'all', switch: true, steps: [] } },
   { id: 'account.status', zh: '查询账号状态', en: 'Read account status', descriptionZh: '查询今日签到、今日活跃和积分等只读状态。', descriptionEn: 'Read check-in, activity, and credit status.', example: { op: 'account.status', fields: ['checkin.today', 'activity.today'] } },
   { id: 'account.checkin', zh: '账号静默签到', en: 'Check in as account', descriptionZh: '使用循环账号的 token 签到，不切换客户端。当天已确认签到时跳过所有请求；返回 ok、skipped、code 等状态。', descriptionEn: 'Check in using the context account token without switching accounts. Confirmed daily records skip all requests. Returns ok, skipped and code.', example: { op: 'account.checkin', saveAs: 'checkin' } },
+  { id: 'limit.probe', zh: '探测模型限流', en: 'Probe model rate limit', descriptionZh: '读取输入框上方的限流横幅（.rate-limit-info-banner / .cb-input-banner--error 等），返回 { hit, count, hits }。只读。注意：限流提示不在消息流里，不要在 .cr-message-list 上找。', descriptionEn: 'Read the rate-limit banner above the composer and return { hit, count, hits }. Read-only. The banner is NOT inside the message list.', example: { op: 'limit.probe', saveAs: 'limit' } },
+  { id: 'model.get', zh: '读取当前模型', en: 'Read current model', descriptionZh: '读取当前会话正在使用的模型 id。', descriptionEn: 'Read the model id currently used by the active conversation.', example: { op: 'model.get', saveAs: 'model' } },
+  { id: 'model.set', zh: '设置当前模型', en: 'Set current model', descriptionZh: '把当前（新建的）会话切到指定模型。用于换号后保持同一个模型继续跑。', descriptionEn: 'Switch the active (new) conversation to a given model so failover keeps the same model.', example: { op: 'model.set', modelId: 'deepseek-v4.1-flash' } },
+  { id: 'account.failoverContinue', zh: '限流切号续跑', en: 'Failover and continue', descriptionZh: '检测到限流后：标记当前账号限流 → 选一个还有余量的其他账号 → 切过去 → 保持同一个模型 → 把同一条任务原样续跑 → 复核是否仍被限流，不行继续换号；全都不行则回退原账号。不使用 dom./session. 步骤，因此不会抢占独占渲染器租约。', descriptionEn: 'On rate limit: mark the current account, pick another account with headroom, switch, keep the same model, replay the same task text, then verify.', example: { op: 'account.failoverContinue', saveAs: 'failover' } },
   { id: 'http.request', zh: 'HTTP 请求', en: 'HTTP request', descriptionZh: '调用 HTTP/HTTPS 接口并保存响应。', descriptionEn: 'Call an HTTP/HTTPS endpoint and retain its response.', example: { op: 'http.request', method: 'GET', url: 'https://example.com/api', saveAs: 'response' } },
   { id: 'http.requestAsAccount', zh: '使用账号请求', en: 'HTTP request as account', descriptionZh: '使用当前循环账号的登录态请求，任务中不会出现 Token。', descriptionEn: 'Call an endpoint with the current account session without exposing a token in the task.', example: { op: 'http.requestAsAccount', method: 'GET', url: 'https://example.com/api' } },
   { id: 'dom.find', zh: '查找页面元素', en: 'Find DOM element', descriptionZh: '使用 CSS、XPath 或文字查找页面元素。', descriptionEn: 'Find an element using CSS, XPath, or text.', example: { op: 'dom.find', locator: { kind: 'xpath', value: "//button[contains(., '领取')]" }, saveAs: 'element' } },
@@ -810,6 +814,44 @@ async function executeTask(taskInput, options = {}) {
       const account = ctx.account || (typeof options.currentAccount === 'function' ? await options.currentAccount() : null);
       const result = await options.accountStatus(account, step.fields || []);
       ctx.accountStatus = result;
+      return result;
+    }
+    if (op === 'limit.probe') {
+      if (typeof options.limitProbe !== 'function') throw new Error('限流探测能力不可用');
+      const result = await options.limitProbe();
+      ctx.limit = result;
+      if (step.saveAs) ctx.vars[String(step.saveAs)] = result;
+      return result;
+    }
+    if (op === 'model.get') {
+      if (typeof options.modelGet !== 'function') throw new Error('模型读取能力不可用');
+      const result = await options.modelGet();
+      ctx.model = result;
+      if (step.saveAs) ctx.vars[String(step.saveAs)] = result;
+      return result;
+    }
+    if (op === 'model.set') {
+      if (typeof options.modelSet !== 'function') throw new Error('模型设置能力不可用');
+      const modelId = String(resolveValue(step.modelId, ctx) || '').trim();
+      if (!modelId) throw new Error('model.set 缺少 modelId');
+      const result = await options.modelSet(modelId);
+      ctx.model = result;
+      if (step.saveAs) ctx.vars[String(step.saveAs)] = result;
+      return result;
+    }
+    // 语义：切到另一个账号 → 保持同一个模型 → 把同一条任务续跑下去。
+    // 全过程（TTL 守卫、跳过已被限流的账号、失败回退原账号）都在 daemon 侧实现；
+    // 这里只是一个不碰 dom.*/session.* 的入口，所以本任务不会抢占独占渲染器租约。
+    if (op === 'account.failoverContinue') {
+      if (typeof options.limitFailover !== 'function') throw new Error('限流切号能力不可用');
+      const detail = {
+        prompt: resolveValue(step.prompt, ctx),
+        modelId: resolveValue(step.modelId, ctx),
+        verifyMs: step.verifyMs,
+      };
+      const result = await options.limitFailover(detail);
+      ctx.failover = result;
+      if (step.saveAs) ctx.vars[String(step.saveAs)] = result;
       return result;
     }
     if (op === 'http.request' || op === 'http.requestAsAccount') {
