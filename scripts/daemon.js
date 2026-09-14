@@ -389,7 +389,7 @@ const DAEMON_VERSION = '1.3.0';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-switch-sync';
+const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-switch-sync-log';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
