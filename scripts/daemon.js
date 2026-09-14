@@ -1037,7 +1037,7 @@ function checkUpdateBoth(force) {
 // 「关于」页需要的版本汇总字段（两个版本号 + 任一有更新即 anyUpdate）
 function versionCheckPayload() {
   const up = upstreamUpdateState;
-  const sha = updateState.dmgSha256 || parseSha256(updateState.notes);
+  const sha = updateState.dmgSha256 || parseSha256(updateState.notes, updateState.assetName);
   return {
     current: DAEMON_VERSION,
     upstreamVersion: UPSTREAM_VERSION,
