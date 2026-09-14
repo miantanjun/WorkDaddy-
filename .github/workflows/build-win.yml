@@ -31,16 +31,41 @@ jobs:
           go-version: '1.27.0'
           cache: false
 
-      - name: 校验 CRLF（cmd 必须 CRLF，否则 cmd.exe 解析括号块会失败）
+      - name: 规范化换行（.cmd 必须 CRLF，否则 cmd.exe 解析括号块会失败）
         shell: bash
         run: |
-          for f in scripts/*.cmd; do
+          echo "--- 规范化前（git ls-files '*.cmd'）---"
+          for f in $(git ls-files '*.cmd'); do
+            if grep -q $'\r' "$f"; then echo "  CRLF     $f"; else echo "  LF(!)    $f"; fi
+          done
+          # checkout 在不同 git 配置/attributes 下可能给出 LF；这里统一重写为 CRLF，
+          # 保证打进安装包的 .cmd 一定能在 Windows 上运行（幂等，已是 CRLF 则不动）。
+          python - <<'PY'
+          import os
+          changed = []
+          for root, _, files in os.walk('scripts'):
+              for fn in files:
+                  if not fn.lower().endswith('.cmd'):
+                      continue
+                  p = os.path.join(root, fn)
+                  b = open(p, 'rb').read()
+                  nb = b.replace(b'\r\n', b'\n').replace(b'\r', b'\n').replace(b'\n', b'\r\n')
+                  if nb != b:
+                      open(p, 'wb').write(nb)
+                      changed.append(p)
+          print('规范化文件数:', len(changed))
+          for p in changed:
+              print('  normalized:', p)
+          PY
+          fail=0
+          for f in $(git ls-files '*.cmd'); do
             if ! grep -q $'\r' "$f"; then
-              echo "::error::$f 不是 CRLF，无法在 Windows 使用，请转换"
-              exit 1
+              echo "::error::$f 仍不是 CRLF，无法在 Windows 使用"
+              fail=1
             fi
           done
-          echo "所有 .cmd 均为 CRLF ✓"
+          if [ "$fail" != "0" ]; then exit 1; fi
+          echo "全部 .cmd 已确认为 CRLF ✓"
 
       - name: 解析版本号
         id: ver
@@ -115,6 +140,20 @@ jobs:
         run: |
           call scripts\verify-win.cmd
 
+      - name: 生成 Release 说明（含各安装包 SHA-256，作客户端校验兜底）
+        shell: pwsh
+        run: |
+          $lines = @()
+          Get-ChildItem -LiteralPath release\windows -Filter '*.exe' -File | Sort-Object Name | ForEach-Object {
+            $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLower()
+            $lines += "SHA256 ($($_.Name)): $h"
+          }
+          # 注意：必须写成 SHA256 (文件名): <hex> —— 客户端的 parseSha256 按文件名匹配当前 profile，
+          # 多资产共用一份说明时不会取错文件。GitHub 也会为资产提供 digest，这里是冗余兜底。
+          $lines += ''
+          $lines | Out-File -FilePath release\notes-sha.txt -Encoding ascii
+          Get-Content release\notes-sha.txt
+
       - name: 上传产物（仅 Setup.exe）
         uses: actions/upload-artifact@v4
         with:
@@ -129,6 +168,7 @@ jobs:
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.ver.outputs.version) }}
           name: WorkBuddy 助手 ${{ steps.ver.outputs.version }}
+          body_path: release/notes-sha.txt
           files: |
             release/windows/WorkDaddy-Setup-*.exe
             release/windows/WorkDaddy-AI-Setup-*.exe

@@ -886,6 +886,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '昨天': 'Yesterday', '分钟': ' min', '小时': ' h', '定位到第': 'Jump to message ', '条用户消息': ' user message', '发送中': 'Sending', '附件': 'Attachment', '疑似未完成': 'Possibly incomplete',
     '已开启': 'Enabled', '已关闭': 'Disabled', '已领取': 'Claimed', '立即领取,今日可领': 'Claim now, available today', '继续执行': 'Continue',
     '下载': 'Download', '安装': 'Install', '校验': 'Verify', '检查': 'Check', '重启': 'Restart', '即将打开安装包…': 'Opening installer…', '安装包已打开': 'Installer opened', '安装失败': 'Install failed', '更新出错': 'Update error', '更新失败': 'Update failed', '检查更新失败': 'Update check failed', '已是最新版本': 'Already up to date',
+    // 关于页「双版本 + 检查更新」
+    '检查更新': 'Check for updates', '正在检查…': 'Checking…', '修改版版本': 'Modified build', '上游版本': 'Upstream version', '查看上游发布页': 'View upstream release',
     '正在下载…': 'Downloading…', '正在准备更新…': 'Preparing update…', '正在安装新版本…': 'Installing new version…', '正在打开已校验的安装程序…': 'Opening verified installer…', '正在重启…': 'Restarting…', '启动新版本…': 'Launching new version…', '启动较慢，请稍候…': 'Startup is slow, please wait…', '更新服务正在重启…': 'Update service restarting…', '新版本服务在 120 秒内未恢复': 'New version service not recovered within 120s', '下载完成，准备安装…': 'Download complete, preparing to install…', '写入新文件…': 'Writing new file…', '已升级到 v': 'Upgraded to v', '已发现': 'Found', '网络暂时失败，正在重试…': 'Network hiccup, retrying…', '已是最新版本': 'Already up to date',
     '上传图片失败': 'Image upload failed', '图片读取失败': 'Could not read image', '图片处理失败:': 'Image processing failed:', '生成皮肤失败:': 'Could not generate skin:', '替换背景图失败': 'Could not replace wallpaper', '替换背景图失败:': 'Could not replace wallpaper:', '已用图片生成皮肤并应用': 'Generated and applied a skin from the image', '我的图片皮肤': 'My image skin', '显示或隐藏 API Key': 'Show or hide API key',
     '打开面板失败:': 'Could not open panel:', '无法连接本地服务:': 'Cannot connect to local service:', '退出失败:': 'Could not log out:', '登录失败，请关闭后重试': 'Login failed, please close and retry', '登录方式': 'Login method', '请求超时': 'Request timed out', '超时': 'Timeout',
@@ -7384,6 +7386,21 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             '</a>' +
           '</div>' +
         '</div>' +
+        '<div class="wbs-pcard wbs-about-version" id="wbs-version-card">' +
+          '<div class="wbs-about-ver-row">' +
+            '<span class="wbs-about-ver-label">修改版版本</span>' +
+            '<span class="wbs-about-ver-value" id="wbs-self-ver">—</span>' +
+          '</div>' +
+          '<div class="wbs-about-ver-row">' +
+            '<span class="wbs-about-ver-label">上游版本</span>' +
+            '<span class="wbs-about-ver-value" id="wbs-upstream-ver">—</span>' +
+          '</div>' +
+          '<div class="wbs-about-ver-actions">' +
+            '<button class="wbs-about-check-btn" id="wbs-check-update" type="button">检查更新</button>' +
+            '<span class="wbs-about-ver-status" id="wbs-ver-status" role="status" aria-live="polite"></span>' +
+          '</div>' +
+          '<div class="wbs-about-upstream-tip" id="wbs-upstream-tip" style="display:none"></div>' +
+        '</div>' +
         '<div class="wbs-pcard wbs-settings-card wbs-language-card">' +
           '<div class="wbs-settings-row">' +
             '<span class="wbs-pcard-title">语言</span>' +
@@ -7416,6 +7433,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       // 回拉 /api/about 填充信息（失败时保留硬编码占位）
       var ver = aboutPane.querySelector('#wbs-about-ver');
       if (ver) ver.textContent = 'v' + (WBS_VERSION && WBS_VERSION.indexOf('__WBS_') !== 0 ? WBS_VERSION : '');
+      // 「检查更新」按钮：手动检查时强制刷新，不受 daemon 6 小时缓存限制
+      var checkBtn = aboutPane.querySelector('#wbs-check-update');
+      if (checkBtn) checkBtn.onclick = function () { checkForUpdate(true); };
       api('/api/about').then(function (d) {
         if (!d || !d.ok) return;
         var el;
@@ -7431,6 +7451,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         if (repo && d.repository) repo.href = d.repository;
         var issues = aboutPane.querySelector('#wbs-about-issues');
         if (issues && d.repository) issues.href = d.repository.replace(/\/$/, '') + '/issues';
+        // 双版本：修改版版本（本仓库发布线）+ 上游基线版本（原作者仓库）
+        var selfVerEl = aboutPane.querySelector('#wbs-self-ver');
+        if (selfVerEl) selfVerEl.textContent = 'v' + (d.selfVersion || d.version || runtimeVersion || '');
+        var upVerEl = aboutPane.querySelector('#wbs-upstream-ver');
+        if (upVerEl) upVerEl.textContent = d.upstreamVersion ? 'v' + d.upstreamVersion : '—';
       }).catch(function () {});
       // 语言切换 Segmented 控件：随关于页构建，与主题/会话页分段外观一致
       var langSeg = aboutPane.querySelector('.wbs-lang-seg');
@@ -7456,8 +7481,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }
       wireTelemetrySettings();
       acRenderMonitorLogModal();
-      // 自动更新：检查 + 红点 + 更新卡片
-      checkForUpdate();
+      // 关于页新增静态文案（双版本卡等）构建后补一次翻译
+      applyI18n(aboutPane);
+      // 自动更新：双版本检查 + 红点 + 更新卡片
+      checkForUpdate(false);
     }
 
     function wireTelemetrySettings() {
@@ -7501,16 +7528,100 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
 
     // 自动更新 UI：查询 /api/update-check（force=1 每次面板打开都强制刷新，不受 daemon 6 小时缓存限制）
-    // → 有新版则 tab 红点 + 更新卡片 → 点击走 下载→安装→自动重启
-    function checkForUpdate() {
-      api('/api/update-check?force=1').then(function (d) {
+    // 双版本语义：本修改版仓库有新版本 → 下载安装；上游仓库有新版本 → 只提示（官方包会覆盖本修改版）
+    function checkForUpdate(manual) {
+      var checkBtn = aboutPane.querySelector('#wbs-check-update');
+      var status = aboutPane.querySelector('#wbs-ver-status');
+      var tip = aboutPane.querySelector('#wbs-upstream-tip');
+      // 网络不稳时 daemon 的检查可能长时间不返回：到点先解锁按钮并给出提示，
+      // 真结果晚到仍会照常覆盖（不丢弃）。
+      var guardTimer = null;
+      var clearGuard = function () { if (guardTimer) { clearTimeout(guardTimer); guardTimer = null; } };
+      if (manual) {
+        if (checkBtn) { checkBtn.disabled = true; checkBtn.textContent = '正在检查…'; }
+        if (status) { status.textContent = '正在检查更新…'; status.className = 'wbs-about-ver-status'; }
+        guardTimer = setTimeout(function () {
+          guardTimer = null;
+          if (checkBtn) { checkBtn.disabled = false; checkBtn.textContent = '检查更新'; }
+          if (status) { status.textContent = '检查超时（网络较慢），可稍后重试'; status.className = 'wbs-about-ver-status is-error'; }
+        }, 25000);
+      }
+      return api('/api/update-check?force=1').then(function (d) {
+        clearGuard();
         var tab = root.querySelector('.wbs-tab[data-tab="about"]');
         var card = aboutPane.querySelector('#wbs-update-card');
+        if (checkBtn) { checkBtn.disabled = false; checkBtn.textContent = '检查更新'; }
         if (tab) tab.classList.remove('wbs-tab-dot');
         if (card) card.style.display = 'none';
-        if (!d || !d.hasUpdate) return; // 无更新或检查失败：清除旧提示后不打扰
-        if (tab) tab.classList.add('wbs-tab-dot');
-        if (!card) return;
+        if (tip) { tip.style.display = 'none'; tip.textContent = ''; }
+        if (!d || d.ok === false) {
+          if (status) { status.textContent = '检查更新失败'; status.className = 'wbs-about-ver-status is-error'; }
+          return;
+        }
+        // 两个版本号：修改版（本仓库发布线）与上游基线（原作者仓库）
+        var selfEl = aboutPane.querySelector('#wbs-self-ver');
+        if (selfEl && d.current) selfEl.textContent = 'v' + d.current;
+        var upEl = aboutPane.querySelector('#wbs-upstream-ver');
+        if (upEl) {
+          var base = d.upstreamVersion || '';
+          if (d.upstreamHasUpdate && d.upstreamLatest) {
+            upEl.textContent = 'v' + base + ' → v' + d.upstreamLatest;
+            upEl.classList.add('is-warn');
+          } else {
+            upEl.textContent = base ? 'v' + base : '—';
+            upEl.classList.remove('is-warn');
+          }
+        }
+        // 任一版本有更新都亮红点
+        if ((d.hasUpdate || d.upstreamHasUpdate) && tab) tab.classList.add('wbs-tab-dot');
+        // GitHub API 匿名限额被打满时 daemon 会走网页跳转兜底（拿不到安装包校验值）
+        var degraded = d.checkedVia === 'html';
+        if (status) {
+          if (d.hasUpdate) {
+            status.textContent = '发现修改版新版本 v' + d.latest + (d.installable ? '' : '（需去发布页下载）');
+            status.className = 'wbs-about-ver-status is-warn';
+          } else if (d.upstreamHasUpdate) {
+            status.textContent = '上游已发布 v' + d.upstreamLatest + '，需合并后重新构建修改版';
+            status.className = 'wbs-about-ver-status is-warn';
+          } else if (d.selfReleaseMissing) {
+            status.textContent = '修改版仓库尚未发布任何 Release（需先构建发布一次）';
+            status.className = 'wbs-about-ver-status is-error';
+          } else if (degraded) {
+            status.textContent = '已是最新版本（GitHub API 限流，本次用网页方式核对）';
+            status.className = 'wbs-about-ver-status';
+          } else if (d.apiError) {
+            // 检查没走通：如实说明原因（限流 / 超时 / 仓库不可见）
+            status.textContent = '检查更新失败：' + d.apiError;
+            status.className = 'wbs-about-ver-status is-error';
+          } else if (!d.latest && !d.upstreamLatest) {
+            status.textContent = '检查更新失败';
+            status.className = 'wbs-about-ver-status is-error';
+          } else {
+            status.textContent = '已是最新版本';
+            status.className = 'wbs-about-ver-status';
+          }
+        }
+        // 提示区：上游有新版（只提示不自动装）+ 限流时的手动下载入口
+        var notices = [];
+        if (d.upstreamHasUpdate) {
+          notices.push('上游原仓库（' + esc(d.upstreamRepo || 'babygoton/WorkDaddy') + '）已发布 v' + esc(String(d.upstreamLatest || '')) +
+            '，本修改版基线为 v' + esc(String(d.upstreamVersion || '')) +
+            '。上游官方安装包会覆盖本修改版（界面与更新源都会退回官方状态），因此不自动安装；合并上游新代码后重新发一个修改版即可。' +
+            '<a class="wbs-about-upstream-link" href="' + escAttr(d.upstreamReleaseUrl || '') + '" target="_blank" rel="noopener">查看上游发布页</a>');
+        }
+        if (d.hasUpdate && !d.installable) {
+          notices.push('检测到修改版新版本 v' + esc(String(d.latest || '')) +
+            '，但本次未取到安装包校验值（GitHub API 被限流时会这样），无法一键更新。' +
+            '<a class="wbs-about-upstream-link" href="' + escAttr(d.releaseUrl || '') + '" target="_blank" rel="noopener">去发布页手动下载</a>');
+        }
+        if (tip && notices.length) {
+          tip.style.display = '';
+          tip.innerHTML = notices.map(function (text) {
+            return '<div class="wbs-about-tip-line">' + text + '</div>';
+          }).join('');
+        }
+        // 本修改版有新版且校验值齐全：展示可一键更新的卡片
+        if (!d.hasUpdate || !d.installable || !card) return;
         card.style.display = '';
         var title = aboutPane.querySelector('#wbs-update-title');
         if (title) title.textContent = '发现新版本 v' + d.latest;
@@ -7523,11 +7634,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           });
           notes.textContent = noteLines.join('\n') || '有新版本可用，点击更新。';
         }
-        var btn = aboutPane.querySelector('#wbs-update-btn');
-        if (btn) {
-          btn.onclick = function () { startUpdate(); };
+        var updateBtn = aboutPane.querySelector('#wbs-update-btn');
+        if (updateBtn) {
+          updateBtn.onclick = function () { startUpdate(); };
         }
-      }).catch(function () {});
+      }).catch(function () {
+        clearGuard();
+        if (checkBtn) { checkBtn.disabled = false; checkBtn.textContent = '检查更新'; }
+        if (status) { status.textContent = '检查更新失败：无法连接本地服务'; status.className = 'wbs-about-ver-status is-error'; }
+      });
     }
 
     function updateLogTimestamp() {
@@ -13391,6 +13506,23 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-monitor-log-entry:last-child{border-bottom:none}',
     '.wbs-about-foot{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:10px}',
     '.wbs-about-ver{font-family:ui-monospace,SF Mono,Menlo,monospace;font-size:11px;font-weight:500;color:var(--wb-icon-tertiary,#999);letter-spacing:.3px}',
+    /* 关于页：双版本信息卡（修改版版本 + 上游基线版本 + 检查更新） */
+    '.wbs-about-version{display:flex;flex-direction:column;gap:7px;padding:12px 14px}',
+    '.wbs-about-ver-row{display:flex;align-items:center;justify-content:space-between;gap:10px}',
+    '.wbs-about-ver-label{font-size:11.5px;color:var(--wb-icon-tertiary,#888)}',
+    '.wbs-about-ver-value{font-family:ui-monospace,SF Mono,Menlo,monospace;font-size:11.5px;font-weight:600;color:var(--wb-color-text-primary,#1f1f1f);letter-spacing:.2px;text-align:right;overflow-wrap:anywhere}',
+    '.wbs-about-ver-value.is-warn{color:#c0392b}',
+    '.wbs-about-ver-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:2px}',
+    '.wbs-about-check-btn{font-size:12px;font-weight:600;color:var(--wb-button-primary-fg,#fff);background:var(--wb-button-primary-bg,#1f1f1f);border:none;padding:6px 12px;border-radius:8px;cursor:pointer;transition:opacity .15s;flex:0 0 auto;white-space:nowrap}',
+    '.wbs-about-check-btn:hover{opacity:.85}',
+    '.wbs-about-check-btn:disabled{opacity:.5;cursor:default}',
+    '.wbs-about-ver-status{font-size:11px;line-height:1.5;color:var(--wb-icon-tertiary,#888);flex:1 1 auto;min-width:0;white-space:normal;overflow-wrap:anywhere}',
+    '.wbs-about-ver-status.is-warn{color:#c0392b;font-weight:600}',
+    '.wbs-about-ver-status.is-error{color:#c0392b}',
+    '.wbs-about-upstream-tip{font-size:11px;line-height:1.65;color:var(--wb-icon-tertiary,#777);background:rgba(0,0,0,.03);border:1px solid var(--wb-border-subtle,rgba(0,0,0,.08));border-radius:8px;padding:8px 10px;overflow-wrap:anywhere}',
+    '.wbs-about-tip-line+.wbs-about-tip-line{margin-top:6px;padding-top:6px;border-top:1px solid var(--wb-border-subtle,rgba(0,0,0,.08))}',
+    '.wbs-about-upstream-link{display:inline-block;margin-left:4px;color:var(--wb-button-primary-bg,#1f1f1f);font-weight:600;text-decoration:none}',
+    '.wbs-about-upstream-link:hover{text-decoration:underline}',
     '.wbs-about-feedback{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--wb-button-primary-bg,#1f1f1f);background:rgba(0,0,0,.05);padding:5px 12px;border-radius:999px;text-decoration:none;transition:background .15s;flex-shrink:0;white-space:nowrap}',
     '.wbs-about-feedback:hover{background:rgba(0,0,0,.1)}',
     '.wbs-about-ghbtn{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.06);color:var(--wb-color-text-primary,#1f1f1f);text-decoration:none;transition:background .15s,transform .15s;flex:0 0 32px}',

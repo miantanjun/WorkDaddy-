@@ -374,10 +374,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.24：账号轮换恢复真实积分段消耗检测，仅推荐缓存中到期时间最近的可用账号。
 // 1.2.25：首页弹窗任务补齐成长/活动入口，并按 renderer 页面身份修复重连后的 pageReady 触发。
 // 1.2.26：无效账号备份不再显示可点击的切换按钮，导入路径拒绝写入无效认证数据。
-const DAEMON_VERSION = '1.2.2';
+const DAEMON_VERSION = '1.3.0';
+// 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
+// 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
+const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
-// 本机 fork 直接对齐发布版本号，否则 About 页会显示 1.2.42、且更新检查会误判已是最新。
-const DAEMON_BUILD_ID = 'release-1.2.2-20260914-streaming-session-transfer-local-quitfix-autocopy-progress-delacct-idem-ws-hardlink-selfhost';
+// 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
+const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-upstream-1.2.2-dualversion-r5';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -572,10 +575,16 @@ async function selectCdpPort(logFn = log) {
  */
 const UPDATE_REPO = process.env.WBSWITCH_UPDATE_REPO || 'miantanjun/WorkDaddy-';
 const UPDATE_API = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
+// 上游（原作者）仓库：只用于「版本对照 + 后台提示」。上游官方安装包不含本修改版补丁，
+// 直接安装会把界面与更新源退回官方状态（等于丢掉本地增强），因此上游更新不自动安装。
+const UPSTREAM_REPO = process.env.WBSWITCH_UPSTREAM_REPO || 'babygoton/WorkDaddy';
+const UPSTREAM_API = `https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest`;
 const UPDATE_CHECK_INTERVAL = 6 * 3600 * 1000; // 每 6 小时检查一次（GitHub 未认证限流 60 次/h）
 const UPDATE_REQ_TIMEOUT = 10000; // 网络超时，超时静默失败不阻塞面板
+const UPDATE_FALLBACK_TIMEOUT = 5000; // 网页兜底通道的超时（更短，避免「检查更新」按钮卡太久）
 const UPDATE_DIR = path.join(DATA_DIR, 'update'); // 下载/解包目录
 const UPDATE_CHECK_CACHE = path.join(DATA_DIR, 'update-check.json');
+const UPDATE_UPSTREAM_CACHE = path.join(DATA_DIR, 'update-upstream.json'); // 上游版本对照缓存（离线兜底）
 const UPDATE_ATTEMPT_FILE = path.join(UPDATE_DIR, 'last-attempt.json');
 const UPDATE_DEBUG_LOG = path.join(UPDATE_DIR, 'update-debug.log');
 // 更新状态机（面板轮询用）：idle | checking | downloading | verifying | installing | done | error
@@ -595,6 +604,21 @@ const updateState = {
   error: null,
   checkedAt: 0,
   attemptId: null,
+  // 本次结果来自哪条通道：api（GitHub Releases API，最完整）/ html（网页跳转兜底，限流时用）/ cache（上次缓存）
+  checkedVia: null,
+  // 仓库存在但一个 Release 都没有（尚未成功构建发布）
+  selfReleaseMissing: false,
+};
+// 上游基线版本状态（只读对照，不参与下载/安装）
+const upstreamUpdateState = {
+  repo: UPSTREAM_REPO,
+  base: UPSTREAM_VERSION,
+  latest: null,
+  hasUpdate: false,
+  releaseUrl: null,
+  notes: '',
+  error: null,
+  checkedAt: 0,
 };
 let updateTimer = null;
 let updateDownloadPromise = null;
@@ -695,10 +719,14 @@ function semverCompare(a, b) {
 }
 
 // 带超时的 HTTPS GET（返回 statusCode + body + headers）
-function httpsGet(url, timeoutMs) {
+function httpsGet(url, timeoutMs, extraHeaders) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https:') ? require('https') : require('http');
-    const req = mod.get(url, { headers: { 'User-Agent': 'WorkDaddy/' + DAEMON_VERSION, Accept: 'application/vnd.github+json' } }, (res) => {
+    const headers = Object.assign({
+      'User-Agent': 'WorkDaddy/' + DAEMON_VERSION,
+      Accept: 'application/vnd.github+json',
+    }, extraHeaders || {});
+    const req = mod.get(url, { headers }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8'), headers: res.headers }));
@@ -708,10 +736,80 @@ function httpsGet(url, timeoutMs) {
   });
 }
 
-// 从 Release body 解析 SHA-256（发布时把 `SHA256: <hex>` 写进 Release notes）
-function parseSha256(body) {
+// 可选：GitHub Token。匿名 GitHub API 只有 60 次/小时，且按出口 IP 共享（代理/公司网络极易被打满）；
+// 配置 Token 后为 5000 次/小时。来源优先级：环境变量 WBSWITCH_GITHUB_TOKEN > <数据目录>/github-token.txt。
+// 不配置也能用（会自动退回不占配额的网页检测）。
+const UPDATE_TOKEN_FILE = path.join(DATA_DIR, 'github-token.txt');
+function githubAuthHeaders() {
+  let token = String(process.env.WBSWITCH_GITHUB_TOKEN || '').trim();
+  if (!token) {
+    try { token = String(fs.readFileSync(UPDATE_TOKEN_FILE, 'utf8')).trim(); } catch (_) { /* 未配置 */ }
+  }
+  return /^[A-Za-z0-9_-]{20,}$/.test(token) ? { Authorization: 'token ' + token } : {};
+}
+
+// 不跟随跳转，只读 302 Location —— 用于拿到 https://github.com/<repo>/releases/latest 的真实 tag。
+// 这条路径不消耗 GitHub API 配额，是 API 被限流时的兜底检测手段（拿不到资产名与 SHA-256）。
+function latestTagViaHtml(repo) {
+  return new Promise((resolve, reject) => {
+    const req = require('https').get('https://github.com/' + repo + '/releases/latest', {
+      headers: Object.assign({ 'User-Agent': 'WorkDaddy/' + DAEMON_VERSION, Accept: 'text/html' }, githubAuthHeaders()),
+    }, (res) => {
+      res.resume();
+      const loc = String(res.headers.location || '');
+      const m = loc.match(/\/releases\/tag\/(.+)$/);
+      if (m) return resolve(decodeURIComponent(m[1]).replace(/^v/, ''));
+      // 仓库存在但一个 Release 都没有时，GitHub 会跳到 /releases
+      if (/\/releases\/?$/.test(loc)) return reject(new Error(repo + ' no release'));
+      if (res.statusCode === 404) return reject(new Error(repo + ' 无 Release 或不可见（404）'));
+      return reject(new Error(repo + ' 网页检测未取到版本号（HTTP ' + res.statusCode + '）'));
+    });
+    req.on('error', reject);
+    req.setTimeout(UPDATE_FALLBACK_TIMEOUT, () => { req.destroy(new Error('request timeout')); });
+  });
+}
+
+// 由版本号推算资产下载地址（GitHub Release 资产 URL 是确定性的），
+// 用于 API 被限流、只剩「网页检测」时的下载兜底；URL 可用不代表有 SHA-256。
+function deterministicAssetURL(version) {
+  if (!IS_WIN) return null;
+  const fileName = (PROFILE.id === 'workbuddy-ai' ? 'WorkDaddy-AI-Setup-' : 'WorkDaddy-Setup-') + version + '.exe';
+  return { name: fileName, url: `https://github.com/${UPDATE_REPO}/releases/download/v${version}/${fileName}` };
+}
+
+// API 不可用时的统一提示语（区分限流/超时/不可见，便于判断是网络、代理还是仓库问题）
+function updateApiErrorText(detail, status) {
+  const text = String(detail || '');
+  if (status === 403 || /rate limit/i.test(text)) {
+    return 'GitHub API 被限流（匿名 60 次/小时，按出口 IP 共享），请稍后再试';
+  }
+  if (status === 404) return '仓库不可见或暂无 Release（404）';
+  if (/timeout|ETIMEDOUT|handshake|ECONNRESET|socket/i.test(text)) {
+    return '连接 GitHub 超时（网络或代理不稳定），请稍后再试';
+  }
+  return text ? '检查失败：' + text : '检查失败';
+}
+
+// 是否为「网络本身不通」（而非 GitHub 拒绝/限流）：这类错误下 github.com 同样不可达，
+// 再试网页兜底只是白等一次超时，直接走缓存兜底。
+function isNetworkFailure(err) {
+  const text = String((err && err.message) || err || '');
+  return /timeout|ETIMEDOUT|handshake|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|EPIPE|socket hang up|network/i.test(text);
+}
+
+// 从 Release body 解析 SHA-256。两种写法都支持：
+//   1) `SHA256: <hex>`                              —— 兼容旧版/单资产
+//   2) `SHA256 (WorkDaddy-Setup-1.3.0.exe): <hex>`  —— 多资产时按文件名精确匹配当前 profile
+// 注：GitHub 现在会为上传的资产自动给出 digest，正常路径走 asset.digest，这里只是兜底。
+function parseSha256(body, assetName) {
   if (!body) return null;
-  const m = String(body).match(/SHA-?256[:：]\s*([a-fA-F0-9]{64})/);
+  const text = String(body);
+  if (assetName) {
+    const escaped = String(assetName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const named = text.match(new RegExp('SHA-?256\\s*\\(\\s*' + escaped + '\\s*\\)\\s*[:：]\\s*([a-fA-F0-9]{64})', 'i'));
+    if (named) return named[1].toLowerCase();
+  }
+  const m = text.match(/SHA-?256[:：]\s*([a-fA-F0-9]{64})/);
   return m ? m[1].toLowerCase() : null;
 }
 
@@ -721,7 +819,7 @@ function normalizeAssetSha256(value) {
 }
 
 function expectedUpdateSha256() {
-  return updateState.dmgSha256 || parseSha256(updateState.notes);
+  return updateState.dmgSha256 || parseSha256(updateState.notes, updateState.assetName);
 }
 
 // 检查更新：请求 Releases API，比对版本，结果写缓存（内存 + 文件）
@@ -735,7 +833,7 @@ function checkUpdate(force) {
   updateState.status = 'checking';
   updateState.message = '正在检查更新…';
   updateDebug('check-start', { force: !!force, current: DAEMON_VERSION, updateApi: UPDATE_API });
-  return httpsGet(UPDATE_API)
+  return httpsGet(UPDATE_API, null, githubAuthHeaders())
     .then(({ status, body }) => {
       if (status !== 200) {
         throw new Error('Releases API ' + status + (status === 404 ? '（仓库暂无 Release）' : ''));
@@ -767,13 +865,17 @@ function checkUpdate(force) {
            assets.find((a) => /\.dmg$/i.test(a.name || '') && (PROFILE.id !== 'workbuddy-ai' || !/WorkDaddy-AI-/i.test(a.name || ''))) || null);
       updateState.dmgUrl = asset ? asset.browser_download_url : null;
       updateState.dmgSize = asset ? asset.size : 0;
-      updateState.dmgSha256 = asset ? normalizeAssetSha256(asset.digest) : parseSha256(updateState.notes);
+      // GitHub 会为上传的资产提供 digest（sha256:...）；缺失时退回 Release 说明里的 SHA256 行
+      updateState.dmgSha256 = (asset && normalizeAssetSha256(asset.digest)) || parseSha256(updateState.notes, asset && asset.name);
       updateState.assetName = asset ? asset.name : null;
       updateState.checkedAt = Date.now();
       updateState.status = 'idle';
+      updateState.error = null;
+      updateState.checkedVia = 'api';
+      updateState.selfReleaseMissing = false;
       updateState.message = updateState.hasUpdate ? '发现新版本 v' + latest : '已是最新版本';
-      // 缓存发布信息，不缓存依赖当前运行版本的判断结果。
-      try { fs.writeFileSync(UPDATE_CHECK_CACHE, JSON.stringify({ latest, dmgUrl: updateState.dmgUrl, dmgSize: updateState.dmgSize, dmgSha256: updateState.dmgSha256, assetName: updateState.assetName, notes: updateState.notes, checkedAt: updateState.checkedAt })); } catch (_) {}
+      // 缓存发布信息，不缓存依赖当前运行版本的判断结果。带 repo 标记，避免换了更新源后读到别家仓库的旧数据。
+      try { fs.writeFileSync(UPDATE_CHECK_CACHE, JSON.stringify({ repo: UPDATE_REPO, latest, dmgUrl: updateState.dmgUrl, dmgSize: updateState.dmgSize, dmgSha256: updateState.dmgSha256, assetName: updateState.assetName, notes: updateState.notes, checkedAt: updateState.checkedAt })); } catch (_) {}
       log(`[update] 检查完成: latest=${latest} hasUpdate=${updateState.hasUpdate} (current=${DAEMON_VERSION})`);
       updateDebug('check-result', { current: DAEMON_VERSION, latest, hasUpdate: updateState.hasUpdate, assetName: updateState.assetName, assetSize: updateState.dmgSize, assetSha256: updateState.dmgSha256 });
       return updateState;
@@ -784,22 +886,177 @@ function checkUpdate(force) {
       updateState.message = '检查更新失败';
       log(`[update] 检查失败: ${e.message}`);
       updateDebug('check-error', { error: e.message });
-      // 尝试读缓存兜底（上次成功的结果）
-      try {
-        const c = JSON.parse(fs.readFileSync(UPDATE_CHECK_CACHE, 'utf8'));
-        const cachedLatest = String(c.latest || '').replace(/^v/, '');
-        updateState.latest = cachedLatest;
-        updateState.hasUpdate = semverCompare(cachedLatest, DAEMON_VERSION) > 0;
-        updateState.dmgUrl = c.dmgUrl;
-        updateState.dmgSize = Number(c.dmgSize) || 0;
-        updateState.assetName = c.assetName || null;
-        updateState.dmgSha256 = normalizeAssetSha256(c.dmgSha256) || parseSha256(c.notes);
-        updateState.notes = c.notes;
-        updateState.checkedAt = c.checkedAt || Date.now();
-        updateState.message = updateState.hasUpdate ? '发现新版本 v' + cachedLatest : '已是最新版本';
-      } catch (_) {}
-      return updateState;
+      // 二次兜底：读上次成功缓存。只认同一仓库的缓存，避免换源后读到旧数据。
+      const applyCache = (errText) => {
+        updateState.checkedVia = 'cache';
+        updateState.error = errText;
+        try {
+          const c = JSON.parse(fs.readFileSync(UPDATE_CHECK_CACHE, 'utf8'));
+          if (c.repo && c.repo !== UPDATE_REPO) throw new Error('缓存来自其它仓库: ' + c.repo);
+          const cachedLatest = String(c.latest || '').replace(/^v/, '');
+          updateState.latest = cachedLatest;
+          updateState.hasUpdate = semverCompare(cachedLatest, DAEMON_VERSION) > 0;
+          updateState.dmgUrl = c.dmgUrl;
+          updateState.dmgSize = Number(c.dmgSize) || 0;
+          updateState.assetName = c.assetName || null;
+          updateState.dmgSha256 = normalizeAssetSha256(c.dmgSha256) || parseSha256(c.notes, c.assetName);
+          updateState.notes = c.notes;
+          updateState.checkedAt = c.checkedAt || Date.now();
+          updateState.message = updateState.hasUpdate ? '发现新版本 v' + cachedLatest : '已是最新版本';
+        } catch (_) {}
+        return updateState;
+      };
+      // 网络本身不通时 github.com 也不会通，跳过网页兜底（避免白等一次超时）
+      if (isNetworkFailure(e)) {
+        updateDebug('check-skip-html-fallback', { reason: 'network', error: e.message });
+        return Promise.resolve(applyCache(updateApiErrorText(e.message)));
+      }
+      // API 被限流/不可用（代理网络常见）：用不消耗配额的网页跳转检测最新 tag。
+      // 该通道拿不到资产名与 SHA-256，只能判断「有没有新版」，安装需走发布页手动下载。
+      return latestTagViaHtml(UPDATE_REPO).then((latest) => {
+        const hasUpdate = semverCompare(latest, DAEMON_VERSION) > 0;
+        const asset = hasUpdate ? deterministicAssetURL(latest) : null;
+        updateState.latest = latest;
+        updateState.hasUpdate = hasUpdate;
+        updateState.releaseUrl = `https://github.com/${UPDATE_REPO}/releases/tag/v${latest}`;
+        updateState.notes = '';
+        updateState.assetName = asset ? asset.name : null;
+        updateState.dmgUrl = asset ? asset.url : null;
+        updateState.dmgSize = 0;
+        updateState.dmgSha256 = null;
+        updateState.checkedVia = 'html';
+        updateState.selfReleaseMissing = false;
+        updateState.checkedAt = Date.now();
+        updateState.error = updateApiErrorText(e.message);
+        updateState.message = hasUpdate ? '发现新版本 v' + latest + '（网页检测，需手动下载）' : '已是最新版本';
+        log(`[update] API 不可用，网页兜底检测: latest=${latest} hasUpdate=${hasUpdate}`);
+        updateDebug('check-fallback-html', { repo: UPDATE_REPO, apiError: e.message, latest, hasUpdate });
+        return updateState;
+      }).catch((htmlErr) => {
+        const htmlMsg = String((htmlErr && htmlErr.message) || htmlErr);
+        updateDebug('check-fallback-html-error', { error: htmlMsg });
+        updateState.selfReleaseMissing = /no release|无 Release|404/.test(htmlMsg);
+        return applyCache(updateState.selfReleaseMissing
+          ? `修改版仓库暂无 Release（${UPDATE_REPO}），需先完成一次构建发布`
+          : updateApiErrorText(htmlMsg));
+      });
     });
+}
+
+// 上游版本对照：只读原作者仓库（babygoton/WorkDaddy）的最新 Release。
+// 「关于」页要同时展示「上游基线版本」和「本修改版版本」，并在上游发布新版时给出提示。
+// 上游官方安装包不含本修改版补丁，装上去等于退回官方状态，因此这里只提示、不下载安装。
+function checkUpstreamUpdate(force) {
+  if (!force && Date.now() - upstreamUpdateState.checkedAt < UPDATE_CHECK_INTERVAL && upstreamUpdateState.latest) {
+    return Promise.resolve(upstreamUpdateState);
+  }
+  return httpsGet(UPSTREAM_API, null, githubAuthHeaders())
+    .then(({ status, body }) => {
+      if (status !== 200) {
+        throw new Error('上游 Releases API ' + status + (status === 404 ? '（仓库暂无 Release）' : ''));
+      }
+      const rel = JSON.parse(body);
+      const latest = String(rel.tag_name || '').replace(/^v/, '');
+      upstreamUpdateState.latest = latest;
+      upstreamUpdateState.hasUpdate = semverCompare(latest, UPSTREAM_VERSION) > 0;
+      upstreamUpdateState.releaseUrl = rel.html_url || null;
+      upstreamUpdateState.notes = (rel.body || '').slice(0, 1200);
+      upstreamUpdateState.error = null;
+      upstreamUpdateState.checkedAt = Date.now();
+      try {
+        fs.writeFileSync(UPDATE_UPSTREAM_CACHE, JSON.stringify({
+          repo: UPSTREAM_REPO,
+          latest,
+          hasUpdate: upstreamUpdateState.hasUpdate,
+          releaseUrl: upstreamUpdateState.releaseUrl,
+          notes: upstreamUpdateState.notes,
+          checkedAt: upstreamUpdateState.checkedAt,
+        }));
+      } catch (_) {}
+      updateDebug('upstream-check-result', { repo: UPSTREAM_REPO, base: UPSTREAM_VERSION, latest, hasUpdate: upstreamUpdateState.hasUpdate });
+      log(`[update] 上游对照完成: base=${UPSTREAM_VERSION} latest=${latest} hasUpdate=${upstreamUpdateState.hasUpdate}`);
+      return upstreamUpdateState;
+    })
+    .catch((e) => {
+      updateDebug('upstream-check-error', { repo: UPSTREAM_REPO, error: e.message });
+      const readUpstreamCache = (errText) => {
+        upstreamUpdateState.error = errText;
+        try {
+          const c = JSON.parse(fs.readFileSync(UPDATE_UPSTREAM_CACHE, 'utf8'));
+          if (c && c.latest && (!c.repo || c.repo === UPSTREAM_REPO)) {
+            upstreamUpdateState.latest = String(c.latest).replace(/^v/, '');
+            upstreamUpdateState.hasUpdate = semverCompare(upstreamUpdateState.latest, UPSTREAM_VERSION) > 0;
+            upstreamUpdateState.releaseUrl = c.releaseUrl || null;
+            upstreamUpdateState.notes = c.notes || '';
+            upstreamUpdateState.checkedAt = c.checkedAt || 0;
+          }
+        } catch (_) {}
+        return upstreamUpdateState;
+      };
+      if (isNetworkFailure(e)) {
+        updateDebug('upstream-skip-html-fallback', { reason: 'network', error: e.message });
+        return Promise.resolve(readUpstreamCache(updateApiErrorText(e.message)));
+      }
+      // API 限流/不可用：用不消耗配额的网页跳转拿最新 tag；再失败才退回上次缓存
+      return latestTagViaHtml(UPSTREAM_REPO).then((latest) => {
+        upstreamUpdateState.latest = latest;
+        upstreamUpdateState.hasUpdate = semverCompare(latest, UPSTREAM_VERSION) > 0;
+        upstreamUpdateState.releaseUrl = `https://github.com/${UPSTREAM_REPO}/releases/tag/v${latest}`;
+        upstreamUpdateState.notes = '';
+        upstreamUpdateState.checkedAt = Date.now();
+        upstreamUpdateState.error = updateApiErrorText(e.message);
+        try {
+          fs.writeFileSync(UPDATE_UPSTREAM_CACHE, JSON.stringify({
+            repo: UPSTREAM_REPO,
+            latest,
+            hasUpdate: upstreamUpdateState.hasUpdate,
+            releaseUrl: upstreamUpdateState.releaseUrl,
+            notes: '',
+            checkedAt: upstreamUpdateState.checkedAt,
+          }));
+        } catch (_) {}
+        log(`[update] 上游 API 不可用，网页兜底: latest=${latest} hasUpdate=${upstreamUpdateState.hasUpdate}`);
+        return upstreamUpdateState;
+      }).catch((htmlErr) => {
+        const htmlMsg = String((htmlErr && htmlErr.message) || htmlErr);
+        updateDebug('upstream-fallback-html-error', { error: htmlMsg });
+        return readUpstreamCache(updateApiErrorText(htmlMsg));
+      });
+    });
+}
+
+// 双源检查：本修改版仓库（可下载安装）+ 上游仓库（只对照提示）。
+// 面板「检查更新」按钮与后台定时检查统一走这里，保证两个版本号一次刷新到位。
+function checkUpdateBoth(force) {
+  return Promise.all([
+    checkUpdate(force).catch(() => updateState),
+    checkUpstreamUpdate(force).catch(() => upstreamUpdateState),
+  ]).then(() => ({ self: updateState, upstream: upstreamUpdateState }));
+}
+
+// 「关于」页需要的版本汇总字段（两个版本号 + 任一有更新即 anyUpdate）
+function versionCheckPayload() {
+  const up = upstreamUpdateState;
+  const sha = updateState.dmgSha256 || parseSha256(updateState.notes);
+  return {
+    current: DAEMON_VERSION,
+    upstreamVersion: UPSTREAM_VERSION,
+    upstreamRepo: UPSTREAM_REPO,
+    upstreamLatest: up.latest,
+    upstreamHasUpdate: !!up.hasUpdate,
+    upstreamReleaseUrl: up.releaseUrl || `https://github.com/${UPSTREAM_REPO}/releases`,
+    upstreamError: up.error || null,
+    upstreamCheckedAt: up.checkedAt || 0,
+    anyUpdate: !!updateState.hasUpdate || !!up.hasUpdate,
+    // 本次检测走的通道：api（最完整）/ html（网页跳转兜底，拿不到 SHA-256）/ cache（上次缓存）
+    checkedVia: updateState.checkedVia || null,
+    apiError: updateState.error || null,
+    releaseUrl: updateState.releaseUrl || null,
+    // 修改版仓库是否存在（一个 Release 都没有时提示「尚未发布」）
+    selfReleaseMissing: !!updateState.selfReleaseMissing,
+    // 能否一键更新：既有资产地址、又有可信 SHA-256（Windows 侧还会再校验安装包内的 daemon 版本）
+    installable: !!(updateState.hasUpdate && updateState.dmgUrl && sha),
+  };
 }
 
 // 下载安装包（macOS .dmg / Windows Setup.exe 或旧 ZIP），流式写文件更新 progress，带 SHA-256 校验
@@ -9283,6 +9540,9 @@ function handleApi(req, res) {
       name: WORKDADDY_DISPLAY_NAME,
       tagline: PROFILE.name + ' 的多账号 · 主题 · 增强工具集',
       version: DAEMON_VERSION,
+      selfVersion: DAEMON_VERSION, // 本修改版版本（与 tag / 安装包文件名一致）
+      upstreamVersion: UPSTREAM_VERSION, // 上游基线版本（原作者 babygoton/WorkDaddy）
+      upstreamRepo: UPSTREAM_REPO,
       appVersion: appVersion,
       license: 'AGPL-3.0',
       repository: 'https://github.com/miantanjun/WorkDaddy-',
@@ -9298,7 +9558,7 @@ function handleApi(req, res) {
   // 自动更新：检查（GET /api/update-check，force=1 强制刷新）→ 下载（POST /api/update-download）→ 状态（GET /api/update-status）→ 安装（POST /api/update-apply）
   if (req.method === 'GET' && p === '/api/update-check') {
     const force = url.searchParams.get('force') === '1';
-    return Promise.resolve(checkUpdate(force)).then((st) =>
+    return Promise.resolve(checkUpdateBoth(force)).then(({ self: st }) =>
       json(res, 200, {
         ok: true,
         current: DAEMON_VERSION,
@@ -9311,6 +9571,8 @@ function handleApi(req, res) {
         message: st.message,
         error: st.error || null,
         checkedAt: st.checkedAt,
+        // 双版本：上游基线 + 本修改版，任一有更新都置 anyUpdate
+        ...versionCheckPayload(),
       })
     );
   }
@@ -9954,8 +10216,8 @@ runAutomationSchedules();
 const automationScheduleTimer = setInterval(runAutomationSchedules, 1000);
 automationScheduleTimer.unref && automationScheduleTimer.unref();
 // 自动更新：启动时检查一次（延迟 8s 等网络就绪），之后每 6 小时一次
-setTimeout(() => { checkUpdate(true).catch(() => {}); }, 8000);
-updateTimer = setInterval(() => { checkUpdate(false).catch(() => {}); }, UPDATE_CHECK_INTERVAL);
+setTimeout(() => { checkUpdateBoth(true).catch(() => {}); }, 8000);
+updateTimer = setInterval(() => { checkUpdateBoth(false).catch(() => {}); }, UPDATE_CHECK_INTERVAL);
 updateTimer.unref && updateTimer.unref();
 
 process.on('SIGTERM', () => {
