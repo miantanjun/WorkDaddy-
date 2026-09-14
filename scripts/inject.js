@@ -11726,7 +11726,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
 
     function autoCopyTotalFailed(job) {
-      return (Number(job && job.failed) || 0) + (Number(job && job.payloadFailed) || 0);
+      return (Number(job && job.failed) || 0) + (Number(job && job.payloadFailed) || 0)
+        + (Number(job && job.payloadFailedFiles) || 0);
     }
 
     // 已完成的任务只在结束后 2 分钟内保留展示，避免每次打开面板都弹旧结果。
@@ -11770,9 +11771,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var sub = '';
       if (running) {
         if (payloadPhase) {
-          headLabel = '正在复制产物「' + (job.currentLabel || '会话') + '」';
+          var fileTotal = Number(job.payloadFileTotal) || 0;
+          var fileDone = Number(job.payloadFileProcessed) || 0;
+          var savedBytes = Number(job.payloadLinkedBytes) || 0;
+          headLabel = '正在搬运产物「' + (job.currentLabel || '会话') + '」';
           sub = '正文已完成 ' + processed + '/' + total + ' · 产物 ' + payloadProcessed + '/' + payloadTotal
-            + ' · 当前 ' + fmtBytes(job.currentBytes) + ' · 已用 ' + fmtDuration(Date.now() - (job.startedAt || Date.now()));
+            + (fileTotal ? ' · 文件 ' + fileDone + '/' + fileTotal : '')
+            + (job.currentBytes ? ' · ' + fmtBytes(job.currentBytes) : '')
+            + (savedBytes ? ' · 硬链接已省 ' + fmtBytes(savedBytes) : '')
+            + ' · 已用 ' + fmtDuration(Date.now() - (job.startedAt || Date.now()));
         } else {
           headLabel = job.currentLabel ? ('正在复制会话「' + job.currentLabel + '」') : '正在准备复制计划…';
           sub = '第 ' + (job.currentIndex || 0) + '/' + total + ' 个 · 共 ' + fmtBytes(job.planBytes)
@@ -11783,11 +11790,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         headLabel = '会话复制完成';
         sub = '共 ' + total + ' 个 · 已复制 ' + job.copied + ' · 跳过 ' + job.skipped
           + (payloadTotal ? ' · 产物 ' + job.payloadCopied + '/' + payloadTotal : '')
+          + (Number(job.payloadLinkedBytes) ? ' · 硬链接省 ' + fmtBytes(job.payloadLinkedBytes) : '')
           + ' · 用时 ' + fmtDuration(job.elapsedMs);
       } else if (job.status === 'partial') {
         headLabel = '复制完成（有失败项）';
         sub = '共 ' + total + ' 个 · 已复制 ' + job.copied + ' · 失败 ' + autoCopyTotalFailed(job)
           + (payloadTotal ? ' · 产物 ' + job.payloadCopied + '/' + payloadTotal : '')
+          + (Number(job.payloadLinkedBytes) ? ' · 硬链接省 ' + fmtBytes(job.payloadLinkedBytes) : '')
           + ' · 用时 ' + fmtDuration(job.elapsedMs);
       } else {
         headLabel = '自动复制失败';

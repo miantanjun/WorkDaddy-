@@ -377,7 +377,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 const DAEMON_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 直接对齐发布版本号，否则 About 页会显示 1.2.42、且更新检查会误判已是最新。
-const DAEMON_BUILD_ID = 'release-1.2.2-20260914-streaming-session-transfer-local-quitfix-autocopy-progress-delacct-idem';
+const DAEMON_BUILD_ID = 'release-1.2.2-20260914-streaming-session-transfer-local-quitfix-autocopy-progress-delacct-idem-ws-hardlink';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -3968,26 +3968,190 @@ function sortAutoCopyPlanBySize(plan, wbHome) {
   });
 }
 
+// ── 产物目录的硬链接去重 ──────────────────────────────────────────────────
+// 切号复制产物时，若源文件已「冻结」（长时间未改写），直接建 NTFS 硬链接而不是拷贝
+// 字节：省空间（本机实测 workspace/sessions 里约 906MB 是逐字节重复的副本），并且
+// 不需要读取文件内容，因而对「权限受限 / 被进程占用」的文件同样有效 —— 复制会失败，
+// 硬链接会成功（实测：锁定文件 link 0.7ms 成功、copy 报 WinError 32）。
+//
+// 硬链接的语义边界：两侧共用同一份数据。原地改写会互相可见，所以只对「不会再被改写
+// 的冻结文件」建链接；活目录（modify_backup*）与刚写入的文件一律走复制。
+const WORKSPACE_LINK_EXCLUDE = /(^|[\\/])(modify_backup|\.modify_backup_meta)([\\/]|$)/;
+const WORKSPACE_LINK_FREEZE_MS = 10 * 60 * 1000;
+let workspaceLinkSupport = null;
+
+/** 读取 meta.autoCopy.workspaceLinkMode（'link' | 'copy'），缺省为 link。 */
+function workspaceLinkMode(dataDir) {
+  try {
+    const meta = JSON.parse(fs.readFileSync(path.join(dataDir, 'meta.json'), 'utf8'));
+    const mode = meta && meta.autoCopy && meta.autoCopy.workspaceLinkMode;
+    return mode === 'copy' ? 'copy' : 'link';
+  } catch (_) {
+    return 'link';
+  }
+}
+
+/** 一次性探测：当前卷是否支持硬链接。失败则本进程内永久回落复制。 */
+function detectWorkspaceLinkSupport(wbHome) {
+  if (workspaceLinkSupport !== null) return workspaceLinkSupport;
+  workspaceLinkSupport = false;
+  const dir = path.join(wbHome, 'workspace', 'sessions');
+  const probeA = path.join(dir, '.wbs-link-probe-a');
+  const probeB = path.join(dir, '.wbs-link-probe-b');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(probeA, 'probe');
+    fs.linkSync(probeA, probeB);
+    workspaceLinkSupport = fs.lstatSync(probeA).nlink > 1;
+    log(`[sessions-copy] 产物目录硬链接探测: ${workspaceLinkSupport ? '可用（冻结文件将按链接去重）' : '不可用（nlink 未增加），回落复制'}`);
+  } catch (e) {
+    log(`[sessions-copy] 产物目录硬链接探测失败（${e.code || e.message}），回落复制`);
+  } finally {
+    for (const probe of [probeA, probeB]) {
+      try { fs.unlinkSync(probe); } catch (_) {}
+    }
+  }
+  return workspaceLinkSupport;
+}
+
+function emptyWorkspaceCounters() {
+  return { files: 0, linked: 0, linkedBytes: 0, copied: 0, copiedBytes: 0, skipped: 0, kept: 0, failed: 0 };
+}
+
 /**
- * 只复制会话的「产物目录」workspace/sessions/<id>/。
+ * 遍历源产物目录并落到目标目录。useLink=true 时对冻结文件建硬链接，否则一律复制字节。
+ * 目标独有的文件永不删除。
+ */
+async function transferWorkspaceTree(from, to, options = {}) {
+  const counters = emptyWorkspaceCounters();
+  const useLink = options.useLink === true;
+  const freezeMs = Number.isFinite(options.freezeMs) ? options.freezeMs : WORKSPACE_LINK_FREEZE_MS;
+  const onFile = typeof options.onFile === 'function' ? options.onFile : null;
+  const now = Date.now();
+  const stack = [''];
+
+  const copyFileAt = async (srcPath, dstPath) => {
+    try {
+      const stat = await fs.promises.stat(srcPath);
+      await fs.promises.mkdir(path.dirname(dstPath), { recursive: true });
+      await fs.promises.copyFile(srcPath, dstPath);
+      counters.copied++;
+      counters.copiedBytes += Number(stat.size || 0);
+      return true;
+    } catch (e) {
+      counters.failed++;
+      return false;
+    }
+  };
+
+  while (stack.length) {
+    const rel = stack.pop();
+    const srcDir = rel ? path.join(from, rel) : from;
+    const dstDir = rel ? path.join(to, rel) : to;
+    let entries;
+    try {
+      entries = await fs.promises.readdir(srcDir, { withFileTypes: true });
+    } catch (e) {
+      counters.failed++;
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const relChild = rel ? rel + path.sep + entry.name : entry.name;
+      const srcPath = path.join(srcDir, entry.name);
+      const dstPath = path.join(dstDir, entry.name);
+      if (entry.isDirectory()) {
+        try {
+          await fs.promises.mkdir(dstPath, { recursive: true });
+        } catch (e) {
+          counters.failed++;
+          continue;
+        }
+        stack.push(relChild);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      counters.files++;
+
+      let srcStat = null;
+      try { srcStat = await fs.promises.stat(srcPath); }
+      catch (e) { counters.failed++; if (onFile) onFile(counters); continue; }
+
+      const frozen = freezeMs <= 0 || (now - Number(srcStat.mtimeMs || 0)) >= freezeMs;
+      if (!useLink || frozen === false || WORKSPACE_LINK_EXCLUDE.test(relChild)) {
+        await copyFileAt(srcPath, dstPath);
+        if (onFile) onFile(counters);
+        continue;
+      }
+
+      // 冻结文件：硬链接三分支
+      let dstStat = null;
+      try { dstStat = await fs.promises.lstat(dstPath); } catch (_) { dstStat = null; }
+      if (dstStat && !dstStat.isFile()) {
+        counters.failed++;
+        if (onFile) onFile(counters);
+        continue;
+      }
+      if (dstStat && Number(dstStat.size) !== Number(srcStat.size)) {
+        // 大小不一致：保守跳过，绝不覆盖目标已有内容
+        counters.skipped++;
+        if (onFile) onFile(counters);
+        continue;
+      }
+      try {
+        if (dstStat) { counters.kept++; await fs.promises.unlink(dstPath); }
+        await fs.promises.link(srcPath, dstPath);
+        counters.linked++;
+        counters.linkedBytes += Number(srcStat.size || 0);
+      } catch (e) {
+        // 链接失败（跨卷 / 不支持 / 竞争）→ 回落复制，不中断
+        workspaceLinkSupport = false;
+        counters.kept = Math.max(0, counters.kept - (dstStat ? 1 : 0));
+        await copyFileAt(srcPath, dstPath);
+      }
+      if (onFile) onFile(counters);
+    }
+  }
+  return counters;
+}
+
+/**
+ * 只处理会话的「产物目录」workspace/sessions/<id>/。
  * 该目录单个可达数百 MB，自动复制时放到第二阶段单独推进，让会话正文先落盘。
  * 目标已存在且文件数/字节数不低于源时直接跳过，避免每次切号重复搬运几百 MB。
+ *
+ * 支持硬链接时（本机 C:\ 为 NTFS）对冻结文件建链接，顺带补齐此前因 EACCES 中断而
+ * 缺失的文件；不支持或失败时逐文件回落复制，行为与旧版一致。
  */
-async function copySessionWorkspacePayload(wbHome, oldId, newId) {
+async function copySessionWorkspacePayload(wbHome, oldId, newId, options = {}) {
   const from = path.join(wbHome, 'workspace', 'sessions', String(oldId || ''));
   const to = path.join(wbHome, 'workspace', 'sessions', String(newId || ''));
   const source = directoryStats(from);
-  if (!source.files) return 'skipped';
+  if (!source.files) return { outcome: 'skipped', ...emptyWorkspaceCounters() };
   const target = directoryStats(to);
-  if (target.files >= source.files && target.bytes >= source.bytes) return 'skipped';
-  try {
-    fs.mkdirSync(path.dirname(to), { recursive: true });
-    await fs.promises.cp(from, to, { recursive: true, force: true });
-    return 'copied';
-  } catch (e) {
-    log('[sessions-copy] 复制产物目录失败 ' + from + ': ' + e.message);
-    return 'failed';
+  if (target.files >= source.files && target.bytes >= source.bytes) {
+    return { outcome: 'skipped', ...emptyWorkspaceCounters() };
   }
+  try {
+    fs.mkdirSync(to, { recursive: true });
+  } catch (e) {
+    log('[sessions-copy] 创建产物目录失败 ' + to + ': ' + e.message);
+    return { outcome: 'failed', ...emptyWorkspaceCounters() };
+  }
+  const mode = options.mode || workspaceLinkMode(DATA_DIR);
+  const useLink = mode !== 'copy' && detectWorkspaceLinkSupport(wbHome);
+  const counters = await transferWorkspaceTree(from, to, {
+    useLink,
+    freezeMs: options.freezeMs,
+    onFile: options.onFile,
+  });
+  const outcome = (counters.failed && !counters.linked && !counters.copied) ? 'failed' : 'copied';
+  if (useLink && (counters.linked || counters.copied)) {
+    log(`[sessions-copy] 产物去重 ${String(oldId).slice(0, 8)} → ${String(newId).slice(0, 8)}：`
+      + `链接 ${counters.linked} 个（省 ${formatByteSize(counters.linkedBytes)}）`
+      + ` 复制 ${counters.copied} 个 跳过 ${counters.skipped} 重建 ${counters.kept} 失败 ${counters.failed}`);
+  }
+  return Object.assign({ outcome }, counters);
 }
 
 // Reconcile every live member of a shared lineage.  A switch can arrive after
@@ -4554,6 +4718,15 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
     payloadFailed: 0,
     payloadBytes: 0,
     payloadProcessedBytes: 0,
+    // 硬链接去重统计：链接的文件数、省下的字节、回落复制/跳过/失败的文件数
+    payloadLinked: 0,
+    payloadLinkedBytes: 0,
+    payloadCopiedFiles: 0,
+    payloadSkippedFiles: 0,
+    payloadFailedFiles: 0,
+    // 当前会话的文件级进度（32 万文件的目录只靠字节量看不出是否还在动）
+    payloadFileTotal: 0,
+    payloadFileProcessed: 0,
     error: null,
     startedAt: Date.now(),
     updatedAt: Date.now(),
@@ -4605,6 +4778,7 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
                 targetId: String(target.targetId),
                 label: job.currentLabel,
                 bytes: Number(src.workspaceBytes || 0),
+                files: Number(src.workspaceFiles || 0),
               });
             }
           };
@@ -4637,6 +4811,7 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
             targetId: String(result.targetId),
             label: job.currentLabel,
             bytes: Number(src.workspaceBytes || 0),
+            files: Number(src.workspaceFiles || 0),
           });
         }
       } catch (e) {
@@ -4662,17 +4837,34 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
       job.currentId = item.sourceId;
       job.currentLabel = item.label;
       job.currentBytes = item.bytes;
+      job.payloadFileTotal = item.files || 0;
+      job.payloadFileProcessed = 0;
       job.updatedAt = Date.now();
-      log(`[sessions-auto-copy] 产物 (${index + 1}/${job.payloadTotal}) ${item.label} [${formatByteSize(item.bytes)}]`);
+      const linkedBase = job.payloadLinked;
+      const linkedBytesBase = job.payloadLinkedBytes;
+      log(`[sessions-auto-copy] 产物 (${index + 1}/${job.payloadTotal}) ${item.label} [${formatByteSize(item.bytes)} / ${item.files || 0} 文件]`);
       await yieldAutoCopyToRenderer();
       try {
-        const outcome = await copySessionWorkspacePayload(wbHome, item.sourceId, item.targetId);
-        if (outcome === 'copied') job.payloadCopied++;
-        else if (outcome === 'failed') job.payloadFailed++;
+        const result = await copySessionWorkspacePayload(wbHome, item.sourceId, item.targetId, {
+          // 每处理一个文件回写一次：32 万文件的目录只靠字节量看不出是否还在动
+          onFile: (counters) => {
+            job.payloadFileProcessed = counters.files;
+            job.payloadLinked = linkedBase + counters.linked;
+            job.payloadLinkedBytes = linkedBytesBase + counters.linkedBytes;
+            job.updatedAt = Date.now();
+          },
+        });
+        if (result.outcome === 'copied') job.payloadCopied++;
+        else if (result.outcome === 'failed') job.payloadFailed++;
         else job.payloadSkipped++;
+        job.payloadLinked = linkedBase + (result.linked || 0);
+        job.payloadLinkedBytes = linkedBytesBase + (result.linkedBytes || 0);
+        job.payloadCopiedFiles += result.copied || 0;
+        job.payloadSkippedFiles += result.skipped || 0;
+        job.payloadFailedFiles += result.failed || 0;
       } catch (e) {
         job.payloadFailed++;
-        log(`[sessions-auto-copy] 产物复制失败 ${item.sourceId}: ${e.message}`);
+        log(`[sessions-auto-copy] 产物处理失败 ${item.sourceId}: ${e.message}`);
       }
       job.payloadProcessed++;
       job.payloadProcessedBytes += item.bytes || 0;
@@ -4686,7 +4878,7 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
     job.currentId = null;
     job.currentLabel = '';
     job.currentBytes = 0;
-    log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 完成 total=${job.total} copied=${job.copied} skipped=${job.skipped} partial=${job.partial} failed=${job.failed} 产物=${job.payloadCopied}/${job.payloadTotal}(跳过 ${job.payloadSkipped} 失败 ${job.payloadFailed}) 用时 ${((job.finishedAt - job.startedAt) / 1000).toFixed(1)}s`);
+    log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 完成 total=${job.total} copied=${job.copied} skipped=${job.skipped} partial=${job.partial} failed=${job.failed} 产物=${job.payloadCopied}/${job.payloadTotal}(跳过 ${job.payloadSkipped} 失败 ${job.payloadFailed}) 硬链接=${job.payloadLinked}个/省${formatByteSize(job.payloadLinkedBytes)}(复制${job.payloadCopiedFiles} 跳过${job.payloadSkippedFiles} 失败${job.payloadFailedFiles}) 用时 ${((job.finishedAt - job.startedAt) / 1000).toFixed(1)}s`);
     const cleanup = setTimeout(() => autoCopyJobs.delete(id), 30 * 60 * 1000);
     if (cleanup.unref) cleanup.unref();
     pruneAutoCopyJobs();
@@ -4741,6 +4933,15 @@ function publicAutoCopyJob(job) {
     payloadSkipped: job.payloadSkipped || 0,
     payloadFailed: job.payloadFailed || 0,
     payloadBytes: job.payloadBytes || 0,
+    payloadProcessedBytes: job.payloadProcessedBytes || 0,
+    // 硬链接去重：链接的文件数、省下的字节、当前会话的文件级进度
+    payloadLinked: job.payloadLinked || 0,
+    payloadLinkedBytes: job.payloadLinkedBytes || 0,
+    payloadCopiedFiles: job.payloadCopiedFiles || 0,
+    payloadSkippedFiles: job.payloadSkippedFiles || 0,
+    payloadFailedFiles: job.payloadFailedFiles || 0,
+    payloadFileTotal: job.payloadFileTotal || 0,
+    payloadFileProcessed: job.payloadFileProcessed || 0,
     startedAt,
     updatedAt: job.updatedAt || startedAt,
     finishedAt: job.finishedAt || null,
