@@ -546,13 +546,22 @@ function canonicalWorkspace(cwd) {
 function ensureAutoCopyMeta(meta) {
   const current = meta.autoCopy;
   if (current && current.version === 2 && current.sessions && current.sessionIndex && current.workspaces && current.copies) {
+    // 单向级联删除的「抑制」表（1.3.0 新增）：记录某条 lineage 在某个账号上被**本地删除**过，
+    // auto-copy 不应再把它复制/同步回来。老 meta 没有这一项，就地补空表。
+    // ⚠️ 这里**绝不能**顺手改 version、也不能让上面这个守卫不成立 —— 守卫一旦失败，下面的
+    // v1→v2 迁移会把已经是 v2 结构的 sessions（{lineageId:{enabled,members,createdAt}}）当成
+    // v1（{uid:{sessionId:rule}}）去解析，从而凭空造出 sessionId 为 "enabled"/"members" 的伪
+    // lineage，直接损坏复制规则。所以只说「缺什么补什么」，结构判据一律不动。
+    if (!current.suppressed || typeof current.suppressed !== 'object' || Array.isArray(current.suppressed)) {
+      current.suppressed = {};
+    }
     return current;
   }
 
   // 1.0.15 stored rules under sourceUid. Convert them once to global session lineages
   // and global workspace paths so a migration/copy keeps the same shared identity.
   const legacy = current && typeof current === 'object' && !Array.isArray(current) ? current : {};
-  const next = { version: 2, allSessions: false, sessions: {}, sessionIndex: {}, workspaces: {}, copies: {} };
+  const next = { version: 2, allSessions: false, sessions: {}, sessionIndex: {}, workspaces: {}, copies: {}, suppressed: {} };
   const legacySessions = legacy.sessions && typeof legacy.sessions === 'object' ? legacy.sessions : {};
   for (const sourceUid of Object.keys(legacySessions)) {
     const bucket = legacySessions[sourceUid];
@@ -600,6 +609,9 @@ function readAutoCopyConfig(dataDir) {
     sessionIndex: autoCopy.sessionIndex,
     workspaces: autoCopy.workspaces,
     copies: autoCopy.copies,
+    suppressed: autoCopy.suppressed && typeof autoCopy.suppressed === 'object' && !Array.isArray(autoCopy.suppressed)
+      ? autoCopy.suppressed
+      : {},
   };
 }
 
@@ -696,6 +708,13 @@ function setAutoCopyRule(dataDir, { uid, kind, key, enabled }) {
     } else {
       lineage.enabled = true;
       addLineageMember(lineage, sourceUid, value);
+    }
+    // 用户显式重新打开这个会话的自动复制 = 覆盖之前的「本地删除」意图：清掉该账号上的抑制标记。
+    // 否则这条 lineage 会在这个账号上永远不再复制（比「删了又回来」更难恢复）。
+    const activeLineageId = config.sessionIndex[sourceUid][value];
+    if (activeLineageId && config.suppressed) {
+      const suppressKey = autoCopyRuleKey(activeLineageId, sourceUid);
+      if (config.suppressed[suppressKey]) delete config.suppressed[suppressKey];
     }
   } else {
     if (lineageId && config.sessions[lineageId]) config.sessions[lineageId].enabled = false;
@@ -929,6 +948,15 @@ function removeAutoCopySession(dataDir, uid, sessionId) {
           // Ignore malformed legacy mapping keys; they cannot match a valid lineage.
         }
       }
+      // lineage 都没了，针对它的抑制标记就成了无主垃圾键，一并清掉。
+      for (const key of Object.keys(config.suppressed || {})) {
+        try {
+          const parts = JSON.parse(key);
+          if (Array.isArray(parts) && parts[0] === lineageId) delete config.suppressed[key];
+        } catch (_) {
+          // 同上：坏键不可能匹配有效 lineage。
+        }
+      }
     }
   }
   writeMeta(dataDir, meta);
@@ -1015,6 +1043,171 @@ function collectLineageMembersForDelete(dataDir, sessionIds) {
     }
   }
   return members;
+}
+
+/* ---------------- 单向级联删除：抑制登记 ----------------
+ * 「抑制」= 某条 lineage 在某个账号上被**本地删除**过。语义是「这条 lineage 在这个账号上
+ * 已经不存在了，而且是用户主动删的」，所以 auto-copy 不该再把它复制/同步回来。
+ * 没有这张表，非主账号删除就只是「暂时看不见」—— 下次切号会被 buildAutoCopyPlan 原样复制
+ * 回来，表现为用户最反感的「删了又回来」。上游当初是用「双向全删」掩盖这个问题的，
+ * 代价是主账号的副本也被一起删掉，正是本功能要修正的行为。
+ * 键与 copies 映射保持一致：autoCopyRuleKey(lineageId, targetUid)。
+ */
+
+function isAutoCopySuppressed(config, lineageId, targetUid) {
+  const table = config && config.suppressed && typeof config.suppressed === 'object' ? config.suppressed : null;
+  if (!table) return false;
+  const id = String(lineageId || '').trim();
+  const uid = String(targetUid || '').trim();
+  if (!id || !uid) return false;
+  return !!table[autoCopyRuleKey(id, uid)];
+}
+
+// 某个账号上被抑制的所有 lineageId。buildAutoCopyPlan 用它一次性把不该复制的行滤掉，
+// 避免逐行读 meta。
+function getSuppressedLineagesForTarget(dataDir, targetUid) {
+  const uid = String(targetUid || '').trim();
+  if (!uid) return [];
+  const table = readAutoCopyConfig(dataDir).suppressed || {};
+  const out = [];
+  for (const key of Object.keys(table)) {
+    try {
+      const parts = JSON.parse(key);
+      if (Array.isArray(parts) && parts[0] && String(parts[1] || '') === uid) out.push(String(parts[0]));
+    } catch (_) { /* 坏键不可能匹配任何 lineage，忽略 */ }
+  }
+  return out;
+}
+
+// 便捷写法：自己读一次 meta。调用方已经有 config 时用 isAutoCopySuppressed(config, ...) 更省。
+function isAutoCopySuppressedForTarget(dataDir, lineageId, targetUid) {
+  const id = String(lineageId || '').trim();
+  const uid = String(targetUid || '').trim();
+  if (!id || !uid) return false;
+  return isAutoCopySuppressed(readAutoCopyConfig(dataDir), id, uid);
+}
+
+function setAutoCopySuppression(dataDir, lineageId, targetUid, info) {
+  const id = String(lineageId || '').trim();
+  const uid = String(targetUid || '').trim();
+  if (!id || !uid) return false;
+  const meta = readMeta(dataDir);
+  const config = ensureAutoCopyMeta(meta);
+  // 只对确实存在的 lineage 登记，避免留下永远没人清理的无主键。
+  if (!config.sessions[id]) return false;
+  config.suppressed[autoCopyRuleKey(id, uid)] = {
+    at: Date.now(),
+    reason: String(info && info.reason || 'local-delete'),
+    by: String(info && info.by || ''),
+  };
+  writeMeta(dataDir, meta);
+  return true;
+}
+
+function clearAutoCopySuppression(dataDir, lineageId, targetUid) {
+  const id = String(lineageId || '').trim();
+  const uid = String(targetUid || '').trim();
+  if (!id || !uid) return false;
+  const meta = readMeta(dataDir);
+  const config = ensureAutoCopyMeta(meta);
+  const key = autoCopyRuleKey(id, uid);
+  if (!config.suppressed[key]) return false;
+  delete config.suppressed[key];
+  writeMeta(dataDir, meta);
+  return true;
+}
+
+function clearLineageSuppressions(dataDir, lineageId) {
+  const id = String(lineageId || '').trim();
+  if (!id) return 0;
+  const meta = readMeta(dataDir);
+  const config = ensureAutoCopyMeta(meta);
+  let removed = 0;
+  for (const key of Object.keys(config.suppressed)) {
+    try {
+      const parts = JSON.parse(key);
+      if (Array.isArray(parts) && String(parts[0] || '') === id) { delete config.suppressed[key]; removed += 1; }
+    } catch (_) { /* 同上 */ }
+  }
+  if (removed) writeMeta(dataDir, meta);
+  return removed;
+}
+
+/**
+ * 单向级联删除的**方向判定**（纯函数：只读 meta，不写盘、不碰 DB）。
+ *
+ * 规则（用户定义，唯一权威）：
+ *   1. 请求命中**主账号**的会话   → mode='cascade'：按 lineage 向下级联，把所有账号里的
+ *      同源物理副本一并删除。这就是「主账号删除向下级联」。
+ *   2. 请求只命中**非主账号**的会话 → mode='local'：只删这些账号自己的副本，
+ *      **主账号与其他账号一律不动**；同时给出抑制登记清单，防止 auto-copy 事后把它复制回来。
+ *   3. 未设置主账号 uid           → mode='local'（保守取向：宁可少删，绝不误删别人的会话）。
+ *   4. 显式 mode='cascade'/'local' → 覆盖以上判定（UI 的「删除所有账号副本」按钮传 cascade）。
+ *
+ * 主从判定依据是**会话行自身的 user_id**（谁真正持有这份物理副本），
+ * 而不是 lineage 的出身账号 —— 某条 lineage 的「原始版本」完全可能落在非主账号里，
+ * 用出身判定会在这种情况下把主账号的会话误删。
+ *
+ * @param {string} dataDir
+ * @param {{ ids?: string[], rows?: Array<{id:string,user_id:string}>, primaryUid?: string, mode?: string }} options
+ * @returns {{ mode:'cascade'|'local', reason:string, requestedIds:string[], deleteIds:string[],
+ *            lineageIds:string[], suppressions:Array<{lineageId:string,uid:string}> }}
+ */
+function resolveSessionDeletePlan(dataDir, options) {
+  const opts = options && typeof options === 'object' ? options : {};
+  const requestedIds = Array.from(new Set(
+    (Array.isArray(opts.ids) ? opts.ids : []).map((value) => String(value || '').trim()).filter(Boolean)
+  ));
+  const uidById = new Map();
+  for (const row of (Array.isArray(opts.rows) ? opts.rows : [])) {
+    if (!row || row.id == null) continue;
+    uidById.set(String(row.id), String(row.user_id || '').trim());
+  }
+  const primaryUid = String(opts.primaryUid || '').trim();
+  const forced = String(opts.mode || '').trim();
+
+  const buildLocal = (reason) => {
+    const suppressions = [];
+    const seen = new Set();
+    for (const id of requestedIds) {
+      const uid = uidById.get(id) || '';
+      if (!uid) continue;
+      const info = getAutoCopySession(dataDir, uid, id);
+      if (!info.lineageId) continue;
+      const key = JSON.stringify([info.lineageId, uid]);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      suppressions.push({ lineageId: info.lineageId, uid });
+    }
+    return { mode: 'local', reason, requestedIds, deleteIds: requestedIds.slice(), lineageIds: [], suppressions };
+  };
+
+  const buildCascade = (reason) => {
+    const members = collectLineageMembersForDelete(dataDir, requestedIds);
+    const deleteIds = [];
+    const lineageIds = new Set();
+    for (const member of members) {
+      const id = String(member && member.id || '').trim();
+      if (id && !deleteIds.includes(id)) deleteIds.push(id);
+      const lineageId = String(member && member.lineageId || '').trim();
+      if (lineageId) lineageIds.add(lineageId);
+    }
+    return {
+      mode: 'cascade',
+      reason,
+      requestedIds,
+      deleteIds: deleteIds.length ? deleteIds : requestedIds.slice(),
+      lineageIds: Array.from(lineageIds),
+      suppressions: [],
+    };
+  };
+
+  if (forced === 'local') return buildLocal('forced-local');
+  if (forced === 'cascade') return buildCascade('forced-cascade');
+  if (!primaryUid) return buildLocal('no-primary-account');
+  const requestedUids = new Set(requestedIds.map((id) => uidById.get(id)).filter(Boolean));
+  if (!requestedUids.has(primaryUid)) return buildLocal('requested-not-primary');
+  return buildCascade('requested-includes-primary');
 }
 
 function removeAutoCopyAccount(dataDir, uid) {
@@ -1561,6 +1754,7 @@ module.exports = {
   updateMeta,
   canonicalWorkspace,
   getAutoCopyRules,
+  readAutoCopyConfig,
   dedupeAutoCopySessionRows,
   setAutoCopyRule,
   setAutoCopyAllSessions,
@@ -1578,6 +1772,13 @@ module.exports = {
   removeAutoCopySession,
   removeAutoCopyAccount,
   collectLineageMembersForDelete,
+  resolveSessionDeletePlan,
+  isAutoCopySuppressed,
+  isAutoCopySuppressedForTarget,
+  getSuppressedLineagesForTarget,
+  setAutoCopySuppression,
+  clearAutoCopySuppression,
+  clearLineageSuppressions,
   getAutoCopyMapping,
   setAutoCopyMapping,
   deleteAutoCopyMapping,

@@ -120,6 +120,13 @@ const {
   removeAutoCopySession,
   removeAutoCopyAccount,
   collectLineageMembersForDelete,
+  resolveSessionDeletePlan,
+  isAutoCopySuppressed,
+  isAutoCopySuppressedForTarget,
+  getSuppressedLineagesForTarget,
+  setAutoCopySuppression,
+  clearAutoCopySuppression,
+  clearLineageSuppressions,
   getAutoCopyMapping,
   setAutoCopyMapping,
   deleteAutoCopyMapping,
@@ -380,7 +387,7 @@ const DAEMON_VERSION = '1.3.0';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-limit-failover-phase0b';
+const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-cascade-delete';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -5005,6 +5012,12 @@ async function copySessionRecord(src, targetUid, options = {}) {
   const sourceLineage = sourceUid ? getAutoCopySession(DATA_DIR, sourceUid, src.id) : { lineageId: null, enabled: false };
   if (!lineageId && sourceLineage.enabled) lineageId = sourceLineage.lineageId;
   if (auto && sourceUid && !lineageId) lineageId = ensureAutoCopySession(DATA_DIR, sourceUid, src.id);
+  // 单向级联删除的兜底闸：这条 lineage 在目标账号上被本地删除过，就不再复制回去。
+  // 只在自动路径（auto）生效 —— 用户手动发起复制时，setAutoCopyRule(enable) 已经把抑制标记清掉。
+  // 放在锁之前返回，避免为一次注定跳过的复制去排队。
+  if (auto && lineageId && isAutoCopySuppressedForTarget(DATA_DIR, lineageId, targetUid)) {
+    return { status: 'suppressed', sourceId: src.id, targetId: null, failedFiles: 0, suppressed: true };
+  }
   const perform = async () => {
   const ownerIds = lineageId ? getAutoCopySessionMemberRecords(DATA_DIR, lineageId).map((member) => member.id) : [];
   if (sourceUid && lineageId) {
@@ -5121,8 +5134,13 @@ async function buildAutoCopyPlan(sourceUid, targetUid) {
     [source]
   );
   const workspaceSet = new Set(rules.workspaces.map(canonicalWorkspace));
+  // 单向级联删除：目标账号上被「本地删除」过的 lineage 不再复制过去，否则用户会看到
+  // 「删了又回来」。只按**已知** lineage 过滤 —— 还没有 lineage 的行不可能被抑制，
+  // 留给下面的 ensureAutoCopySessions 正常建档。
+  const suppressedLineages = new Set(getSuppressedLineagesForTarget(DATA_DIR, target));
   const selectedRows = dedupeAutoCopySessionRows(rows, { [source]: rules.allLineages })
-    .filter((row) => isAutoCopySessionSelected(rules, row));
+    .filter((row) => isAutoCopySessionSelected(rules, row))
+    .filter((row) => suppressedLineages.size === 0 || !suppressedLineages.has(String(rules.allLineages[String(row.id)] || '')));
   // Full-copy and workspace matches need stable hidden lineages for idempotent
   // repeated switches. Prepare the whole batch with one metadata write.
   const lineageSessionIds = selectedRows
@@ -9565,7 +9583,17 @@ function handleApi(req, res) {
       }
     });
   }
-  // 删除会话（真实删除）：POST /api/sessions/delete { ids }——删除 DB 记录 + 该账号下全部会话文件（不可恢复）
+  // 删除会话（真实删除）：POST /api/sessions/delete { ids, mode? }
+  //   mode: 'auto'（默认，按账号主从判定）| 'cascade'（强制向下级联）| 'local'（绝不跨账号）
+  //
+  // 单向级联删除规则（判定实现在 lib.js resolveSessionDeletePlan，纯函数、可单测）：
+  //   · 请求命中**主账号**的会话  → 向下级联：把这条 lineage 在所有账号里的同源物理副本一并删除。
+  //   · 只命中**非主账号**的会话  → 只删这些账号自己的副本；**主账号与其他账号一律不动**，
+  //     并登记「抑制」标记，防止 auto-copy 在下次切号时把副本复制回来（删了又回来）。
+  //   · 未设置主账号            → 按 local 处理（保守：宁可少删，绝不误删别的账号）。
+  //
+  // 这里取代了上游 1.1.46 的「双向全删」：旧行为对任意账号删除都会展开整条 lineage，
+  // 于是从非主账号删一次就把主账号的会话也删了 —— 正是本功能要修正的方向错误。
   if (req.method === 'POST' && p === '/api/sessions/delete') {
     return readBody(req).then(async (body) => {
       let ids;
@@ -9574,18 +9602,41 @@ function handleApi(req, res) {
       if (!ids.length) return json(res, 400, { ok: false, error: '未选择会话' });
       if (!ids.every(isValidSessionId)) return json(res, 400, { ok: false, error: '包含无效的会话 ID' });
       try {
-        // 展开目标会话所在的 lineage：其他账号自动复制出的同源副本一并级联删除，
-        // 避免删除后切走再切回时被 auto-copy 原样复制回来（会话「复活」）。
+        const primaryUid = String(primaryAccountStore.get() || '').trim();
+        // 1) 先查请求行各自的归属账号 —— 主从判定的唯一依据是「谁真正持有这份物理副本」，
+        //    而不是 lineage 的出身账号（原始版本完全可能落在非主账号里）。
+        const requestedRows = await sqliteQuery(
+          'SELECT id, user_id FROM sessions WHERE id IN (' + sqlPlaceholders(ids) + ');',
+          ids
+        );
+        const plan = resolveSessionDeletePlan(DATA_DIR, {
+          ids,
+          rows: requestedRows,
+          primaryUid,
+          mode: body && body.mode,
+        });
         const requestedSet = new Set(ids.map(String));
-        const members = collectLineageMembersForDelete(DATA_DIR, ids);
-        const memberIds = Array.from(new Set(members.map((m) => m.id).filter((id) => isValidSessionId(id))));
+        const memberIds = Array.from(new Set(plan.deleteIds.filter((id) => isValidSessionId(id))));
         if (!memberIds.length) return json(res, 404, { ok: false, error: '会话不存在或已删除' });
-        const placeholders = sqlPlaceholders(memberIds);
-        const before = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id IN (' + placeholders + ');', memberIds);
+        const before = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id IN (' + sqlPlaceholders(memberIds) + ');', memberIds);
         const matchedSet = new Set(before.map((row) => String(row.id || '')));
         const matchedIds = memberIds.filter((id) => matchedSet.has(String(id)));
         const matchedRows = before.filter((row) => matchedSet.has(String(row.id || '')));
-        // 1) 先完成可重试的文件与规则清理；失败时保留 DB 记录作为重试锚点。
+        // 2) 非主账号路径：**先落抑制标记，再删**。顺序很关键 —— 若先删后标记，进程在两步之间
+        //    挂掉就会留下「已经删掉但没标记」的状态，auto-copy 下次切号把副本复制回来。
+        //    先标记则最坏是「标记了但没删成」，用户再删一次即可，不会产生错误数据。
+        let suppressed = 0;
+        if (plan.mode === 'local' && plan.suppressions.length) {
+          for (const item of plan.suppressions) {
+            try {
+              if (setAutoCopySuppression(DATA_DIR, item.lineageId, item.uid, { reason: plan.reason, by: 'session-delete' })) suppressed += 1;
+            } catch (e) {
+              log(`[sessions-delete] 登记抑制标记失败 ${item.lineageId}/${item.uid}: ${e.message}`);
+              throw e;
+            }
+          }
+        }
+        // 3) 可重试的文件与规则清理；失败时保留 DB 记录作为重试锚点。
         const wbHome = PROFILE.dataRoot;
         let filesRemoved = 0;
         for (const id of matchedIds) filesRemoved += deleteSessionFiles(wbHome, id);
@@ -9598,20 +9649,103 @@ function handleApi(req, res) {
             throw e;
           }
         }
-        // 2) 最后真实删除 DB 记录（非软删）。若此步失败，重复请求可安全重试。
+        // 4) 最后真实删除 DB 记录（非软删）。若此步失败，重复请求可安全重试。
         if (matchedIds.length) {
           await sqliteRun(
             "DELETE FROM sessions WHERE id IN (" + sqlPlaceholders(matchedIds) + ");",
             matchedIds
           );
         }
+        // 5) 级联模式：整条 lineage 已删干净，针对它的抑制标记失去意义，清掉避免残留垃圾键。
+        if (plan.mode === 'cascade' && plan.lineageIds.length) {
+          for (const lineageId of plan.lineageIds) {
+            try { clearLineageSuppressions(DATA_DIR, lineageId); } catch (_) {}
+          }
+        }
         const cascaded = matchedIds.filter((id) => !requestedSet.has(String(id))).length;
-        log(`[sessions-delete] 已真实删除 ${matchedIds.length} 个会话（DB + ${filesRemoved} 项文件，级联副本 ${cascaded}）`);
-        return json(res, 200, { ok: true, deleted: matchedIds.length, requested: ids.length, cascaded, filesRemoved, rulesRemoved });
+        log(`[sessions-delete] mode=${plan.mode} reason=${plan.reason} 已真实删除 ${matchedIds.length} 个会话（DB + ${filesRemoved} 项文件，级联副本 ${cascaded}，抑制标记 ${suppressed}）`);
+        return json(res, 200, {
+          ok: true,
+          mode: plan.mode,
+          reason: plan.reason,
+          primaryUid: primaryUid || null,
+          deleted: matchedIds.length,
+          requested: ids.length,
+          cascaded,
+          filesRemoved,
+          rulesRemoved,
+          suppressed,
+        });
       } catch (e) {
         return json(res, 500, { ok: false, error: e.message });
       }
     });
+  }
+
+  // 删除前预览方向（只读）：GET /api/sessions/delete-plan?ids=a,b&mode=auto 或 POST { ids, mode }
+  // UI 用它把「会删掉谁、哪个账号的副本会一起没」在确认框里说清楚，
+  // 避免用户在不知情的情况下触发跨账号级联。
+  if ((req.method === 'GET' || req.method === 'POST') && p === '/api/sessions/delete-plan') {
+    return (async () => {
+      let ids = [];
+      let mode = 'auto';
+      try {
+        if (req.method === 'POST') {
+          const body = await readBody(req);
+          ids = normalizeSessionIdBatch(body && body.ids);
+          mode = String(body && body.mode || 'auto');
+        } else {
+          ids = normalizeSessionIdBatch(String(url.searchParams.get('ids') || '').split(','));
+          mode = String(url.searchParams.get('mode') || 'auto');
+        }
+      } catch (e) {
+        return json(res, 400, { ok: false, error: e.message });
+      }
+      if (!ids.length) return json(res, 400, { ok: false, error: '缺少 ids' });
+      return (async () => {
+        const primaryUid = String(primaryAccountStore.get() || '').trim();
+        const rows = await sqliteQuery(
+          'SELECT id, user_id FROM sessions WHERE id IN (' + sqlPlaceholders(ids) + ');',
+          ids
+        );
+        const plan = resolveSessionDeletePlan(DATA_DIR, { ids, rows, primaryUid, mode });
+        const memberIds = Array.from(new Set(plan.deleteIds.filter(isValidSessionId)));
+        const found = memberIds.length
+          ? await sqliteQuery('SELECT id, user_id FROM sessions WHERE id IN (' + sqlPlaceholders(memberIds) + ');', memberIds)
+          : [];
+        const requestedSet = new Set(ids.map(String));
+        const requestedByUid = new Map();
+        for (const row of rows) {
+          if (!requestedSet.has(String(row.id))) continue;
+          const uid = String(row.user_id || '');
+          requestedByUid.set(uid, (requestedByUid.get(uid) || 0) + 1);
+        }
+        const countByUid = new Map();
+        for (const row of found) {
+          const uid = String(row.user_id || '');
+          countByUid.set(uid, (countByUid.get(uid) || 0) + 1);
+        }
+        const nameByUid = new Map(listAccounts(DATA_DIR).map((a) => [String(a.uid), a.nickname || '']));
+        const accounts = Array.from(countByUid.entries()).map(([uid, count]) => ({
+          uid,
+          nickname: nameByUid.get(uid) || '',
+          count,
+          requested: requestedByUid.get(uid) || 0,
+          isPrimary: !!primaryUid && uid === primaryUid,
+        })).sort((a, b) => (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0) || b.count - a.count || a.uid.localeCompare(b.uid));
+        return json(res, 200, {
+          ok: true,
+          mode: plan.mode,
+          reason: plan.reason,
+          primaryUid: primaryUid || null,
+          requested: ids.length,
+          total: found.length,
+          cascaded: found.filter((row) => !requestedSet.has(String(row.id))).length,
+          accounts,
+          suppressionCount: plan.suppressions.length,
+        });
+      })().catch((e) => json(res, 500, { ok: false, error: e.message }));
+    })().catch((e) => json(res, 500, { ok: false, error: e.message }));
   }
   // 恢复会话：POST /api/sessions/restore { ids }
   if (req.method === 'POST' && p === '/api/sessions/restore') {

@@ -6002,8 +6002,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<span class="wbs-sess-batch-count" id="wbs-sess-batch-count">已选 0</span>' +
         '<button class="wbs-sess-bbtn" type="button" id="wbs-sess-copy" title="复制选中到其他账号"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span>复制</span></button>' +
         '<button class="wbs-sess-bbtn" type="button" id="wbs-sess-export" title="使用密码导出选中会话">' + EXPORT_ICON + '<span>导出</span></button>' +
-        '<button class="wbs-sess-bbtn wbs-sess-delbtn" type="button" id="wbs-sess-delete" title="删除选中"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg><span>删除</span></button>' +
-        '<button class="wbs-sess-bbtn wbs-sess-delbtn" type="button" id="wbs-sess-delete-all" style="display:none" title="删除选中会话及所有账号的同源副本">' + TRASH_SVG + '<span>删除所有账号副本</span></button>' +
+        '<button class="wbs-sess-bbtn wbs-sess-delbtn" type="button" id="wbs-sess-delete" title="删除选中：在主账号中操作会级联删除其它账号的同一会话；在非主账号中操作只删本账号这一份"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg><span>删除</span></button>' +
+        '<button class="wbs-sess-bbtn wbs-sess-delbtn" type="button" id="wbs-sess-delete-all" style="display:none" title="强制跨账号级联：删除选中会话及所有账号里的同源副本（不区分主从）">' + TRASH_SVG + '<span>删除所有账号副本</span></button>' +
         '<button class="wbs-sess-bbtn wbs-sess-done" type="button" id="wbs-sess-done">取消</button>' +
         '</div>' +
         '</div>' +
@@ -6625,27 +6625,56 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       });
     }
     // 删除弹窗：确认框（真实删除，弹窗内警示不可恢复）
+    //
+    // 单向级联删除的方向规则（与后端 lib.js resolveSessionDeletePlan 一致）：
+    //   · 删的是**主账号**里的会话 → 向下级联，把其它账号里的同一会话一并删除（两段确认）；
+    //   · 删的是**非主账号**里的会话 → 只删本账号这一份，主账号与其它账号一律不动（一段确认）。
+    // 弹窗文案取自 /api/sessions/delete-plan 的实际计算结果，不在前端猜范围 ——
+    // 否则界面说的和后端删的可能不是一回事。
     function openDeleteModal(ids, allAccounts) {
       ids = ids.slice();
       var titleEl = sessionsPane.querySelector('#wbs-sess-modal-title');
       var body = sessionsPane.querySelector('#wbs-sess-modal-body');
       var okBtn = sessionsPane.querySelector('#wbs-sess-modal-ok');
       var cancelBtn = sessionsPane.querySelector('#wbs-sess-modal-cancel');
-      var confirmed = !allAccounts;
       var pending = false;
-      titleEl.textContent = allAccounts ? '删除所有账号的同源会话？' : '删除 ' + ids.length + ' 个会话？';
-      body.innerHTML = allAccounts
-        ? '<p>已选 ' + ids.length + ' 个会话</p><div class="wbs-modal-warn">将永久删除所选会话，以及已关联到其他账号的所有同源副本、消息文件和本地缓存。此操作不可恢复。</div>'
-        : '<div class="wbs-modal-warn">删除后会话将从列表中移除，本账号的会话与其自动复制到其他账号的同源副本（本地消息文件）都将被永久删除，此操作不可恢复。</div>';
-      okBtn.textContent = allAccounts ? '继续确认' : '确定';
-      okBtn.disabled = false;
-      showSessModal(true);
+      var plan = null;
+      var confirmed = false;
+      var requestMode = allAccounts ? 'cascade' : 'auto';
+      var esc = function (value) {
+        return String(value == null ? '' : value).replace(/[&<>"]/g, function (ch) {
+          return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch];
+        });
+      };
+      var render = function () {
+        var p = plan || {};
+        var accounts = Array.isArray(p.accounts) ? p.accounts : [];
+        var lines = accounts.map(function (a) {
+          return '· ' + esc(a.nickname || a.uid) + '（' + (a.isPrimary ? '主账号' : '其它账号') + '）' + a.count + ' 份';
+        }).join('<br>');
+        if (p.mode === 'cascade') {
+          titleEl.textContent = confirmed ? '再次确认：跨账号级联删除' : '删除所有账号的同源会话？';
+          body.innerHTML = '<p>已选 ' + ids.length + ' 个会话</p>'
+            + '<div class="wbs-modal-warn">其中包含<b>主账号</b>的会话，按单向级联规则会一并删除其它账号中同一会话的副本。'
+            + '此操作不可恢复。</div>'
+            + (lines ? '<p style="margin:8px 0 0">删除范围（共 ' + (p.total || 0) + ' 份）</p><div style="font-size:12px;line-height:1.7">' + lines + '</div>' : '');
+          okBtn.textContent = confirmed ? '永久删除' : '继续确认';
+        } else {
+          titleEl.textContent = '删除 ' + ids.length + ' 个会话？';
+          body.innerHTML = '<p>已选 ' + ids.length + ' 个会话</p>'
+            + '<div class="wbs-modal-warn">删除的是<b>非主账号</b>中的会话，因此只删除这些账号自己的副本：'
+            + '主账号与其它账号中的同一会话<b>保持不动</b>。</div>'
+            + '<div class="wbs-modal-warn">已登记抑制标记，自动复制不会再把它复制回来。'
+            + '此操作不可恢复。</div>';
+          okBtn.textContent = '确定';
+        }
+        okBtn.disabled = false;
+      };
       var submit = function () {
         if (pending) return;
         if (!confirmed) {
           confirmed = true;
-          titleEl.textContent = '再次确认永久删除';
-          okBtn.textContent = '永久删除';
+          render();
           cancelBtn.focus();
           return;
         }
@@ -6654,10 +6683,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         api('/api/sessions/delete', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ ids: ids }),
+          body: JSON.stringify({ ids: ids, mode: requestMode }),
         }).then(function (d) {
-          var extra = (d && d.cascaded) ? '，含其他账号副本 ' + d.cascaded + ' 个' : '';
-          toast('已删除 ' + ((d && typeof d.deleted === 'number') ? d.deleted : ids.length) + ' 个会话' + extra, false, root);
+          var extra = (d && d.cascaded) ? '，含其它账号副本 ' + d.cascaded + ' 个' : '';
+          var scope = (d && d.mode === 'local') ? '（仅本账号，主账号未受影响）' : (d && d.mode === 'cascade' ? '（含跨账号级联）' : '');
+          toast('已删除 ' + ((d && typeof d.deleted === 'number') ? d.deleted : ids.length) + ' 个会话' + extra + scope, false, root);
           if (okBtn.onclick === submit) showSessModal(false);
           loadSessions();
         }).catch(function (e) {
@@ -6667,8 +6697,27 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           if (okBtn.onclick === submit) okBtn.disabled = false;
         });
       };
+      titleEl.textContent = '正在检查删除范围…';
+      body.innerHTML = '<p>已选 ' + ids.length + ' 个会话</p>';
+      okBtn.textContent = '确定';
+      okBtn.disabled = true;
+      showSessModal(true);
       okBtn.onclick = submit;
       cancelBtn.focus();
+      api('/api/sessions/delete-plan', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ids: ids, mode: requestMode }),
+      }).then(function (d) {
+        plan = d || {};
+      }).catch(function () {
+        // 预览失败不阻断删除：退回只讲规则、不宣称具体范围的文案。
+        plan = { mode: requestMode === 'cascade' ? 'cascade' : 'local' };
+      }).then(function () {
+        // 只有级联才需要两段确认：它会把别的账号里的会话一起删掉，后果不可逆。
+        confirmed = (plan && plan.mode !== 'cascade');
+        render();
+      });
     }
     function selectedSessIds() {
       return sessionsState.list.filter(function (s) { return sessionsState.selected[s.id]; }).map(function (s) { return s.id; });
