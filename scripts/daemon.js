@@ -389,7 +389,7 @@ const DAEMON_VERSION = '1.3.0';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-idle-switchback';
+const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-switch-sync';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -3745,6 +3745,8 @@ async function runLimitFailoverSwitchBack(plan) {
     const after = currentAccount();
     const afterUid = after ? String(after.uid || '') : '';
     if (afterUid !== primaryUid) throw new Error('切回后当前账号不是主账号（期望 ' + primaryUid.slice(0, 8) + '，实际 ' + (afterUid || '读不到') + '）');
+    // 切号完成后必须同步会话（与手动切号共用同一份实现）：把续跑账号里开了「自动复制」的会话搬到主账号。
+    const autoCopyJob = autoCopyAfterAccountSwitch(plan.toUid, primaryUid, 'limit-failover-switchback');
     const outcome = {
       status: waitedMs > 0 ? 'waited' : 'switched',
       primaryUid,
@@ -3752,6 +3754,7 @@ async function runLimitFailoverSwitchBack(plan) {
       waitedMs,
       blockedUntil: waitedMs > 0 ? blockedUntil : 0,
       elapsedMs: elapsedMs(),
+      autoCopy: autoCopyJob ? { jobId: autoCopyJob.id, total: autoCopyJob.total } : null,
     };
     finishLimitFailoverSwitchBack(plan, outcome);
     limitFailoverNotify('success', '续跑已结束，已自动切回主账号 ' + (primaryNickname || primaryUid.slice(0, 8)));
@@ -3888,6 +3891,7 @@ function idleSwitchbackPublicState() {
   return {
     enabled: config.enabled,
     minutes: config.minutes,
+    collapsed: config.collapsed !== false,
     thresholdMs: config.minutes * 60000,
     current: current ? { uid: current.uid, nickname: current.nickname } : null,
     primary: primaryUid ? { uid: primaryUid, nickname: primaryAccount ? String(primaryAccount.nickname || '') : '' } : null,
@@ -3938,7 +3942,15 @@ async function runIdleSwitchBack(plan) {
     if (afterUid !== report.primaryUid) {
       throw new Error('切回后当前账号不是主账号（期望 ' + report.primaryUid.slice(0, 8) + '，实际 ' + (afterUid || '读不到') + '）');
     }
-    const outcome = { status: 'switched', primaryUid: report.primaryUid, primaryNickname: report.primaryNickname, idleMs: report.idleMs };
+    // 切号完成后必须同步会话（与手动切号共用同一份实现）
+    const autoCopyJob = autoCopyAfterAccountSwitch(report.fromUid, report.primaryUid, 'idle-switchback');
+    const outcome = {
+      status: 'switched',
+      primaryUid: report.primaryUid,
+      primaryNickname: report.primaryNickname,
+      idleMs: report.idleMs,
+      autoCopy: autoCopyJob ? { jobId: autoCopyJob.id, total: autoCopyJob.total } : null,
+    };
     idleSwitchbackStateStore.set(idleSwitchback.resetState(report.primaryUid, Date.now()));
     writeAccountSwitchDesktopLog(accountSwitchLog.buildIdleSwitchBackReport({ at, plan: report, outcome }), at);
     limitFailoverNotify('success', '已闲置 ' + accountSwitchLog.formatDuration(report.idleMs) +
@@ -5788,6 +5800,54 @@ function runAutoCopyQueue() {
       autoCopyWorkerRunning = false;
       runAutoCopyQueue();
     });
+}
+
+/* ---------------- 切号后自动复制同步会话（共用一个入口） ---------------- */
+//
+// 语义：切换账号完成后，把**源账号**里已开启「自动复制」的会话及其产物目录同步到**新账号**。
+// 手动切号（POST /api/switch）原本就在路由里做了这件事，但**自动切号**（限流续跑结束后切回主账号、
+// 闲置超阈值切回主账号）走的是 automationSwitchAccount()，不经过那条路由 —— 于是自动切号后不复制。
+// 三个调用点统一走这里，别再各写一份（写散了必然漏）。
+function autoCopyAfterAccountSwitch(sourceUid, targetUid, reason) {
+  const source = String(sourceUid || '').trim();
+  const target = String(targetUid || '').trim();
+  if (!source || !target || source === target) return null;
+  try {
+    const rules = getAutoCopyRules(DATA_DIR, source) || {};
+    const hasRules = !!(rules.allSessions
+      || (Array.isArray(rules.sessionIds) && rules.sessionIds.length)
+      || (Array.isArray(rules.workspaces) && rules.workspaces.length));
+    if (!hasRules && !hasPendingAutoCopyTo(source)) {
+      log('[auto-copy] 切号后无需同步：源账号没有开启自动复制的会话 ' + JSON.stringify({ from: source, to: target, reason: String(reason || '') }));
+      return null;
+    }
+    const job = startAutoCopyJob(source, target, []);
+    log('[auto-copy] 切号后已触发会话同步 ' + JSON.stringify({ from: source, to: target, reason: String(reason || ''), jobId: job && job.id, total: job && job.total }));
+    return job;
+  } catch (error) {
+    log('[auto-copy] 切号后触发同步失败: ' + String((error && error.message) || error));
+    return null;
+  }
+}
+
+/**
+ * 「立即同步」的源账号解析（纯函数，单测直接切片调用）。
+ *   · 显式给了源账号 → 只同步它；不存在 / 与目标相同都返回 error
+ *   · **留空 → 除目标账号以外的所有账号**（把别的账号开了自动复制的会话都收拢到目标）
+ */
+function resolveSyncNowSources(accountUids, targetUid, explicitSource) {
+  const all = (Array.isArray(accountUids) ? accountUids : [])
+    .map((uid) => String(uid == null ? '' : uid).trim())
+    .filter(Boolean);
+  const target = String(targetUid == null ? '' : targetUid).trim();
+  const explicit = String(explicitSource == null ? '' : explicitSource).trim();
+  if (explicit) {
+    if (all.indexOf(explicit) < 0) return { sources: [], explicit: true, error: '源账号不存在' };
+    if (explicit === target) return { sources: [], explicit: true, error: '源账号与目标账号相同' };
+    return { sources: [explicit], explicit: true, error: '' };
+  }
+  const sources = all.filter((uid) => uid !== target);
+  return { sources, explicit: false, error: sources.length ? '' : '除目标账号外没有其它账号可以作为同步源' };
 }
 
 function startAutoCopyJob(sourceUid, targetUid, plan) {
@@ -9032,6 +9092,7 @@ function handleApi(req, res) {
     return readBody(req).then((body) => {
       const patch = {};
       if (body && body.enabled !== undefined) patch.enabled = !!body.enabled;
+      if (body && body.collapsed !== undefined) patch.collapsed = !!body.collapsed;
       if (body && body.minutes !== undefined) {
         const minutes = Number(body.minutes);
         if (!Number.isFinite(minutes) || minutes < idleSwitchback.MIN_MINUTES || minutes > idleSwitchback.MAX_MINUTES) {
@@ -10426,28 +10487,43 @@ function handleApi(req, res) {
       busy: !!(activeSpaceScanJob && activeSpaceScanJob.status === 'running'),
     });
   }
-  // 立即同步：POST /api/sessions/sync-now { targetUid }  //   不切号、不刷新页面 —— 以「当前账号」为源，把已开启自动复制的会话同步到 targetUid。
-  //   复用同一个任务队列（startAutoCopyJob），因此与切号触发的复制共享串行语义和进度接口。
+  // 立即同步：POST /api/sessions/sync-now { targetUid, sourceUid? }
+  //   · targetUid 必填
+  //   · sourceUid **可留空** → 留空表示「除目标账号以外的所有账号」：每个源账号各起一个同步任务，
+  //     各自只同步它自己开了「自动复制」的会话（已登记 copies 的部分自动跳过，可反复点）
+  //   · 传了 sourceUid 时只同步这一个源（旧语义）
+  //   不切号、不刷新页面；复用同一个任务队列（startAutoCopyJob），与切号触发的复制共享串行语义与进度接口。
   if (req.method === 'POST' && p === '/api/sessions/sync-now') {
     return readBody(req).then((body) => {
       try {
         const targetUid = String((body && body.targetUid) || '').trim();
         if (!targetUid) return json(res, 400, { ok: false, error: '缺少目标账号' });
-        const account = listAccounts(DATA_DIR).find((a) => a.uid === targetUid) || null;
+        const accounts = listAccounts(DATA_DIR);
+        const account = accounts.find((a) => a.uid === targetUid) || null;
         if (!account) return json(res, 404, { ok: false, error: '目标账号不存在' });
-        const current = currentAccount();
-        const sourceUid = String((body && body.sourceUid) || '').trim() || (current && current.uid) || '';
-        if (!sourceUid) return json(res, 409, { ok: false, error: '当前没有已登录的账号' });
-        if (sourceUid === targetUid) return json(res, 400, { ok: false, error: '源账号与目标账号相同' });
+        const resolved = resolveSyncNowSources(accounts.map((a) => a.uid), targetUid, (body && body.sourceUid) || '');
+        if (resolved.error) return json(res, resolved.explicit ? 400 : 409, { ok: false, error: resolved.error });
         // 已在跑 / 排队的同向任务：直接复用它，避免用户连点造成重复排队。
-        for (const job of autoCopyJobs.values()) {
-          if ((job.status === 'running' || job.status === 'queued')
-            && job.sourceUid === sourceUid && job.targetUid === targetUid) {
-            return json(res, 200, { ok: true, reused: true, job: publicAutoCopyJob(job) });
+        const jobs = [];
+        let reused = false;
+        for (const sourceUid of resolved.sources) {
+          let existing = null;
+          for (const job of autoCopyJobs.values()) {
+            if ((job.status === 'running' || job.status === 'queued')
+              && job.sourceUid === sourceUid && job.targetUid === targetUid) { existing = job; break; }
           }
+          if (existing) { reused = true; jobs.push(publicAutoCopyJob(existing)); continue; }
+          jobs.push(publicAutoCopyJob(startAutoCopyJob(sourceUid, targetUid, [])));
         }
-        const job = startAutoCopyJob(sourceUid, targetUid, []);
-        return json(res, 200, { ok: true, reused: false, job: publicAutoCopyJob(job) });
+        log('[sync-now] 已触发同步 ' + JSON.stringify({ target: targetUid, sources: resolved.sources, jobs: jobs.length, reused }));
+        return json(res, 200, {
+          ok: true,
+          reused,
+          job: jobs[0] || null,
+          jobs,
+          sourceUids: resolved.sources,
+          allSources: !resolved.explicit,
+        });
       } catch (e) {
         return json(res, 400, { ok: false, error: e.message });
       }
@@ -11310,11 +11386,8 @@ function handleApi(req, res) {
         }
         // 空间规则可能因切换前后的会话索引时序暂时无法生成初始计划，但规则本身仍需触发复制任务；
         // 任务规则通常能直接命中，所以旧逻辑只表现为“任务能复制、空间不复制”。
-        const sourceRules = sourceUid ? getAutoCopyRules(DATA_DIR, sourceUid) : { allSessions: false, sessionIds: [], workspaces: [] };
-        const hasSourceAutoCopyRules = !!(sourceRules.allSessions || sourceRules.sessionIds.length || sourceRules.workspaces.length);
-        const autoCopyJob = (hasSourceAutoCopyRules || hasPendingAutoCopyTo(sourceUid))
-          ? startAutoCopyJob(sourceUid, uid, [])
-          : null;
+        // 与自动切号（限流收尾切回 / 闲置切回）共用同一份实现，避免三处各写一遍走样。
+        const autoCopyJob = autoCopyAfterAccountSwitch(sourceUid, uid, 'switch-api');
         return json(res, 200, {
           ok: true,
           uid: acct.uid,

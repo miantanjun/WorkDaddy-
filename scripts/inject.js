@@ -1121,6 +1121,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '主账号还在限流窗口内，等窗口过去再切。': 'The primary account is still rate-limited; waiting for the window to pass.',
     '⚠️ 主账号的备份不在账号列表里（可能已被删除）。': 'Warning: the primary account backup is not in the account list.',
     '已清除主账号设置': 'Primary account cleared', '闲置阈值需要在 5 ~ 1440 分钟之间': 'Idle threshold must be between 5 and 1440 minutes',
+    '展开 / 折叠': 'Expand / collapse', '源账号': 'Source account', '目标账号': 'Target account',
+    '留空 = 除目标外的所有账号': 'Blank = every account except the target',
+    '源账号与目标账号不能相同': 'Source and target must be different accounts',
     '模型限流自动切号续跑': 'Auto switch account on rate limit',
     '当前账号被限流时，自动切到另一个账号、保持同一个模型、把同一条任务续跑下去。注意：这与 WorkBuddy 官方内置的「切模型 + 续跑」不是一回事 —— 官方换的是模型，这里换的是账号，模型保持不变。限流提示只出现在输入框上方的横幅里（.rate-limit-info-banner / .cb-input-banner--error 等），不在消息流中，所以探测落在横幅上。快路由 renderer 侧 MutationObserver 侦测到横幅后直接 POST /api/limit-failover/trigger 触发本任务；本任务的 1 分钟定时只作兜底。续跑内容优先取变量 prompt，为空则取当前会话里最后一条用户消息原样重发。被判定限流的账号 10 分钟内不再被选为接管方，交接成功后记录自动清除；所有账号都接管不了则回退原账号并提示。':
       'When the current account hits a rate limit, switch to another account, keep the same model and re-send the same task. This is NOT the same as WorkBuddy’s built-in “switch model + continue”: that one changes the model, while here only the account changes. The notice only shows in the banner above the composer (.rate-limit-info-banner / .cb-input-banner--error), never in the message stream, so detection targets banners. The fast path fires this task via POST /api/limit-failover/trigger when the renderer-side MutationObserver spots a banner; the 1-minute schedule is just a fallback. The continued prompt comes from the `prompt` variable, otherwise the last user message of the current session. An account judged rate-limited is skipped for 10 minutes and the mark is cleared after a successful handover; if nothing can take over, it stays on the original account and notifies you.',
@@ -4750,7 +4753,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<div class="wbs-acct-list"></div>' +
         // 账号自动切换：主账号 + 闲置阈值。放在账号页 —— 这是「账号使用策略」，不是自动化任务。
         '<div class="wbs-pcard wbs-idle-card" id="wbs-idle-card">' +
-        '<div class="wbs-idle-title">账号自动切换</div>' +
+        // 折叠头：收起时也要能一眼看出「主账号是谁、多久切回、现在闲置多久」，否则收起来等于藏了功能
+        '<button class="wbs-idle-head" type="button" id="wbs-idle-toggle" aria-expanded="false" title="展开 / 折叠">' +
+        '<span class="wbs-idle-chevron" aria-hidden="true"></span>' +
+        '<span class="wbs-idle-title">账号自动切换</span>' +
+        '<span class="wbs-idle-summary" id="wbs-idle-summary"></span>' +
+        '</button>' +
+        '<div class="wbs-idle-body" id="wbs-idle-body">' +
         '<div class="wbs-idle-row"><span class="wbs-idle-label">主账号</span>' +
         '<select class="wbs-idle-select" id="wbs-idle-primary" aria-label="主账号"></select></div>' +
         '<div class="wbs-idle-row"><span class="wbs-idle-label">闲置后自动切回主账号</span>' +
@@ -4759,6 +4768,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<input class="wbs-idle-input" id="wbs-idle-minutes" type="number" min="5" max="1440" step="5" aria-label="闲置阈值（分钟）">' +
         '<span class="wbs-idle-unit">分钟</span></div>' +
         '<div class="wbs-idle-note" id="wbs-idle-note"></div>' +
+        '</div>' +
         '</div>' +
         '<button class="wbs-logout-btn" type="button" data-act="logout">' + LOGOUT_SVG + '<span>登录新账号</span></button>' +
         '<input type="file" id="wbs-import-file" accept=".json,application/json" style="display:none">';
@@ -4789,6 +4799,19 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       return hours + ' 小时 ' + (total % 60) + ' 分钟';
     }
 
+    // 收起状态下的单行摘要：把「主账号是谁 / 多久切回 / 现在闲置多久」压成一行
+    function idleSummaryText(info) {
+      var parts = [];
+      var primaryLabel = info.primary ? (info.primary.nickname || info.primary.uid) : '';
+      parts.push(primaryLabel ? ('主账号 ' + primaryLabel) : '未指定主账号');
+      if (info.enabled === false) parts.push('已关闭');
+      else {
+        parts.push('闲置 ' + info.minutes + ' 分钟切回');
+        if (info.onOtherAccount) parts.push('已闲置 ' + idleMinutesText(info.idleMs));
+      }
+      return parts.join(' · ');
+    }
+
     function renderIdleCard(data) {
       if (!idleCard) return;
       var info = data && typeof data === 'object' ? data : {};
@@ -4796,6 +4819,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var enabledBox = idleCard.querySelector('#wbs-idle-enabled');
       var minutesInput = idleCard.querySelector('#wbs-idle-minutes');
       var note = idleCard.querySelector('#wbs-idle-note');
+      var toggle = idleCard.querySelector('#wbs-idle-toggle');
+      var summary = idleCard.querySelector('#wbs-idle-summary');
       var accounts = state.accounts || [];
       var primaryUid = info.primary ? String(info.primary.uid || '') : '';
       var options = ['<option value="">未指定</option>'];
@@ -4805,6 +4830,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           esc(account.nickname || account.uid) + '</option>');
       }
       primarySelect.innerHTML = options.join('');
+      // 折叠状态：默认收起（把版面还给账号列表），状态存在后端配置里，切号刷新页面也不会丢
+      var collapsed = info.collapsed !== false;
+      idleCard.classList.toggle('collapsed', collapsed);
+      if (toggle) toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      if (summary) summary.textContent = idleSummaryText(info);
       enabledBox.checked = info.enabled !== false;
       minutesInput.disabled = info.enabled === false;
       if (document.activeElement !== minutesInput) {
@@ -4851,6 +4881,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
 
     if (idleCard) {
+      var idleToggleBtn = idleCard.querySelector('#wbs-idle-toggle');
+      if (idleToggleBtn) idleToggleBtn.addEventListener('click', function () {
+        var next = !idleCard.classList.contains('collapsed');
+        // 先动 UI 再落盘：点开/收起要跟手；后端返回后 renderIdleCard 会以服务端状态为准再校一次
+        idleCard.classList.toggle('collapsed', next);
+        idleToggleBtn.setAttribute('aria-expanded', next ? 'false' : 'true');
+        saveIdleCard({ collapsed: next });
+      });
       idleCard.querySelector('#wbs-idle-primary').addEventListener('change', function () {
         var uid = String(this.value || '');
         api('/api/accounts/primary', { method: 'POST', body: JSON.stringify({ uid: uid }) })
@@ -6812,7 +6850,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var cancelBtn = sessionsPane.querySelector('#wbs-sess-modal-cancel');
       okBtn.textContent = '开始同步';
       okBtn.disabled = true;
-      titleEl.textContent = '立即同步到…';
+      titleEl.textContent = '立即同步';
       body.innerHTML = '<div class="wbs-empty">加载账号…</div>';
       showSessModal(true);
       okBtn.onclick = null;
@@ -6820,39 +6858,44 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       api('/api/accounts').then(function (d) {
         var accts = (d && d.accounts) || [];
         var curUid = (d && d.current && d.current.uid) || '';
-        var cur = accts.filter(function (a) { return a.uid === curUid; })[0];
-        if (!curUid) {
-          body.innerHTML = '<div class="wbs-empty">当前没有已登录的账号，无法作为同步源</div>';
+        if (!accts.length) {
+          body.innerHTML = '<div class="wbs-empty">没有可用账号</div>';
           return;
         }
-        var targets = accts.filter(function (a) { return a.uid !== curUid; });
-        if (!targets.length) {
-          body.innerHTML = '<div class="wbs-empty">没有其它账号可作为同步目标</div>';
-          return;
-        }
-        body.innerHTML = '<p>源账号：' + esc(cur ? (cur.nickname || cur.uid) : curUid) + '</p>'
-          + '<div class="wbs-modal-warn">只同步<b>已开启「自动复制」</b>的会话及其产物目录；'
-          + '已完成的部分会被自动跳过，可反复点。</div>'
-          + '<select class="wbs-sess-select wbs-sess-target" id="wbs-sess-sync-target" title="选择目标账号">'
-          + '<option value="">选择目标账号…</option>'
-          + targets.map(function (a) {
-            return '<option value="' + escAttr(a.uid) + '">' + esc(a.nickname || a.uid) + (a.phone ? '（' + esc(a.phone) + '）' : '') + '</option>';
-          }).join('')
-          + '</select>';
+        var accountOptions = accts.map(function (a) {
+          return '<option value="' + escAttr(a.uid) + '">' + esc(a.nickname || a.uid) + (a.phone ? '（' + esc(a.phone) + '）' : '') + '</option>';
+        }).join('');
+        body.innerHTML =
+          '<div class="wbs-sync-row"><span class="wbs-sync-label">源账号</span>' +
+          '<select class="wbs-sess-select wbs-sync-select" id="wbs-sess-sync-source" title="选择同步源账号（留空 = 除目标外的所有账号）">' +
+          '<option value="">留空 = 除目标外的所有账号</option>' + accountOptions + '</select></div>' +
+          '<div class="wbs-sync-row"><span class="wbs-sync-label">目标账号</span>' +
+          '<select class="wbs-sess-select wbs-sync-select" id="wbs-sess-sync-target" title="选择同步目标账号">' + accountOptions + '</select></div>' +
+          '<div class="wbs-modal-warn">只同步<b>已开启「自动复制」</b>的会话及其产物目录；已完成的部分会被自动跳过，可反复点。</div>' +
+          '<div class="wbs-sync-note"><b>源账号留空</b> = 除目标账号以外的每个账号各同步一次；源与目标相同时不会执行。</div>';
+        var sourceSel = body.querySelector('#wbs-sess-sync-source');
+        var targetSel = body.querySelector('#wbs-sess-sync-target');
+        // 目标账号默认 = 当前账号（默认场景：把别的账号里开了自动复制的会话收拢到自己这边）
+        if (curUid) targetSel.value = curUid;
         okBtn.disabled = false;
         okBtn.onclick = function () {
-          var sel = body.querySelector('#wbs-sess-sync-target');
-          if (!sel || !sel.value) { toast('请选择目标账号', true, root); return; }
+          var sourceUid = String((sourceSel && sourceSel.value) || '');
+          var targetUid = String((targetSel && targetSel.value) || '');
+          if (!targetUid) { toast('请选择目标账号', true, root); return; }
+          if (sourceUid && sourceUid === targetUid) { toast('源账号与目标账号不能相同', true, root); return; }
           okBtn.disabled = true;
           api('/api/sessions/sync-now', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ targetUid: sel.value }),
+            body: JSON.stringify({ targetUid: targetUid, sourceUid: sourceUid }),
           }).then(function (res) {
             showSessModal(false);
             var j = res && res.job;
             if (j) { autoCopyWatch.job = j; renderAutoCopyProgress(j); }
-            toast(res && res.reused ? '已有同向同步任务在跑，已接入进度' : '已开始同步', false, root);
+            var jobCount = (res && res.jobs && res.jobs.length) || 1;
+            toast(res && res.reused
+              ? '已有同向同步任务在跑，已接入进度'
+              : (res && res.allSources ? '已开始同步：' + jobCount + ' 个源账号 → 目标账号' : '已开始同步'), false, root);
             watchAutoCopyProgress();
           }).catch(function (e) {
             okBtn.disabled = false;
@@ -14408,7 +14451,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-acct-list{flex:1;min-height:0;overflow-y:auto;padding-right:2px}',
     /* 账号自动切换卡片（主账号 + 闲置阈值）：放在账号列表与「登录新账号」之间 */
     '.wbs-idle-card{flex:0 0 auto;margin:8px 0 0}',
-    '.wbs-idle-title{font-size:12px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f);margin-bottom:8px}',
+    '.wbs-idle-head{display:flex;align-items:center;gap:7px;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}',
+    '.wbs-idle-head:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:2px;border-radius:6px}',
+    '.wbs-idle-chevron{flex:0 0 auto;width:7px;height:7px;margin-left:1px;border-right:1.6px solid var(--wb-icon-tertiary,#999);border-bottom:1.6px solid var(--wb-icon-tertiary,#999);transform:rotate(-45deg);transition:transform .18s}',
+    '.wbs-idle-card:not(.collapsed) .wbs-idle-chevron{transform:rotate(45deg)}',
+    '.wbs-idle-title{flex:0 0 auto;font-size:12px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-idle-summary{flex:1;min-width:0;text-align:right;font-size:11px;color:var(--wb-icon-tertiary,#999);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.wbs-idle-body{margin-top:8px}',
+    '.wbs-idle-card.collapsed .wbs-idle-body{display:none}',
     '.wbs-idle-row{display:flex;align-items:center;gap:8px;margin-bottom:7px}',
     '.wbs-idle-row:last-child{margin-bottom:0}',
     '.wbs-idle-label{flex:1;min-width:0;font-size:12px;color:var(--wb-icon-secondary,#666);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
@@ -14418,6 +14468,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-idle-input:disabled{opacity:.5}',
     '.wbs-idle-unit{flex:0 0 auto;font-size:11px;color:var(--wb-icon-tertiary,#999)}',
     '.wbs-idle-note{margin-top:7px;font-size:11px;line-height:1.6;color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-sync-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}',
+    '.wbs-sync-label{flex:0 0 auto;font-size:12px;color:var(--wb-color-text-secondary,#555)}',
+    '.wbs-sync-select{flex:1;min-width:0}',
+    '.wbs-sync-note{margin-top:8px;font-size:11px;line-height:1.6;color:var(--wb-icon-tertiary,#999)}',
     '.wbs-idle-note b{color:var(--wb-color-text-secondary,#555);font-weight:600}',
     '.wbs-idle-select:focus-visible,.wbs-idle-input:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:1px}',
     '.wbs-logout-btn{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;margin-top:10px;padding:10px 0;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:12px;background:transparent;color:var(--wb-icon-secondary,#666);font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit;flex-shrink:0}',

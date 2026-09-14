@@ -44,7 +44,8 @@ ok(f1 === '2026-09-14 19:03:07', 'H1 formatClock 本地时区 + 补零', f1);
 ok(logMod.formatDuration(42000) === '42 秒', 'H2a formatDuration 秒', logMod.formatDuration(42000));
 ok(logMod.formatDuration(532000) === '8 分 52 秒', 'H2b formatDuration 分秒', logMod.formatDuration(532000));
 ok(logMod.formatDuration(3780000) === '1 小时 3 分', 'H2c formatDuration 小时', logMod.formatDuration(3780000));
-ok(logMod.formatDuration(600000) === '10 分 0 秒', 'H2d formatDuration 整分', logMod.formatDuration(600000));
+ok(logMod.formatDuration(600000) === '10 分钟', 'H2d formatDuration 整分钟不啰嗦成「10 分 0 秒」', logMod.formatDuration(600000));
+ok(logMod.formatDuration(300094) === '5 分钟', 'H2e 5 分 0 秒 → 5 分钟（真实的 5 分钟闲置就是这样）', logMod.formatDuration(300094));
 
 const snip = logMod.snippet('第一行\n\n第二行   带空格 ' + 'x'.repeat(200), 20);
 ok(snip.length === 21 && snip.endsWith('…'), 'H3a snippet 截断加省略号', snip);
@@ -141,7 +142,7 @@ const idleSwitched = logMod.buildIdleSwitchBackReport({
   plan: { idleMs: 1920000, minutes: 30, fromUid: 'b', fromNickname: '账号B', primaryUid: 'a', primaryNickname: '主账号A' },
   outcome: { status: 'switched', primaryUid: 'a', primaryNickname: '主账号A' },
 });
-ok(/闲置自动切回主账号/.test(idleSwitched) && /32 分 0 秒/.test(idleSwitched), 'H14a 闲置切回段写明结果 + 闲置时长', idleSwitched.slice(0, 60));
+ok(/闲置自动切回主账号/.test(idleSwitched) && /32 分钟/.test(idleSwitched), 'H14a 闲置切回段写明结果 + 闲置时长', idleSwitched.slice(0, 60));
 ok(/超过 30 分钟就切回/.test(idleSwitched) && /「账号」页调整/.test(idleSwitched), 'H14b 写清判定口径与去哪改阈值');
 ok(/页面会自动刷新/.test(idleSwitched), 'H14c 提示会刷新页面');
 const idleFailed = logMod.buildIdleSwitchBackReport({
@@ -205,12 +206,14 @@ function makeSandbox(options) {
     idleQueue: o.idle || [{ ok: true, idle: false, why: 'streaming' }, { ok: true, idle: true, why: 'assistant-done' }],
     switchError: o.switchError || null,
     switchCalls: [],
+    autoCopyCalls: [],
   };
   const idleOf = () => (state.idleQueue.length > 1 ? state.idleQueue.shift() : state.idleQueue[0]);
   const factory = new Function(
     'path', 'DATA_DIR', 'fs', 'log', 'cdp', 'createAutomationNotifier', 'automationNotifyToast',
     'currentAccount', 'listAccounts', 'primaryAccountStore', 'readLimitFailoverState', 'limitFailoverInFlight',
     'limitFailover', 'accountSwitchLog', 'sleep', 'automationSwitchAccount', 'readLimitBanner', 'runCdpExpression',
+    'autoCopyAfterAccountSwitch',
     block + '\nreturn { scheduleLimitFailoverSwitchBack: scheduleLimitFailoverSwitchBack, handleLimitFailoverOutcome: handleLimitFailoverOutcome, getPending: function(){return limitFailoverSwitchBack;}, getLast: function(){return limitFailoverSwitchBackLast;}, getLogFile: function(){return accountSwitchLogFile;}, C: { settle: LIMIT_FAILOVER_REPLY_SETTLE_MS, stable: LIMIT_FAILOVER_REPLY_STABLE_ROUNDS, startWait: LIMIT_FAILOVER_REPLY_START_WAIT_MS, unblockMax: LIMIT_FAILOVER_UNBLOCK_MAX_MS, enabled: LIMIT_FAILOVER_SWITCHBACK_ENABLED } };'  );
   const api = factory(
     path,
@@ -242,11 +245,17 @@ function makeSandbox(options) {
       if (String(expression).indexOf('messageStore') >= 0 || String(expression).indexOf('assistant-done') >= 0) return idleOf();
       return { ok: true };
     },
+    // 切号完成后的自动复制：这里只记录调用，不真的复制
+    (sourceUid, targetUid, reason) => {
+      state.autoCopyCalls.push({ sourceUid: String(sourceUid), targetUid: String(targetUid), reason: String(reason || '') });
+      return { id: 'copy-' + state.autoCopyCalls.length, total: 2 };
+    },
     state
   );
   api.state = state;   // 测试需要直接看「当前账号 / 切号调用记录」
   Object.defineProperty(api, 'current', { get: () => state.current });
   Object.defineProperty(api, 'switchCalls', { get: () => state.switchCalls });
+  Object.defineProperty(api, 'autoCopyCalls', { get: () => state.autoCopyCalls });
   return api;
 }
 const sandbox = makeSandbox({});
@@ -281,10 +290,15 @@ clearLogs(); clockOffset = 0;
   ok(last && last.outcome.status === 'switched', 'W1d 续跑跑完后状态=switched', last && last.outcome);
   ok(sb.current.uid === 'A', 'W1e 当前账号已切回主账号 A', sb.current.uid);
   ok(sb.switchCalls.length === 1 && sb.switchCalls[0] === 'A', 'W1f 只切了一次，且切的是主账号', sb.switchCalls);
+  ok(sb.autoCopyCalls.length === 1, 'W1f2 切号完成后触发了一次「切号复制同步会话」', sb.autoCopyCalls);
+  ok(sb.autoCopyCalls[0].sourceUid === 'B' && sb.autoCopyCalls[0].targetUid === 'A',
+    'W1f3 同步方向：离开的续跑账号 B → 主账号 A', sb.autoCopyCalls[0]);
+  ok(sb.autoCopyCalls[0].reason === 'limit-failover-switchback', 'W1f4 带上来路标记（便于回溯是哪条路径触发的）', sb.autoCopyCalls[0]);
   ok(sb.getPending() === null, 'W1g 收尾后清掉 pending');
   const text = logText();
   ok(text.indexOf('自动换账号续跑') >= 0, 'W1h 触发段已写桌面日志');
   ok(text.indexOf('账号已切回主账号') >= 0, 'W1i 收尾段已追加到同一个文件');
+  ok(text.indexOf('顺带做了') >= 0 && text.indexOf('共 2 个') >= 0, 'W1j 桌面日志写明顺带同步了几个会话');
 }
 
 /* ---- W2 主账号仍在限流窗口 → 等窗口过去再切 ---- */
@@ -395,6 +409,7 @@ clearLogs(); clockOffset = 0;
   ok(last && last.outcome.status === 'failed', 'W11a 切号抛错 → failed 而不是崩掉', last && last.outcome);
   ok(String(last.outcome.error).indexOf('CDP') >= 0, 'W11b 报错原文留在结果里', last.outcome.error);
   ok(sb.getPending() === null, 'W11c 失败也要清 pending，不能卡住后续流程');
+  ok(sb.autoCopyCalls.length === 0, 'W11d 切号失败 → 不触发同步（账号根本没切过去）');
 }
 
 /* ---- W12 并发在跑 / 有横幅时不抢账号 ---- */
@@ -459,7 +474,11 @@ clearLogs(); clockOffset = 0;
   ok(src.indexOf("p === '/api/limit-failover/switchback'") >= 0, 'W16k 只读状态端点 /api/limit-failover/switchback 在位');
   ok(/switchBack: \{[\s\S]{0,400}?logDir: limitFailoverDesktopLogDir\(\)/.test(src), 'W16l /api/limit-failover/status 透出切回状态与日志路径');
   ok(src.indexOf("require('./account-switch-log.js')") >= 0, 'W16m daemon 已加载日志模块');
-  ok(/const DAEMON_BUILD_ID = 'selfhost-1\.3\.0-20260914-(limit|idle)-switchback';/.test(src), 'W16n DAEMON_BUILD_ID 已提升（不提升改了也不生效）');
+  // 别钉死具体后缀：每落地一个阶段都要回来改一次（§6 里 D0 那条教训同样适用）。
+  // 只要求「是本轮之后的自建构建」——即前缀对、且不是引入本功能之前的那个 buildId。
+  const buildId = (src.match(/const DAEMON_BUILD_ID = '([^']+)'/) || [])[1] || '';
+  ok(/^selfhost-1\.3\.0-20260914-/.test(buildId) && buildId !== 'selfhost-1.3.0-20260914-space-scan-slug-fix',
+    'W16n DAEMON_BUILD_ID 已提升（不提升改了也不生效）', buildId);
 }
 
 /* ---- 还原 ---- */

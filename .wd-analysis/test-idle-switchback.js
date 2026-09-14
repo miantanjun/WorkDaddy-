@@ -163,6 +163,7 @@ const world = {
   probe: Object.assign({}, baseProbe),
   switchError: '',
   switchCalls: [],
+  autoCopyCalls: [],
   runs: [],
   banner: { ok: true, hit: false },
   logs: [],
@@ -174,7 +175,7 @@ const factory = new Function(
   'currentAccount', 'limitFailoverPrimaryUid', 'limitFailoverAccountByUid', 'limitFailoverBlockedUntil',
   'limitFailoverInFlight', 'limitFailoverSwitchBack', 'automationRuns', 'automationSwitchAccount',
   'readLimitBanner', 'runCdpExpression', 'limitFailoverNotify', 'writeAccountSwitchDesktopLog',
-  'accountSwitchLog', 'accountSwitchLogFile', 'limitFailoverDesktopLogDir', 'idleSwitchback',
+  'accountSwitchLog', 'accountSwitchLogFile', 'limitFailoverDesktopLogDir', 'autoCopyAfterAccountSwitch', 'idleSwitchback',
   block + '\nreturn { idleSwitchbackTick: idleSwitchbackTick, runIdleSwitchBack: runIdleSwitchBack, idleSwitchbackPublicState: idleSwitchbackPublicState, idleSwitchbackBusy: idleSwitchbackBusy, startIdleSwitchbackTicker: startIdleSwitchbackTicker, getDecision: function(){ return idleSwitchbackLastDecision; }, CONFIG_FILE: idleSwitchbackStore.file, STATE_FILE: idleSwitchbackStateStore.file };'
 );
 const accountSwitchLog = require(path.join(ROOT, 'scripts', 'account-switch-log.js'));
@@ -200,6 +201,10 @@ const api = factory(
   accountSwitchLog,
   '',
   () => path.join(dataDir, 'desktop-stub'),
+  (sourceUid, targetUid, reason) => {
+    world.autoCopyCalls.push({ sourceUid: String(sourceUid), targetUid: String(targetUid), reason: String(reason || '') });
+    return { id: 'copy-' + world.autoCopyCalls.length, total: 4 };
+  },
   idle
 );
 
@@ -214,6 +219,7 @@ function resetWorld(over) {
   world.probe = Object.assign({}, baseProbe);
   world.switchError = '';
   world.switchCalls = [];
+  world.autoCopyCalls = [];
   world.logs = [];
   world.desktopLogs = [];
   Object.assign(world, over || {});
@@ -238,6 +244,11 @@ await api.idleSwitchbackTick();
 ok(world.switchCalls.length === 1 && world.switchCalls[0] === 'A', 'J2a 闲置到点 → 切回主账号 A', world.switchCalls);
 ok(world.current.uid === 'A', 'J2b 切完后当前账号是主账号', world.current.uid);
 ok(world.desktopLogs.length === 1 && /闲置自动切回主账号/.test(world.desktopLogs[0].text), 'J2c 写了一份桌面大白话日志', world.desktopLogs.length);
+ok(world.autoCopyCalls.length === 1, 'J2c2 切号完成后触发了「切号复制同步会话」', world.autoCopyCalls);
+ok(world.autoCopyCalls[0].sourceUid === 'B' && world.autoCopyCalls[0].targetUid === 'A',
+  'J2c3 同步方向：离开的账号 B → 主账号 A', world.autoCopyCalls[0]);
+ok(world.autoCopyCalls[0].reason === 'idle-switchback', 'J2c4 带上来路标记', world.autoCopyCalls[0]);
+ok(/顺带做了/.test(world.desktopLogs[0].text) && /共 4 个/.test(world.desktopLogs[0].text), 'J2c5 日志写明顺带同步了几个会话');
 ok(/32 分|31 分|30 分/.test(world.desktopLogs[0].text), 'J2d 日志里写明了闲置多久', world.desktopLogs[0].text.slice(0, 80));
 ok(JSON.parse(fs.readFileSync(api.STATE_FILE, 'utf8')).uid === 'A', 'J2e 切完后闲置计时归到主账号（不会立刻又触发）');
 
@@ -264,10 +275,15 @@ const apiBusy = factory(
   () => world.current, () => world.primaryUid, (uid) => world.accounts.find((a) => a.uid === String(uid)) || null,
   () => world.blockedUntil, null, null, new Map([['r1', { status: 'running' }]]),
   async (account) => { world.switchCalls.push(String(account.uid)); return { ok: true }; },
-  async () => world.banner, async () => world.probe, () => {},
-  (text) => { world.desktopLogs.push({ text: String(text || '') }); return { ok: true }; },
-  accountSwitchLog, '', () => path.join(dataDir, 'desktop-stub'), idle
-);
+    async () => world.banner, async () => world.probe, () => {},
+    (text) => { world.desktopLogs.push({ text: String(text || '') }); return { ok: true }; },
+    accountSwitchLog, '', () => path.join(dataDir, 'desktop-stub'),
+    (sourceUid, targetUid, reason) => {
+      world.autoCopyCalls.push({ sourceUid: String(sourceUid), targetUid: String(targetUid), reason: String(reason || '') });
+      return { id: 'copy-busy', total: 4 };
+    },
+    idle
+  );
 resetWorld();
 fs.writeFileSync(apiBusy.STATE_FILE, JSON.stringify({ uid: 'B', lastActivityAt: Date.now() - 31 * 60000, fingerprint: idle.activityFingerprint(world.probe) }));
 await apiBusy.idleSwitchbackTick();
@@ -317,6 +333,7 @@ await api.idleSwitchbackTick();
 ok(world.desktopLogs.length === 1 && /切回失败/.test(world.desktopLogs[0].text) && /CDP 未连接/.test(world.desktopLogs[0].text),
   'J9c 切号抛错 → 写失败日志、不崩', world.desktopLogs[0].text.slice(0, 80));
 ok(api.idleSwitchbackPublicState().switching === false, 'J9d 出错后也不卡住（switching 复位）');
+ok(world.autoCopyCalls.length === 0, 'J9e 切号失败 → 不触发同步（账号没切过去）');
 
 /* ---- J10 状态接口与启动器 ---- */
 resetWorld();
@@ -336,7 +353,10 @@ ok(src.indexOf("require('./idle-switchback.js')") >= 0, 'J11a daemon 已加载 i
 ok(/startIdleSwitchbackTicker\(\);/.test(src), 'J11b 启动流程里调了 startIdleSwitchbackTicker');
 ok(src.indexOf("p === '/api/idle-switchback'") >= 0, 'J11c 有 /api/idle-switchback 端点');
 ok(/patch\.minutes = minutes;/.test(src) && /MIN_MINUTES/.test(src), 'J11d 端点校验阈值范围');
-ok(/const DAEMON_BUILD_ID = 'selfhost-1\.3\.0-20260914-idle-switchback';/.test(src), 'J11e DAEMON_BUILD_ID 已提升');
+// 别钉死具体后缀（每落地一个阶段都要回来改一次）：只要求「本轮之后的自建构建」。
+const daemonBuildId = (src.match(/const DAEMON_BUILD_ID = '([^']+)'/) || [])[1] || '';
+ok(/^selfhost-1\.3\.0-20260914-/.test(daemonBuildId) && daemonBuildId !== 'selfhost-1.3.0-20260914-space-scan-slug-fix',
+  'J11e DAEMON_BUILD_ID 已提升', daemonBuildId);
 
 /* ==================================================================== */
 /* 【K】前端接线 + 限流任务内置化                                        */

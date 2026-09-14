@@ -20,7 +20,7 @@
 const fsDefault = require('node:fs');
 const path = require('node:path');
 
-const DEFAULTS = { enabled: true, minutes: 30 };
+const DEFAULTS = { enabled: true, minutes: 30, collapsed: true };
 const MIN_MINUTES = 5;
 const MAX_MINUTES = 24 * 60;
 const CONFIG_FILE = 'idle-switchback.json';
@@ -39,6 +39,8 @@ function normalizeConfig(raw) {
   return {
     enabled: r.enabled === undefined || r.enabled === null ? DEFAULTS.enabled : !!r.enabled,
     minutes: clampMinutes(r.minutes === undefined || r.minutes === null ? DEFAULTS.minutes : r.minutes),
+    // 卡片折叠状态：存在后端，切号会整页刷新，放前端会丢
+    collapsed: r.collapsed === undefined || r.collapsed === null ? DEFAULTS.collapsed : !!r.collapsed,
   };
 }
 

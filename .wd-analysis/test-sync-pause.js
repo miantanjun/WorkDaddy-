@@ -18,7 +18,9 @@
  *      （这是「单个产物目录 32 万文件也能秒停」的前提），不能被内部吞掉。
  *   D. HTTP 集成（只打不发数据的只读/校验分支，绝不触发真实复制）：
  *        D1 active 接口形状；D2 cancel 未知 jobId → 404；D3 cancel 无参 → 200 且 cancelled 是数组；
- *        D4 sync-now 缺 targetUid → 400；D5 sync-now 目标不存在 → 404；D6 sync-now 源=目标 → 400。
+ *        D4 sync-now 缺 targetUid → 400；D5 sync-now 目标不存在 → 404；
+ *        D6 sync-now 显式源=目标 → 400；D7 sync-now 显式源不存在 → 400。
+ *        ⚠️ 绝不能打「留空 sourceUid」那条路 —— 现在留空 = 除目标外所有账号，会真的开始复制。
  *
  * 跑法：node .wd-analysis/test-sync-pause.js
  *      HTTP 部分需要本机 daemon 在 127.0.0.1:47832 跑着；不在就自动跳过（不判失败）。
@@ -391,6 +393,7 @@ function waitSettled(jobs, ms) {
       'selfhost-1.3.0-20260914-space-scan-slug-fix',
       'selfhost-1.3.0-20260914-limit-switchback',
       'selfhost-1.3.0-20260914-idle-switchback',
+      'selfhost-1.3.0-20260914-switch-sync',
     ];
     ok(KNOWN_BUILDS.indexOf(live) >= 0, 'D0 daemon 已加载本阶段（或更晚）的构建', live);
 
@@ -414,10 +417,14 @@ function waitSettled(jobs, ms) {
     const accounts = await apiCall('GET', '/api/accounts');
     const cur = accounts.body && accounts.body.current && accounts.body.current.uid;
     if (cur) {
-      const s3 = await apiCall('POST', '/api/sessions/sync-now', { targetUid: cur });
+      // ⚠️ 语义已改：现在「留空 sourceUid」= 除目标账号以外的**所有账号**各起一个复制任务，
+      // 也就是会**真的开始复制**。测试里绝不能这么打 —— 必须显式给出 sourceUid 才走校验分支。
+      const s3 = await apiCall('POST', '/api/sessions/sync-now', { targetUid: cur, sourceUid: cur });
       ok(s3.status === 400, 'D6 sync-now 源=目标 → 400', s3.status);
+      const s4 = await apiCall('POST', '/api/sessions/sync-now', { targetUid: cur, sourceUid: '__wd_missing_uid__' });
+      ok(s4.status === 400, 'D7 sync-now 显式源不存在 → 400', s4.status);
     } else {
-      console.log('  skip  D6 取不到当前账号 uid');
+      console.log('  skip  D6/D7 取不到当前账号 uid');
     }
   }
 

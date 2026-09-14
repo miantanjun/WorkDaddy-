@@ -28,8 +28,7 @@ const FILE_HEADER = [
   '  ① 模型限流 → 自动换账号续跑；② 非主账号闲置超时 → 自动切回主账号。',
   '任务内容只记前 ' + SNIPPET_CHARS + ' 字摘要；账号只写昵称和 uid 前 8 位。',
   '只记「真的动了账号」的结果，纯粹的「条件不满足所以没动」不写（避免刷屏）。',
-  '────────────────────────────────────────',
-].join('\n');
+].join('\n');   // 末尾刻意不加分隔线：每段报告自带一条，否则会出现连续两条
 
 function pad2(value) {
   return String(Math.abs(Math.trunc(Number(value) || 0))).padStart(2, '0');
@@ -43,15 +42,17 @@ function formatClock(ts) {
     ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
 }
 
-/** 8 分 52 秒 / 42 秒 / 1 小时 3 分 */
+/** 8 分 52 秒 / 42 秒 / 5 分钟（整分钟不啰嗦成「5 分 0 秒」）/ 1 小时 3 分 */
 function formatDuration(ms) {
   const total = Math.max(0, Math.round((Number(ms) || 0) / 1000));
   if (total < 60) return total + ' 秒';
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
-  if (minutes < 60) return minutes + ' 分 ' + seconds + ' 秒';
+  if (minutes < 60) return seconds === 0 ? minutes + ' 分钟' : minutes + ' 分 ' + seconds + ' 秒';
   const hours = Math.floor(minutes / 60);
-  return hours + ' 小时 ' + (minutes % 60) + ' 分';
+  const restMinutes = minutes % 60;
+  if (restMinutes === 0) return seconds === 0 ? hours + ' 小时' : hours + ' 小时 ' + seconds + ' 秒';
+  return hours + ' 小时 ' + restMinutes + ' 分';
 }
 
 /** 把任务内容压成一行摘要：塌掉空白 + 截断，避免把整段提示词倒进桌面明文 */
@@ -114,6 +115,17 @@ function resolveLogDir(options) {
 
 function line(label, text) {
   return '· ' + label + '：' + text;
+}
+
+// 切号完成后一定会顺带做的事：把**源账号**里开了「自动复制」的会话同步到新账号。
+// 两种情况都要写清楚 —— 用户会问「切完为什么数据没动」，答案要么是「同步了 N 个」，要么是「本来就没有」。
+function autoCopyLine(outcome, fromLabel) {
+  const copy = outcome && outcome.autoCopy;
+  if (copy && Number(copy.total) > 0) {
+    return line('顺带做了', '把账号「' + fromLabel + '」里开启了「自动复制」的会话同步到主账号，共 ' +
+      Number(copy.total) + ' 个（后台排队复制，可在「会话」页看进度）。');
+  }
+  return line('顺带做了', '账号「' + fromLabel + '」没有开启「自动复制」的会话，没有需要同步的内容。');
 }
 
 /**
@@ -200,6 +212,7 @@ function buildSwitchBackReport(p) {
       out.push(line('主账号状态', '限流窗口已经过去，可以正常用了。'));
     }
     out.push(line('现在界面上的账号', primaryLabel + ' —— 页面会自动刷新一次，这是切换账号的正常动作。'));
+    out.push(autoCopyLine(outcome, toLabel));
     return out.join('\n') + '\n';
   }
 
@@ -273,10 +286,11 @@ function buildIdleSwitchBackReport(p) {
 
   if (status === 'switched') {
     out.push(line('为什么切', '账号「' + fromLabel + '」已经连续 ' + formatDuration(plan.idleMs) +
-      ' 没有任何动作（没有新消息、没有正在生成的回复、输入框里也没有草稿）。'));
+      '没有任何动作（没有新消息、没有正在生成的回复、输入框里也没有草稿）。'));
     out.push(line('做了什么', '切回主账号「' + toLabel + '」—— 页面会自动刷新一次，这是切换账号的正常动作。'));
     out.push(line('判定口径', '闲置时间从「最后一次有新消息 / 正在生成 / 输入框有草稿」算起，超过 ' +
       (Number(plan.minutes) || 0) + ' 分钟就切回；这个阈值可以在面板「账号」页调整，也可以关掉。'));
+    out.push(autoCopyLine(outcome, fromLabel));
     return out.join('\n') + '\n';
   }
   if (status === 'failed') {
