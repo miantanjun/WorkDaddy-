@@ -17,6 +17,14 @@ on:
 permissions:
   contents: write
 
+# ⚠️ Windows runner 上 Python 的 stdout 默认是 cp1252，**任何中文 print 都会
+# UnicodeEncodeError 直接挂掉整个步骤**（2026-09-14 v1.3.0 构建就栽在这：报错长得像
+# 「.cmd 换行不合格」，其实校验脚本第 5 行 print 中文时就炸了，校验根本没跑）。
+# 所以整个 job 统一强制 UTF-8 输出。
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: 'utf-8'
+
 jobs:
   build-and-verify:
     name: Build Setup.exe + verify
@@ -39,6 +47,13 @@ jobs:
         shell: python
         run: |
           import subprocess, sys
+
+          # 双保险：即使 job 级 env 没生效，这里也把 stdout 切成 UTF-8（cp1252 遇到中文 print 必炸）
+          try:
+              sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+              sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+          except Exception:
+              pass
 
           files = subprocess.run(['git', 'ls-files', '*.cmd'],
                                  capture_output=True, text=True, check=True).stdout.split()
