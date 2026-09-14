@@ -5149,6 +5149,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         syncWallpaperCardVisibility(themeBtn ? themeBtn.getAttribute('data-theme') : 'default');
       }
       if (name === 'sessions' && sessionsPane && !sessionsPane.dataset.built) buildSessionsPane();
+      // 每次进入会话页都补一次进度探测（面板可能刚重建，定时器已被清理）
+      if (name === 'sessions') { try { watchAutoCopyProgress(); } catch (e) {} }
       if (name === 'models' && modelsPane && !modelsPane.dataset.built) buildModelsPane();
       if (name === 'enhance' && enhancePane && !enhancePane.dataset.built) buildEnhancePane();
       if (name === 'automations' && automationPane && !automationPane.dataset.built) buildAutomationPane();
@@ -5652,6 +5654,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<button class="wbs-sess-seg-btn" type="button" data-range="30d">近 30 天</button>' +
         '<button class="wbs-sess-seg-btn active" type="button" data-range="all">全部</button>' +
         '</div></div>' +
+        '</div>' +
+        // 自动复制进度条：常驻在筛选行之下；切号会整页 reload，状态由
+        // /api/sessions/auto-copy/active 恢复（见 watchAutoCopyProgress）。
+        '<div class="wbs-sess-progress" id="wbs-sess-progress" role="status" aria-live="polite">' +
+        '<div class="wbs-sess-progress-head">' +
+        '<span class="wbs-sess-progress-spin" aria-hidden="true"></span>' +
+        '<span class="wbs-sess-progress-icon" id="wbs-sess-progress-icon" aria-hidden="true"></span>' +
+        '<span class="wbs-sess-progress-label" id="wbs-sess-progress-label">准备复制会话…</span>' +
+        '<span class="wbs-sess-progress-count" id="wbs-sess-progress-count">0 / 0</span>' +
+        '</div>' +
+        '<div class="wbs-sess-progress-track"><div class="wbs-sess-progress-fill" id="wbs-sess-progress-fill"></div></div>' +
+        '<div class="wbs-sess-progress-sub" id="wbs-sess-progress-sub"></div>' +
         '</div>' +
         '<div class="wbs-sess-toolbar">' +
         '<button class="wbs-sess-bbtn" type="button" id="wbs-sess-batch">批量操作</button>' +
@@ -11294,31 +11308,178 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       return JSON.stringify([state.current && state.current.uid, state.primaryUid, rows]);
     }
 
-    function pollAutoCopyJob(jobId, accountName) {
-      if (!jobId) return;
-      var attempts = 0;
-      var poll = function () {
-        attempts++;
-        api('/api/sessions/auto-copy/status?id=' + encodeURIComponent(jobId)).then(function (d) {
+    // ===== 自动复制进度 =====
+    // 旧实现在 120×700ms ≈ 84 秒后静默 return，而真实任务要十几分钟；而且切号走
+    // CDP Page.reload，注入上下文重建、内存里的 jobId 直接丢失 —— 于是界面表现成
+    // 「切了号但什么都没发生」。这里改为不依赖 jobId：统一向
+    // GET /api/sessions/auto-copy/active 取当前活跃任务，进面板时自动恢复。
+    var autoCopyWatch = { timer: null, deadline: 0, job: null, accountName: '', hideTimer: null };
+
+    function fmtBytes(value) {
+      var bytes = Math.max(0, Number(value) || 0);
+      if (bytes < 1024) return bytes + ' B';
+      var units = ['KB', 'MB', 'GB', 'TB'];
+      var size = bytes / 1024;
+      var index = 0;
+      while (size >= 1024 && index < units.length - 1) { size = size / 1024; index++; }
+      return (size >= 10 ? size.toFixed(0) : size.toFixed(1)) + ' ' + units[index];
+    }
+
+    function fmtDuration(ms) {
+      var total = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+      if (total < 60) return total + ' 秒';
+      var minutes = Math.floor(total / 60);
+      var seconds = total % 60;
+      if (minutes < 60) return seconds ? (minutes + ' 分 ' + seconds + ' 秒') : (minutes + ' 分钟');
+      return Math.floor(minutes / 60) + ' 小时 ' + (minutes % 60) + ' 分';
+    }
+
+    function autoCopyTotalFailed(job) {
+      return (Number(job && job.failed) || 0) + (Number(job && job.payloadFailed) || 0);
+    }
+
+    // 已完成的任务只在结束后 2 分钟内保留展示，避免每次打开面板都弹旧结果。
+    function shouldShowAutoCopy(job) {
+      if (!job) return false;
+      if (job.status === 'queued' || job.status === 'running') return true;
+      return !!(job.finishedAt && (Date.now() - job.finishedAt) < 120000);
+    }
+
+    function autoCopyProgressEls() {
+      if (!sessionsPane) return null;
+      return {
+        box: sessionsPane.querySelector('#wbs-sess-progress'),
+        icon: sessionsPane.querySelector('#wbs-sess-progress-icon'),
+        label: sessionsPane.querySelector('#wbs-sess-progress-label'),
+        count: sessionsPane.querySelector('#wbs-sess-progress-count'),
+        fill: sessionsPane.querySelector('#wbs-sess-progress-fill'),
+        sub: sessionsPane.querySelector('#wbs-sess-progress-sub'),
+      };
+    }
+
+    function hideAutoCopyProgress() {
+      var els = autoCopyProgressEls();
+      if (els && els.box) els.box.className = 'wbs-sess-progress';
+    }
+
+    // 渲染进度：计数器固定为「已复制 / 全部」；正文阶段与产物阶段切换分子分母来源，
+    // 保证 15/22 这样的比例在任何时刻含义都一致。
+    function renderAutoCopyProgress(job) {
+      var running = job.status === 'queued' || job.status === 'running';
+      var payloadPhase = job.phase === 'payload';
+      var total = Number(job.total) || 0;
+      var processed = Number(job.processed) || 0;
+      var payloadTotal = Number(job.payloadTotal) || 0;
+      var payloadProcessed = Number(job.payloadProcessed) || 0;
+      var numerator = payloadPhase ? payloadProcessed : processed;
+      var denominator = payloadPhase ? payloadTotal : total;
+      if (!running) { numerator = total; denominator = total; if (payloadPhase) { numerator = payloadTotal; denominator = payloadTotal; } }
+      var percent = denominator ? Math.round(numerator / denominator * 100) : (running ? 0 : 100);
+      var headLabel = '';
+      var sub = '';
+      if (running) {
+        if (payloadPhase) {
+          headLabel = '正在复制产物「' + (job.currentLabel || '会话') + '」';
+          sub = '正文已完成 ' + processed + '/' + total + ' · 产物 ' + payloadProcessed + '/' + payloadTotal
+            + ' · 当前 ' + fmtBytes(job.currentBytes) + ' · 已用 ' + fmtDuration(Date.now() - (job.startedAt || Date.now()));
+        } else {
+          headLabel = job.currentLabel ? ('正在复制会话「' + job.currentLabel + '」') : '正在准备复制计划…';
+          sub = '第 ' + (job.currentIndex || 0) + '/' + total + ' 个 · 共 ' + fmtBytes(job.planBytes)
+            + ' · 已复制 ' + job.copied + ' · 跳过 ' + job.skipped + ' · 失败 ' + job.failed
+            + ' · 已用 ' + fmtDuration(Date.now() - (job.startedAt || Date.now()));
+        }
+      } else if (job.status === 'done') {
+        headLabel = '会话复制完成';
+        sub = '共 ' + total + ' 个 · 已复制 ' + job.copied + ' · 跳过 ' + job.skipped
+          + (payloadTotal ? ' · 产物 ' + job.payloadCopied + '/' + payloadTotal : '')
+          + ' · 用时 ' + fmtDuration(job.elapsedMs);
+      } else if (job.status === 'partial') {
+        headLabel = '复制完成（有失败项）';
+        sub = '共 ' + total + ' 个 · 已复制 ' + job.copied + ' · 失败 ' + autoCopyTotalFailed(job)
+          + (payloadTotal ? ' · 产物 ' + job.payloadCopied + '/' + payloadTotal : '')
+          + ' · 用时 ' + fmtDuration(job.elapsedMs);
+      } else {
+        headLabel = '自动复制失败';
+        sub = String(job.error || '任务异常终止');
+      }
+
+      var els = autoCopyProgressEls();
+      if (els && els.box) {
+        var state = running ? '' : (job.status === 'done' ? ' ok settled' : ' err settled');
+        els.box.className = 'wbs-sess-progress on' + state;
+        if (els.icon) els.icon.textContent = running ? '' : (job.status === 'done' ? '✓' : '!');
+        if (els.label) els.label.textContent = headLabel;
+        if (els.count) els.count.textContent = numerator + ' / ' + denominator;
+        if (els.fill) els.fill.style.width = Math.max(0, Math.min(100, percent)) + '%';
+        if (els.sub) els.sub.textContent = sub;
+      }
+    }
+
+    function scheduleAutoCopyHide(delay) {
+      if (autoCopyWatch.hideTimer) clearTimeout(autoCopyWatch.hideTimer);
+      autoCopyWatch.hideTimer = setBuildTimeout(function () {
+        autoCopyWatch.hideTimer = null;
+        var current = autoCopyWatch.job;
+        // 隐藏前再确认一次：期间可能已经开始下一个任务。
+        if (current && (current.status === 'queued' || current.status === 'running')) return;
+        autoCopyWatch.job = null;
+        hideAutoCopyProgress();
+      }, delay || 15000);
+    }
+
+    // 观察当前活跃的复制任务。可在任何时刻重复调用（切号、打开面板、注入完成）。
+    function watchAutoCopyProgress(options) {
+      if (!alive || !autoCopyWatch) return;
+      if (options && options.accountName) autoCopyWatch.accountName = options.accountName;
+      if (autoCopyWatch.timer) { clearTimeout(autoCopyWatch.timer); autoCopyWatch.timer = null; }
+      // 产物目录单条可达数百 MB（本机实测 710MB/5708 文件、512MB/321362 文件），
+      // 给足 6 小时上限，仅作为「永不停摆」的兜底。
+      autoCopyWatch.deadline = Date.now() + 6 * 60 * 60 * 1000;
+      var tick = function () {
+        autoCopyWatch.timer = null;
+        api('/api/sessions/auto-copy/active').then(function (d) {
           var job = d && d.job;
-          if (!job) return;
-          if (job.status === 'queued' || job.status === 'running') {
-            if (attempts < 120) setBuildTimeout(poll, 700);
+          if (!shouldShowAutoCopy(job)) {
+            if (autoCopyWatch.job) scheduleAutoCopyHide();
+            autoCopyWatch.job = null;
+            autoCopyWatch.accountName = '';
             return;
           }
-          if (job.status === 'done') {
-            toast('已切换到「' + accountName + '」，已复制 ' + job.total + ' 个会话', false, root);
-          } else if (job.status === 'partial') {
-            toast('已切换到「' + accountName + '」，复制完成，' + job.failed + ' 项失败', true, root);
-          } else {
-            toast('已切换到「' + accountName + '」，自动复制失败', true, root);
+          var previous = autoCopyWatch.job;
+          var wasRunning = !!(previous && (previous.status === 'queued' || previous.status === 'running'));
+          var stillRunning = job.status === 'queued' || job.status === 'running';
+          autoCopyWatch.job = job;
+          renderAutoCopyProgress(job);
+          if (stillRunning) {
+            if (Date.now() < autoCopyWatch.deadline) autoCopyWatch.timer = setBuildTimeout(tick, 1500);
+            return;
           }
-          setBuildTimeout(refresh, 900);
+          // 任务刚结束：刷新列表并提示结果（保留旧 pollAutoCopyJob 的 toast 行为）。
+          if (wasRunning) {
+            var name = autoCopyWatch.accountName;
+            var prefix = name ? ('已切换到「' + name + '」，') : '';
+            if (job.status === 'done') {
+              toast(prefix + '已复制 ' + job.total + ' 个会话' + (job.payloadTotal ? '（含产物 ' + job.payloadCopied + ' 个）' : ''), false, root);
+            } else if (job.status === 'partial') {
+              toast(prefix + '复制完成，' + autoCopyTotalFailed(job) + ' 项失败', true, root);
+            } else {
+              toast(prefix + '自动复制失败', true, root);
+            }
+            autoCopyWatch.accountName = '';
+          }
+          setBuildTimeout(function () { loadSessions(); }, 800);
+          scheduleAutoCopyHide(15000);
         }).catch(function () {
-          if (attempts < 120) setBuildTimeout(poll, 1000);
+          if (Date.now() < autoCopyWatch.deadline) autoCopyWatch.timer = setBuildTimeout(tick, 3000);
         });
       };
-      setBuildTimeout(poll, 700);
+      tick();
+    }
+
+    function pollAutoCopyJob(jobId, accountName) {
+      // 保留旧调用点签名：不再按 jobId 轮询（整页 reload 后 jobId 必丢），
+      // 统一交给活跃任务观察器。
+      watchAutoCopyProgress({ accountName: accountName });
     }
 
     // token 过期状态：< 7 天 / 已过期 -> 红字高亮
@@ -12130,6 +12291,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     try { acCheckPromptOnOpen(); } catch (e) {}
     // 按钮主题色（浅色黑底白图 / 深色白底黑图）+ 监听主题切换
     try { applyThemeButtonColors(); watchThemeForButtons(); } catch (e) {}
+    // 注入完成即探测是否有正在进行的自动复制：切号会走 CDP Page.reload，重新注入
+    // 后内存里没有任何 jobId，必须靠这一步把进度条与 FAB 角标恢复回来。
+    try { watchAutoCopyProgress(); } catch (e) {}
 
     return { destroy: lifecycle.destroy, alive: lifecycle.alive };
   }
@@ -12597,6 +12761,27 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-sess-seg-btn{flex:1;padding:6px 4px;border:none;border-radius:8px;background:transparent;color:var(--wb-icon-secondary,#666);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit;white-space:nowrap}',
     '.wbs-sess-seg-btn:hover{color:var(--wb-color-text-primary,#1f1f1f)}',
     '.wbs-sess-seg-btn.active{background:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff);box-shadow:0 1px 4px rgba(0,0,0,.2)}',
+    // 会话页：自动复制进度条（切号后显示「正在处理哪个会话 + 已复制/总数」）
+    '.wbs-sess-progress{display:none;flex:0 0 auto;margin-bottom:8px;padding:8px 10px;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:10px;background:var(--wb-bg-tertiary,#f6f7f9)}',
+    '.wbs-sess-progress.on{display:block}',
+    '.wbs-sess-progress-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}',
+    '.wbs-sess-progress-spin{flex:0 0 12px;width:12px;height:12px;border:2px solid var(--wb-border-strong,#d0d0d0);border-top-color:var(--wb-accent-blue,#4f86ff);border-radius:50%;animation:wbs-sess-spin .8s linear infinite}',
+    '@keyframes wbs-sess-spin{to{transform:rotate(360deg)}}',
+    '.wbs-sess-progress.settled .wbs-sess-progress-spin{display:none}',
+    '.wbs-sess-progress-icon{display:none;flex:0 0 auto;font-size:12px;line-height:1}',
+    '.wbs-sess-progress.settled .wbs-sess-progress-icon{display:inline}',
+    '.wbs-sess-progress.ok .wbs-sess-progress-icon{color:#1a9c50}',
+    '.wbs-sess-progress.err .wbs-sess-progress-icon{color:#e5484d}',
+    '.wbs-sess-progress-label{flex:1;min-width:0;font-size:12px;font-weight:600;color:var(--wb-color-text-primary,#1f1f1f);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.wbs-sess-progress-count{flex:0 0 auto;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-sess-progress-track{position:relative;height:5px;border-radius:999px;background:var(--wb-border-default,#e5e5e5);overflow:hidden}',
+    '.wbs-sess-progress-fill{height:100%;width:0;border-radius:999px;background:var(--wb-accent-blue,#4f86ff);transition:width .3s ease}',
+    '.wbs-sess-progress.ok .wbs-sess-progress-fill{background:#1a9c50}',
+    '.wbs-sess-progress.err .wbs-sess-progress-fill{background:#e5484d}',
+    '.wbs-sess-progress-sub{margin-top:6px;font-size:11px;line-height:1.45;color:var(--wb-icon-tertiary,#999);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    // 说明：曾尝试在 FAB 上挂「15/22」角标，实测 FAB 在安静模式下会被
+    // --wbs-fab-quiet-shift 右推出视口（右侧最多出屏 33px），挂在它上面的角标
+    // 无法保证可见，所以进度统一放在面板内（会话页顶部常驻条）。
     '.wbs-sess-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:8px}',
     '.wbs-sess-refresh{display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:7px;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:9px;background:var(--wb-bg-popover,#fff);color:var(--wb-icon-secondary,#555);font-size:12px;cursor:pointer;line-height:1;transition:all .15s}',
     '.wbs-sess-refresh:hover{background:var(--wb-bg-hover,#f5f5f5);color:var(--wb-color-text-primary,#1f1f1f)}',

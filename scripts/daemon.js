@@ -346,8 +346,8 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.24：账号轮换恢复真实积分段消耗检测，仅推荐缓存中到期时间最近的可用账号。
 // 1.2.25：首页弹窗任务补齐成长/活动入口，并按 renderer 页面身份修复重连后的 pageReady 触发。
 // 1.2.26：无效账号备份不再显示可点击的切换按钮，导入路径拒绝写入无效认证数据。
-const DAEMON_VERSION = '1.2.36';
-const DAEMON_BUILD_ID = 'release-1.2.36-20260913-credit-rotation-always-check';
+const DAEMON_VERSION = '1.2.1';
+const DAEMON_BUILD_ID = 'release-1.2.1-20260914-local-quitfix2-autocopy-progress';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -2389,6 +2389,10 @@ function verifiedWindowsWorkBuddyProcesses(binary) {
   const verified = filterVerifiedWindowsProcesses(
     binary, processes, fs.realpathSync.native, PROFILE.customTarget ? PROFILE_BINARY_NAMES : null
   );
+  // 刻意保持原样：只要存在「workbuddy 家族命名但无法验证属于本安装目录」的进程就拒绝
+  // 继续，避免在别的 WorkBuddy 实例（便携版 / AI 版）运行时改动登录文件。
+  // 关停过程中该类探测会短暂抛错，由 waitForWorkBuddyExitTolerant 按「仍在运行」吸收，
+  // 不在这里放宽断言。
   if (processes.length !== verified.length) {
     throw new Error('存在当前 profile 进程，但没有进程属于已验证安装目录；登录信息未修改');
   }
@@ -2398,9 +2402,11 @@ function verifiedWindowsWorkBuddyProcesses(binary) {
 function revalidateWindowsWorkBuddyProcess(original, binary) {
   const current = verifiedWindowsWorkBuddyProcesses(binary)
     .find((process) => process.ProcessId === original.ProcessId);
-  if (!current) {
-    throw new Error(`结束前无法再次验证 WorkBuddy PID=${original.ProcessId}`);
-  }
+  // 进程在「枚举 → 重新验证」之间自行退出，正是退出登录想要的结果，不是错误。
+  // 旧实现在这里抛「结束前无法再次验证 WorkBuddy PID=xxx」，而操作系统回收
+  // Electron 进程树本身就有先后 —— 本机实测每次假退出都必然踩到，整条流程中止，
+  // 结果只剩「界面关了、托盘没了，然后什么都不发生」。
+  if (!current) return null;
   return assertSameProcessIdentity(original, current);
 }
 
@@ -2427,6 +2433,23 @@ async function waitForWorkBuddyExit(timeoutMs = 10000, binary = null) {
   return !workBuddyRunning(binary);
 }
 
+/**
+ * waitForWorkBuddyExit 的容错版，专供退出登录流程使用。
+ * 进程探测本身出错（PowerShell 冷启动超时、CIM 查询抖动）时按「仍在运行」处理并继续
+ * 等待，而不是立刻抛出把整条退出流程打断 —— 否则用户看到的就是「界面关了、托盘没了，
+ * 然后什么都不发生」。超时后最后一次探测仍失败才抛出，保持 fail closed（不删身份文件）。
+ */
+async function waitForWorkBuddyExitTolerant(timeoutMs = 10000, binary = null) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if (!workBuddyRunning(binary)) return true;
+    } catch (_) { /* 探测抖动：按仍在运行处理，继续等 */ }
+    await sleep(200);
+  }
+  return !workBuddyRunning(binary);
+}
+
 /** 退出 WorkBuddy，并确认进程已经消失；失败时拒绝继续登录切换。 */
 async function quitWorkBuddy() {
   if (IS_WIN) {
@@ -2435,26 +2458,48 @@ async function quitWorkBuddy() {
     let processes = verifiedWindowsWorkBuddyProcesses(binary);
     if (!processes.length) return true;
 
+    // 优雅关闭只是「给 Electron 一次机会」。taskkill 不带 /F 对没有可响应顶层窗口
+    // 的进程必然返回「只能强制终止这个进程(带 /F 选项)」，这是预期结果而非致命错误。
+    // 原实现直接 throw，导致下面的 /F 兜底成为永不执行的死代码 —— 本机日志里
+    // 「taskkill 无法结束已验证进程 PID=...」后整体失败，登录文件没删、应用没重启。
+    let lastGracefulError = null;
     for (const process of processes) {
       const current = revalidateWindowsWorkBuddyProcess(process, binary);
+      if (!current) { log(`[logout] PID=${process.ProcessId} 已自行退出，跳过优雅关闭`); continue; }
       const result = await runCommand('taskkill', ['/PID', String(current.ProcessId)]);
       if (result.error || result.code !== 0) {
-        throw result.error || new Error(`taskkill 无法结束已验证进程 PID=${process.ProcessId}`);
+        lastGracefulError = result.error || new Error(`taskkill 无法结束已验证进程 PID=${process.ProcessId}`);
+        log(`[logout] 优雅关闭未生效，转强制终止 PID=${process.ProcessId}: ${lastGracefulError.message}`);
       }
     }
-    if (await waitForWorkBuddyExit(1800, binary)) return true;
+    if (await waitForWorkBuddyExitTolerant(1800, binary)) return true;
 
-    processes = verifiedWindowsWorkBuddyProcesses(binary);
-    for (const process of processes) {
-      const current = revalidateWindowsWorkBuddyProcess(process, binary);
-      const result = await runCommand('taskkill', ['/F', '/PID', String(current.ProcessId)]);
-      if (result.error || result.code !== 0) {
-        throw result.error || new Error(`taskkill 无法强制结束已验证进程 PID=${process.ProcessId}`);
+    // 强制终止。Electron 关停时会成批回收/重建 GPU、renderer、crashpad 等 helper，
+    // 「枚举 → 逐个终止」天然存在竞态：本机实测第一轮强行终止后仍有新 PID 出现，
+    // 单轮循环过不了 waitForWorkBuddyExit，于是整条退出登录流程被判失败。
+    // 这里带 1 秒沉降、最多重试 3 轮；/T 一并结束子进程树，避免残留句柄挡住
+    // 后续删除身份文件（同一个流程的第二步）。
+    let lastForcedError = null;
+    for (let round = 1; round <= 3; round++) {
+      if (round > 1) await sleep(1000);
+      processes = verifiedWindowsWorkBuddyProcesses(binary);
+      if (!processes.length) return true;
+      for (const process of processes) {
+        const current = revalidateWindowsWorkBuddyProcess(process, binary);
+        if (!current) continue;
+        const result = await runCommand('taskkill', ['/F', '/T', '/PID', String(current.ProcessId)]);
+        if (result.error || result.code !== 0) {
+          lastForcedError = result.error || new Error(`taskkill 无法强制结束已验证进程 PID=${process.ProcessId}`);
+          log(`[logout] 强制终止未成功 PID=${process.ProcessId}: ${lastForcedError.message}`);
+        }
       }
+      if (await waitForWorkBuddyExitTolerant(2500, binary)) return true;
+      log(`[logout] 第 ${round}/3 轮强制终止后仍有残留进程`);
     }
-    if (await waitForWorkBuddyExit(2500, binary)) return true;
 
-    throw new Error('无法以普通用户权限安全退出 WorkBuddy。请手动关闭该程序；若它以管理员身份运行，请先退出后再重试。登录信息未修改');
+    const detail = (lastForcedError || lastGracefulError);
+    throw new Error('无法以普通用户权限安全退出 WorkBuddy。请手动关闭该程序；若它以管理员身份运行，请先退出后再重试。登录信息未修改'
+      + (detail ? `（最后一次终止尝试：${detail.message}）` : ''));
   }
 
   if (!workBuddyRunning()) return true;
@@ -3638,9 +3683,10 @@ function sessionRangeMs(range) {
 // tasks/<id>/、file-history/<id>/、artifact-index/<id>.json（全部以新 id 命名复制）
 // 异步实现：切号复制大批会话时，同步 cpSync 会阻塞主线程几十秒，把注入定时器、
 // 面板响应全部饿死（切号后 FAB 迟迟不出现的根因之一）。
-async function copySessionFiles(wbHome, oldId, newId) {
+async function copySessionFiles(wbHome, oldId, newId, options = {}) {
   const fsMod = fs;
-  const result = { copied: 0, failed: 0 };
+  const skipWorkspaceSessions = !!(options && options.skipWorkspaceSessions);
+  const result = { copied: 0, failed: 0, workspacePending: false };
   const copyOne = async (from, to) => {
     try {
       if (!fsMod.existsSync(from)) return;
@@ -3673,8 +3719,18 @@ async function copySessionFiles(wbHome, oldId, newId) {
       }
     }
   } catch (_) {}
-  // 2) workspace/sessions/<id>/
-  await copyOne(path.join(wbHome, 'workspace', 'sessions', oldId), path.join(wbHome, 'workspace', 'sessions', newId));
+  // 2) workspace/sessions/<id>/ —— 体积可达数百 MB（本机最大单条约 709MB）。
+  //    自动复制时留给第二阶段由 copySessionWorkspacePayload 单独推进，
+  //    让会话正文先落盘、进度条能快速推进到 N/N；手动复制仍一次搬完。
+  const workspaceFrom = path.join(wbHome, 'workspace', 'sessions', oldId);
+  const workspaceTo = path.join(wbHome, 'workspace', 'sessions', newId);
+  if (skipWorkspaceSessions) {
+    try {
+      if (fsMod.existsSync(workspaceFrom) && directoryStats(workspaceFrom).files) result.workspacePending = true;
+    } catch (_) {}
+  } else {
+    await copyOne(workspaceFrom, workspaceTo);
+  }
   // 3) tasks/<id>/
   await copyOne(path.join(wbHome, 'tasks', oldId), path.join(wbHome, 'tasks', newId));
   // 4) file-history/<id>/
@@ -3717,6 +3773,136 @@ function sessionContentMtime(wbHome, sessionId) {
     path.join(wbHome, 'artifact-index', id + '.json'),
   ]) visit(target);
   return latest;
+}
+
+/**
+ * 统计一个文件/目录的字节数与文件数（只做元数据遍历，不读内容）。
+ * 用于给自动复制的会话排序：小会话（产物少）先复制，大会话排到最后。
+ */
+function directoryStats(target) {
+  const stats = { bytes: 0, files: 0 };
+  if (!target) return stats;
+  const stack = [target];
+  while (stack.length) {
+    const current = stack.pop();
+    let stat;
+    try { stat = fs.lstatSync(current); } catch (_) { continue; }
+    if (stat.isSymbolicLink()) continue;
+    if (stat.isFile()) { stats.bytes += Number(stat.size || 0); stats.files++; continue; }
+    if (!stat.isDirectory()) continue;
+    let entries;
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch (_) { continue; }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const child = path.join(current, entry.name);
+      if (entry.isDirectory()) { stack.push(child); continue; }
+      if (!entry.isFile()) continue;
+      try {
+        const fileStat = fs.lstatSync(child);
+        stats.bytes += Number(fileStat.size || 0);
+        stats.files++;
+      } catch (_) {}
+    }
+  }
+  return stats;
+}
+
+/** 会话的全部本地路径，供体积统计与产物复制复用。 */
+function sessionBucketPaths(wbHome, sessionId) {
+  const id = String(sessionId || '').trim();
+  if (!id) return [];
+  const paths = [];
+  const projects = path.join(wbHome, 'projects');
+  try {
+    for (const entry of fs.readdirSync(projects, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      paths.push({ kind: 'meta', target: path.join(projects, entry.name, id + '.jsonl') });
+      paths.push({ kind: 'meta', target: path.join(projects, entry.name, id) });
+    }
+  } catch (_) {}
+  paths.push({ kind: 'meta', target: path.join(wbHome, 'tasks', id) });
+  paths.push({ kind: 'meta', target: path.join(wbHome, 'file-history', id) });
+  paths.push({ kind: 'meta', target: path.join(wbHome, 'artifact-index', id + '.json') });
+  paths.push({ kind: 'payload', target: path.join(wbHome, 'workspace', 'sessions', id) });
+  return paths;
+}
+
+/** 会话总体积 + 其中「产物目录」（workspace/sessions/<id>/）的体积。 */
+function sessionContentSize(wbHome, sessionId) {
+  const result = { bytes: 0, files: 0, workspaceBytes: 0, workspaceFiles: 0 };
+  for (const bucket of sessionBucketPaths(wbHome, sessionId)) {
+    const stats = directoryStats(bucket.target);
+    result.bytes += stats.bytes;
+    result.files += stats.files;
+    if (bucket.kind === 'payload') {
+      result.workspaceBytes += stats.bytes;
+      result.workspaceFiles += stats.files;
+    }
+  }
+  return result;
+}
+
+/** 人类可读体积，用于日志与进度提示。 */
+function formatByteSize(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return bytes + ' B';
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = bytes / 1024;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) { size /= 1024; index++; }
+  return (size >= 10 ? size.toFixed(0) : size.toFixed(1)) + ' ' + units[index];
+}
+
+/** 会话展示名，用于进度条上「正在处理哪个会话」。 */
+function autoCopySessionLabel(row) {
+  const raw = String((row && (row.custom_title || row.title)) || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '未命名会话';
+  return raw.length > 60 ? raw.slice(0, 59) + '…' : raw;
+}
+
+/**
+ * 体积升序排序：先量体积，再让小会话（无产物/产物很小）优先进队列。
+ * 目的是让进度条在几十秒内就能推进到接近 N/N，而不是被一个 500MB+
+ * 的会话堵在队首、全线停摆（本机实测 workspace/sessions 单条最大 709MB）。
+ */
+function sortAutoCopyPlanBySize(plan, wbHome) {
+  return (Array.isArray(plan) ? plan : []).map((row, index) => {
+    const stats = sessionContentSize(wbHome, row && row.id);
+    return Object.assign({}, row, {
+      sizeBytes: stats.bytes,
+      sizeFiles: stats.files,
+      workspaceBytes: stats.workspaceBytes,
+      workspaceFiles: stats.workspaceFiles,
+      planIndex: index,
+    });
+  }).sort((a, b) => {
+    if (a.workspaceBytes !== b.workspaceBytes) return a.workspaceBytes - b.workspaceBytes;
+    if (a.sizeFiles !== b.sizeFiles) return a.sizeFiles - b.sizeFiles;
+    if (a.sizeBytes !== b.sizeBytes) return a.sizeBytes - b.sizeBytes;
+    return a.planIndex - b.planIndex;
+  });
+}
+
+/**
+ * 只复制会话的「产物目录」workspace/sessions/<id>/。
+ * 该目录单个可达数百 MB，自动复制时放到第二阶段单独推进，让会话正文先落盘。
+ * 目标已存在且文件数/字节数不低于源时直接跳过，避免每次切号重复搬运几百 MB。
+ */
+async function copySessionWorkspacePayload(wbHome, oldId, newId) {
+  const from = path.join(wbHome, 'workspace', 'sessions', String(oldId || ''));
+  const to = path.join(wbHome, 'workspace', 'sessions', String(newId || ''));
+  const source = directoryStats(from);
+  if (!source.files) return 'skipped';
+  const target = directoryStats(to);
+  if (target.files >= source.files && target.bytes >= source.bytes) return 'skipped';
+  try {
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    await fs.promises.cp(from, to, { recursive: true, force: true });
+    return 'copied';
+  } catch (e) {
+    log('[sessions-copy] 复制产物目录失败 ' + from + ': ' + e.message);
+    return 'failed';
+  }
 }
 
 // Reconcile every live member of a shared lineage.  A switch can arrive after
@@ -4010,14 +4196,14 @@ async function copySessionRecord(src, targetUid, options = {}) {
         [mapping.targetId]
       );
       if (existing.length && String(existing[0].user_id || '') === String(targetUid)) {
-        const files = await copySessionFiles(wbHome, src.id, mapping.targetId);
+        const files = await copySessionFiles(wbHome, src.id, mapping.targetId, { skipWorkspaceSessions: auto });
         addAutoCopySessionMember(DATA_DIR, lineageId, targetUid, mapping.targetId);
         setAutoCopyMapping(DATA_DIR, lineageId, targetUid, {
           targetId: mapping.targetId,
           status: files.failed ? 'partial' : 'copied',
           failedFiles: files.failed,
         });
-        return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: mapping.targetId, failedFiles: files.failed };
+        return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: mapping.targetId, failedFiles: files.failed, workspacePending: files.workspacePending };
       }
       deleteAutoCopyMapping(DATA_DIR, lineageId, targetUid);
     }
@@ -4049,21 +4235,21 @@ async function copySessionRecord(src, targetUid, options = {}) {
       });
       if (candidates.length) {
         const canonicalId = candidates[0].id;
-        const files = await copySessionFiles(wbHome, src.id, canonicalId);
+        const files = await copySessionFiles(wbHome, src.id, canonicalId, { skipWorkspaceSessions: auto });
         addAutoCopySessionMember(DATA_DIR, lineageId, targetUid, canonicalId);
         setAutoCopyMapping(DATA_DIR, lineageId, targetUid, {
           targetId: canonicalId,
           status: files.failed ? 'partial' : 'copied',
           failedFiles: files.failed,
         });
-        return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: canonicalId, failedFiles: files.failed };
+        return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: canonicalId, failedFiles: files.failed, workspacePending: files.workspacePending };
       }
     }
   }
 
   const newId = crypto.randomUUID();
   await insertCopiedSession(src, targetUid, newId);
-  const files = await copySessionFiles(wbHome, src.id, newId);
+  const files = await copySessionFiles(wbHome, src.id, newId, { skipWorkspaceSessions: auto });
   if (lineageId) {
     addAutoCopySessionMember(DATA_DIR, lineageId, targetUid, newId);
     setAutoCopyMapping(DATA_DIR, lineageId, targetUid, {
@@ -4072,7 +4258,7 @@ async function copySessionRecord(src, targetUid, options = {}) {
       failedFiles: files.failed,
     });
   }
-  return { status: files.failed ? 'partial' : 'copied', sourceId: src.id, targetId: newId, failedFiles: files.failed };
+  return { status: files.failed ? 'partial' : 'copied', sourceId: src.id, targetId: newId, failedFiles: files.failed, workspacePending: files.workspacePending };
   };
   if (!lineageId) return perform();
   const lockKey = JSON.stringify([lineageId, String(targetUid || '')]);
@@ -4190,20 +4376,56 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
     skipped: 0,
     failed: 0,
     partial: 0,
+    // phase: planning -> meta（会话正文）-> payload（产物目录）-> done
+    phase: 'planning',
+    // 进度展示：目前正在处理哪个会话、处理到第几个
+    currentIndex: 0,
+    currentId: null,
+    currentLabel: '',
+    currentBytes: 0,
+    planBytes: 0,
+    processedBytes: 0,
+    // 第二阶段（产物目录 workspace/sessions/<id>/）计数
+    payloadTotal: 0,
+    payloadProcessed: 0,
+    payloadCopied: 0,
+    payloadSkipped: 0,
+    payloadFailed: 0,
+    payloadBytes: 0,
+    payloadProcessedBytes: 0,
     error: null,
     startedAt: Date.now(),
+    updatedAt: Date.now(),
+    finishedAt: null,
   };
   autoCopyJobs.set(id, job);
   const run = async () => {
     job.status = 'running';
+    job.startedAt = Date.now();
+    job.updatedAt = job.startedAt;
+    const wbHome = PROFILE.dataRoot;
     // 账号切换响应、CDP 导航和注入事件必须先有机会完成；Node SQLite 与文件复制
     // 的 Promise 可能同步结算，连续微任务会在 macOS 上长期饿死 I/O 事件。
     await yieldAutoCopyToRenderer();
     // A rapid switch chain may enqueue this job before the previous copy has
     // created the target rows. Re-plan after the queue reaches this job.
-    job.plan = await buildAutoCopyPlan(sourceUid, targetUid);
+    // 先量体积再排序：小会话（无产物/产物很小）优先复制，大会话排到最后。
+    // 原来的顺序来自 created_at DESC，一个 500MB+ 的会话就可能把串行队列
+    // 堵在队首十几分钟，界面上表现为「切了号但什么都没发生」。
+    job.plan = sortAutoCopyPlanBySize(await buildAutoCopyPlan(sourceUid, targetUid), wbHome);
     job.total = job.plan.length;
-    for (const src of job.plan) {
+    job.planBytes = job.plan.reduce((sum, row) => sum + (row.sizeBytes || 0), 0);
+    job.phase = 'meta';
+    log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 计划 ${job.total} 个会话，合计 ${formatByteSize(job.planBytes)}（已按体积升序排列）`);
+    const payloadQueue = [];
+    for (let index = 0; index < job.plan.length; index++) {
+      const src = job.plan[index];
+      job.currentIndex = index + 1;
+      job.currentId = String(src.id || '');
+      job.currentLabel = autoCopySessionLabel(src);
+      job.currentBytes = Number(src.sizeBytes || 0);
+      job.updatedAt = Date.now();
+      log(`[sessions-auto-copy] (${index + 1}/${job.total}) 复制 ${job.currentLabel} [${formatByteSize(job.currentBytes)}]`);
       await yieldAutoCopyToRenderer();
       try {
         let result;
@@ -4231,15 +4453,63 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
         else if (result.status === 'partial') job.partial++;
         else job.copied++;
         if (result.failedFiles) job.failed += result.failedFiles;
+        // 产物目录留到第二阶段（体积大），此处只登记待办。
+        if (result.workspacePending && result.targetId) {
+          payloadQueue.push({
+            sourceId: String(src.id || ''),
+            targetId: String(result.targetId),
+            label: job.currentLabel,
+            bytes: Number(src.workspaceBytes || 0),
+          });
+        }
       } catch (e) {
         job.failed++;
         log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 会话 ${src.id} 失败: ${e.message}`);
       }
       job.processed++;
+      job.processedBytes += job.currentBytes;
+      job.updatedAt = Date.now();
     }
-    job.status = job.failed || job.partial ? 'partial' : 'done';
+
+    // 第二阶段：产物目录。体积从几十 MB 到数百 MB 不等，与正文分开推进，
+    // 这样进度条能先如实报出「正文 N/N」，再去慢慢搬产物。
+    job.phase = payloadQueue.length ? 'payload' : 'done';
+    job.payloadTotal = payloadQueue.length;
+    job.payloadBytes = payloadQueue.reduce((sum, item) => sum + (item.bytes || 0), 0);
+    if (payloadQueue.length) {
+      log(`[sessions-auto-copy] 正文完成 ${job.processed}/${job.total}，开始复制 ${job.payloadTotal} 个会话的产物（合计 ${formatByteSize(job.payloadBytes)}）`);
+    }
+    for (let index = 0; index < payloadQueue.length; index++) {
+      const item = payloadQueue[index];
+      job.currentIndex = index + 1;
+      job.currentId = item.sourceId;
+      job.currentLabel = item.label;
+      job.currentBytes = item.bytes;
+      job.updatedAt = Date.now();
+      log(`[sessions-auto-copy] 产物 (${index + 1}/${job.payloadTotal}) ${item.label} [${formatByteSize(item.bytes)}]`);
+      await yieldAutoCopyToRenderer();
+      try {
+        const outcome = await copySessionWorkspacePayload(wbHome, item.sourceId, item.targetId);
+        if (outcome === 'copied') job.payloadCopied++;
+        else if (outcome === 'failed') job.payloadFailed++;
+        else job.payloadSkipped++;
+      } catch (e) {
+        job.payloadFailed++;
+        log(`[sessions-auto-copy] 产物复制失败 ${item.sourceId}: ${e.message}`);
+      }
+      job.payloadProcessed++;
+      job.payloadProcessedBytes += item.bytes || 0;
+      job.updatedAt = Date.now();
+    }
+
+    job.status = (job.failed || job.partial || job.payloadFailed) ? 'partial' : 'done';
+    job.phase = 'done';
     job.finishedAt = Date.now();
-    log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 完成 total=${job.total} copied=${job.copied} skipped=${job.skipped} partial=${job.partial} failed=${job.failed}`);
+    job.updatedAt = job.finishedAt;
+    job.currentId = null;
+    job.currentLabel = '';
+    job.currentBytes = 0;
+    log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 完成 total=${job.total} copied=${job.copied} skipped=${job.skipped} partial=${job.partial} failed=${job.failed} 产物=${job.payloadCopied}/${job.payloadTotal}(跳过 ${job.payloadSkipped} 失败 ${job.payloadFailed}) 用时 ${((job.finishedAt - job.startedAt) / 1000).toFixed(1)}s`);
     const cleanup = setTimeout(() => autoCopyJobs.delete(id), 30 * 60 * 1000);
     if (cleanup.unref) cleanup.unref();
     pruneAutoCopyJobs();
@@ -4251,17 +4521,53 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
   return job;
 }
 
+/**
+ * 供前端恢复进度使用：优先返回正在排队/执行的任务；没有活跃任务时，
+ * 返回最近 5 分钟内结束的任务，让「页面重载 → 刚好复制完」也能看到结果。
+ */
+function activeAutoCopyJob() {
+  let running = null;
+  for (const job of autoCopyJobs.values()) {
+    if (job.status !== 'queued' && job.status !== 'running') continue;
+    if (!running || (job.startedAt || 0) > (running.startedAt || 0)) running = job;
+  }
+  if (running) return running;
+  const recent = Array.from(autoCopyJobs.values())
+    .filter((job) => job.finishedAt && Date.now() - job.finishedAt < 5 * 60 * 1000)
+    .sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0));
+  return recent[0] || null;
+}
+
 function publicAutoCopyJob(job) {
   if (!job) return null;
+  const startedAt = job.startedAt || 0;
   return {
     id: job.id,
     status: job.status,
+    phase: job.phase || 'meta',
     total: job.total,
     processed: job.processed,
     copied: job.copied,
     skipped: job.skipped,
     partial: job.partial,
     failed: job.failed,
+    // 进度条字段：当前正在处理的会话 + 体积 + 两阶段计数
+    currentIndex: job.currentIndex || 0,
+    currentId: job.currentId || null,
+    currentLabel: job.currentLabel || '',
+    currentBytes: job.currentBytes || 0,
+    planBytes: job.planBytes || 0,
+    processedBytes: job.processedBytes || 0,
+    payloadTotal: job.payloadTotal || 0,
+    payloadProcessed: job.payloadProcessed || 0,
+    payloadCopied: job.payloadCopied || 0,
+    payloadSkipped: job.payloadSkipped || 0,
+    payloadFailed: job.payloadFailed || 0,
+    payloadBytes: job.payloadBytes || 0,
+    startedAt,
+    updatedAt: job.updatedAt || startedAt,
+    finishedAt: job.finishedAt || null,
+    elapsedMs: startedAt ? ((job.finishedAt || Date.now()) - startedAt) : 0,
     error: job.error,
   };
 }
@@ -8137,6 +8443,13 @@ function handleApi(req, res) {
   if (req.method === 'GET' && p === '/api/sessions/auto-copy/status') {
     const job = autoCopyJobs.get(url.searchParams.get('id') || '');
     return job ? json(res, 200, { ok: true, job: publicAutoCopyJob(job) }) : json(res, 404, { ok: false, error: '自动复制任务不存在' });
+  }
+  // 当前活跃的自动复制任务：GET /api/sessions/auto-copy/active
+  // 切号会整页 reload，注入上下文重建、内存里的 jobId 丢失；面板打开时靠这个
+  // 接口把进度条状态恢复回来（这正是原先「切号后进度提示消失」的断点）。
+  if (req.method === 'GET' && p === '/api/sessions/auto-copy/active') {
+    const job = activeAutoCopyJob();
+    return json(res, 200, { ok: true, job: job ? publicAutoCopyJob(job) : null });
   }
   // 加密导出会话及其受管消息附件：POST /api/sessions/export { ids, password }
   if (req.method === 'POST' && p === '/api/sessions/export') {

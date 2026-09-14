@@ -1,4 +1,4 @@
-# WorkDaddy Windows 自动更新替换脚本。
+﻿# WorkDaddy Windows 自动更新替换脚本。
 # 独立于 daemon 运行：停止 watchdog、替换安装目录、启动新版并验证 API；失败时保留日志并回滚。
 [CmdletBinding()]
 param(
@@ -7,7 +7,7 @@ param(
   [string]$Port = '47832',
   [string]$LogPath = '',
   [string]$AttemptId = 'unknown',
-  [string]$Profile = '__WBS_DEFAULT_PROFILE__'
+  [string]$Profile = 'workbuddy-cn'
 )
 
 try {
