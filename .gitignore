@@ -1,0 +1,6 @@
+# 本机数据与构建产物，不入库
+_backup/
+scripts/runtime/
+unins000.dat
+卸载 WorkDaddy.dat
+*.log

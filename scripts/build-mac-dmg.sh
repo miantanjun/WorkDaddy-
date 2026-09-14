@@ -1,0 +1,513 @@
+#!/usr/bin/env bash
+# WorkDaddy macOS dmg 打包（壳子不动原则）
+# ============================================================
+# 原则：保留 WorkDaddy.app 的结构、权限和签名；按 profile 仅对 staged launcher
+#       与 Info.plist 做必要的目标应用/品牌元数据处理，再覆盖内部前端代码。
+# 背景：1.0.4 首版 dmg 打不开，根因是打包源 app 的 launcher 丢了可执行位
+#       （-rw-rw-r--），hdiutil 打包后 macOS 拒绝启动不可执行的 CFBundleExecutable。
+# 本脚本每次打包前自检并恢复 launcher 可执行位，避免产物因权限或 profile
+# 元数据不一致而无法启动。
+# 用法: bash scripts/build-mac-dmg.sh
+# 产出: release/macos/WorkDaddy-<ver>.dmg（ver 取自 daemon.js 的 DAEMON_VERSION）
+# ============================================================
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$DIR"
+
+VERSION="${WORKDADDY_BUILD_VERSION:-$(grep -o "DAEMON_VERSION = '[^']*'" scripts/daemon.js | head -1 | cut -d"'" -f2)}"
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "错误：发布版本必须是 x.y.z，实际为 ${VERSION}" >&2
+  exit 2
+fi
+APP="WorkDaddy.app"
+DMG_WINDOW_WIDTH=620
+DMG_WINDOW_HEIGHT=400
+DMG_ICON_SIZE=112
+DMG_BACKGROUND_SVG="$DIR/scripts/assets/macos-dmg-background.svg"
+SKIP_FINDER="${WORKDADDY_SKIP_FINDER:-}"
+PROFILE="${WORKDADDY_BUILD_PROFILE:-}"
+if [ -z "$PROFILE" ]; then
+  for profile in workbuddy-cn workbuddy-ai; do
+    WORKDADDY_BUILD_PROFILE="$profile" bash "$0" || exit $?
+  done
+  exit 0
+fi
+case "$PROFILE" in
+  workbuddy-ai) PACKAGE_APP_NAME="WorkDaddy AI"; OUT="release/macos/WorkDaddy-AI-${VERSION}.dmg" ;;
+  *) PROFILE="workbuddy-cn"; PACKAGE_APP_NAME="WorkDaddy"; OUT="release/macos/WorkDaddy-${VERSION}.dmg" ;;
+esac
+
+echo "==> profile: ${PROFILE}"
+echo "==> 版本: ${VERSION}"
+echo "==> 产物: ${OUT}"
+
+# 1) 壳完整性自检：launcher 必须有可执行位（1.0.3 原版为 -rwxr-xr-x）
+chmod 755 "$APP/Contents/MacOS/launcher"
+echo "==> launcher 可执行位已保证: $(stat -f '%Sp' "$APP/Contents/MacOS/launcher")"
+
+APP_ICON="$DIR/scripts/assets/WorkDaddy.icns"
+if [ ! -f "$APP_ICON" ]; then
+  echo "错误：缺少应用图标 $APP_ICON" >&2
+  exit 1
+fi
+cp "$APP_ICON" "$APP/Contents/Resources/AppIcon.icns"
+chmod 644 "$APP/Contents/Resources/AppIcon.icns"
+echo "==> 应用图标已同步（背景 #e1e1e1）"
+
+# 2) 只覆盖前端代码（保留壳的其余一切：launcher/Info.plist/builtin/node_modules/theme-audit.js）
+for f in daemon.js toast-runtime.js toast-options.js primary-account.js completion-report.js automation-runtime.js automation-packages.js automation-compatibility.js automation-transfer.js automation-zip.js automation.js automation-picker.js token-refresh.js session-db.js third-party-models.js secure-transfer.js windows-process-boundary.js workbuddy-compat.js inject.js theme-patches.js theme-text-shadow.js theme-vars.js credit-segments.js credit-resource-queries.js credit-request-usage.js credit-history-sync.js credit-usage-store.js credit-rotation.js token-stats.js growth-active.js atomic-file-write.js ui-port.js checkin-result.js lib.js profiles.js workbuddy-target.js cdp-targets.js sentry-report.js usage-report.js install.sh relaunch-with-cdp.sh uninstall.sh apply-update.sh; do
+  [ -f "scripts/$f" ] && cp "scripts/$f" "$APP/Contents/Resources/scripts/$f"
+done
+# Injection reads the wordmark at runtime; keep brand assets in both profiles.
+mkdir -p "$APP/Contents/Resources/scripts/assets"
+cp scripts/assets/workdaddy-logo.svg scripts/assets/workdaddy-app-icon.svg "$APP/Contents/Resources/scripts/assets/"
+# Presets are runtime source, independent of the reusable wallpaper/theme shell.
+mkdir -p "$APP/Contents/Resources/scripts/builtin/automations"
+cp scripts/builtin/automations/*.json "$APP/Contents/Resources/scripts/builtin/automations/"
+if [ "$(find "$APP/Contents/Resources/scripts/builtin/automations" -type f -name '*.json' | wc -l | tr -d '[:space:]')" -lt 1 ]; then
+  echo "错误：缺少内置自动化任务定义或未写入应用包" >&2
+  exit 1
+fi
+if [ -f "scripts/picker-internal.js" ]; then
+  cp "scripts/picker-internal.js" "$APP/Contents/Resources/scripts/picker-internal.js"
+  chmod 644 "$APP/Contents/Resources/scripts/picker-internal.js"
+else
+  rm -f "$APP/Contents/Resources/scripts/picker-internal.js"
+fi
+WALLPAPER_OVERRIDE="scripts/builtin-overrides/wallpaper-06.webp"
+if [ -f "$WALLPAPER_OVERRIDE" ]; then
+  mkdir -p "$APP/Contents/Resources/scripts/builtin/wallpapers" "$APP/Contents/Resources/scripts/builtin/nebula"
+  cp "$WALLPAPER_OVERRIDE" "$APP/Contents/Resources/scripts/builtin/wallpapers/wallpaper-06.webp"
+  cp "$WALLPAPER_OVERRIDE" "$APP/Contents/Resources/scripts/builtin/nebula/background.webp"
+fi
+# 恢复这些文件的壳权限（与 1.0.3 壳内一致：sh/lib/daemon 755，inject/theme-patches 644）
+chmod 755 "$APP/Contents/Resources/scripts/daemon.js" \
+  "$APP/Contents/Resources/scripts/lib.js" \
+  "$APP/Contents/Resources/scripts/sentry-report.js" \
+  "$APP/Contents/Resources/scripts/install.sh" \
+  "$APP/Contents/Resources/scripts/relaunch-with-cdp.sh" \
+  "$APP/Contents/Resources/scripts/uninstall.sh" \
+  "$APP/Contents/Resources/scripts/apply-update.sh"
+chmod 644 "$APP/Contents/Resources/scripts/session-db.js" \
+  "$APP/Contents/Resources/scripts/automation.js" \
+  "$APP/Contents/Resources/scripts/automation-picker.js" \
+  "$APP/Contents/Resources/scripts/token-refresh.js" \
+  "$APP/Contents/Resources/scripts/workbuddy-target.js" \
+  "$APP/Contents/Resources/scripts/secure-transfer.js" \
+  "$APP/Contents/Resources/scripts/windows-process-boundary.js" \
+  "$APP/Contents/Resources/scripts/credit-request-usage.js" \
+  "$APP/Contents/Resources/scripts/credit-history-sync.js" \
+  "$APP/Contents/Resources/scripts/credit-usage-store.js" \
+  "$APP/Contents/Resources/scripts/credit-rotation.js" \
+  "$APP/Contents/Resources/scripts/token-stats.js" \
+  "$APP/Contents/Resources/scripts/atomic-file-write.js" \
+  "$APP/Contents/Resources/scripts/ui-port.js" \
+  "$APP/Contents/Resources/scripts/checkin-result.js" \
+  "$APP/Contents/Resources/scripts/workbuddy-compat.js" \
+  "$APP/Contents/Resources/scripts/inject.js" \
+  "$APP/Contents/Resources/scripts/theme-patches.js"
+echo "==> 前端代码已覆盖（权限按壳原样）"
+
+# 3) 打包：staging 放 WorkDaddy.app + Applications 软链，并写入固定 Finder 布局。
+STAGE="$(mktemp -d)"
+DMG_TEMP_DIR="$(mktemp -d)"
+RW_DMG="$DMG_TEMP_DIR/${PACKAGE_APP_NAME}-rw.dmg"
+ATTACH_PLIST="$DMG_TEMP_DIR/attach.plist"
+MOUNT_DIR=""
+DMG_DEVICE=""
+cleanup_dmg_build() {
+  if [ -n "$DMG_DEVICE" ]; then
+    hdiutil detach "$DMG_DEVICE" -force >/dev/null 2>&1 || true
+  fi
+  rm -rf -- "$STAGE" "$DMG_TEMP_DIR"
+}
+trap cleanup_dmg_build EXIT
+
+PACKAGE_APP="$STAGE/${PACKAGE_APP_NAME}.app"
+cp -R "$APP" "$PACKAGE_APP"
+# Modern macOS uses CFBundleIconName when resolving an ICNS application icon.
+# Keep it aligned with CFBundleIconFile so LaunchServices does not wrap the
+# custom artwork in the generic gray application icon.
+if /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$PACKAGE_APP/Contents/Info.plist" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIconName AppIcon' "$PACKAGE_APP/Contents/Info.plist"
+else
+  /usr/libexec/PlistBuddy -c 'Add :CFBundleIconName string AppIcon' "$PACKAGE_APP/Contents/Info.plist"
+fi
+LS_ARCH_PRIORITY="arm64"
+if /usr/libexec/PlistBuddy -c 'Print :LSArchitecturePriority' "$PACKAGE_APP/Contents/Info.plist" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c 'Delete :LSArchitecturePriority' "$PACKAGE_APP/Contents/Info.plist"
+fi
+/usr/libexec/PlistBuddy -c 'Add :LSArchitecturePriority array' "$PACKAGE_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :LSArchitecturePriority:0 string ${LS_ARCH_PRIORITY}" "$PACKAGE_APP/Contents/Info.plist"
+BUILT_ARCH_PRIORITY="$(/usr/libexec/PlistBuddy -c 'Print :LSArchitecturePriority:0' "$PACKAGE_APP/Contents/Info.plist" 2>/dev/null || true)"
+if [ "$BUILT_ARCH_PRIORITY" != "$LS_ARCH_PRIORITY" ]; then exit 3; fi
+sed -i.bak "s|^PROFILE=.*|PROFILE=\"${PROFILE}\"|" "$PACKAGE_APP/Contents/MacOS/launcher"
+rm -f "$PACKAGE_APP/Contents/MacOS/launcher.bak"
+# 企业版可能在 /Applications 下使用不同的 .app 名称。把官方路径优先、
+# profile 过滤的自动发现逻辑同步进产物 launcher；这样壳内 launcher 与
+# scripts/relaunch-with-cdp.sh 的行为一致。
+python3 - "$PACKAGE_APP/Contents/MacOS/launcher" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding='utf-8') as f:
+    source = f.read()
+marker = 'discover_workdaddy_workbuddy_app() {'
+if marker not in source:
+    function = r'''discover_workdaddy_workbuddy_app() {
+  local preferred="" candidate name
+  local -a matches=()
+  case "$PROFILE" in
+    workbuddy-ai) preferred="/Applications/WorkBuddy AI.app" ;;
+    workbuddy-cn) preferred="/Applications/WorkBuddy.app" ;;
+    *) return 0 ;;
+  esac
+  if [ -x "$preferred/Contents/MacOS/Electron" ]; then matches+=("$preferred"); fi
+  for candidate in /Applications/WorkBuddy*.app; do
+    [ -x "$candidate/Contents/MacOS/Electron" ] || continue
+    [ "$candidate" = "$preferred" ] && continue
+    name="$(basename "$candidate" .app)"
+    case "$PROFILE:$name" in
+      workbuddy-ai:WorkBuddy|workbuddy-ai:WorkBuddy\ CN|workbuddy-ai:CodeBuddy*) continue ;;
+      workbuddy-ai:*) printf '%s' "$name" | grep -qi 'ai' || continue ;;
+      workbuddy-cn:WorkBuddy\ AI*|workbuddy-cn:WorkBuddyAI*|workbuddy-cn:CodeBuddy*) continue ;;
+    esac
+    matches+=("$candidate")
+  done
+  if [ "${#matches[@]}" -eq 1 ]; then
+    APP_BIN="${matches[0]}/Contents/MacOS/Electron"
+    APP_NAME="$(basename "${matches[0]}" .app)"
+    return 0
+  fi
+  APP_BIN=""
+  APP_NAME=""
+  if [ "${#matches[@]}" -gt 1 ]; then
+    APP_DISCOVERY_ERROR="检测到多个 ${PROFILE} 客户端，将通过系统选择窗口确认：$(printf '%s, ' "${matches[@]}" | sed 's/, $//')"
+  else
+    APP_DISCOVERY_ERROR="未找到 ${PROFILE} 客户端（搜索 /Applications/WorkBuddy*.app）"
+  fi
+  return 1
+}
+APP_DISCOVERY_ERROR=""
+discover_workdaddy_workbuddy_app || true
+'''
+    case_index = source.find('esac')
+    if case_index < 0:
+        raise SystemExit('macOS launcher 缺少 profile case')
+    insert_at = case_index + len('esac')
+    source = source[:insert_at] + '\n' + function + source[insert_at:]
+source = source.replace('workbuddy-target.js" --profile="$PROFILE"', 'workbuddy-target.js" --resolve --profile="$PROFILE"')
+# 官方安装不应把自身路径作为 custom target 传给 daemon。仅在用户配置了
+# workbuddy-target.json 时设置 override，并让 launchd plist 保持相同边界。
+source = source.replace('export WBSWITCH_WORKBUDDY_BIN="$APP_BIN"', '''TARGET_ENV_XML=""
+if [ -n "${TARGET_BIN:-}" ]; then
+  export WBSWITCH_WORKBUDDY_BIN="$TARGET_BIN"
+  TARGET_ENV_XML="    <key>WBSWITCH_WORKBUDDY_BIN</key><string>${TARGET_BIN}</string>"
+fi''')
+source = source.replace('    <key>WBSWITCH_WORKBUDDY_BIN</key><string>${APP_BIN}</string>', '${TARGET_ENV_XML}')
+# 旧 plist 可能缺少 profile/target 环境；发现时强制重建，避免复用带错误
+# customTarget 的常驻 daemon。
+source = source.replace('if [ "$STATUS_UP" = "1" ] && { [ -z "$RUNNING_VERSION" ] || [ "$RUNNING_VERSION" != "$APP_VERSION" ] || [ "$RUNNING_BUILD_ID" != "$APP_BUILD_ID" ]; }; then', '''PLIST_STALE=0
+if [ ! -f "$PLIST" ] || ! grep -q '<key>WBSWITCH_PROFILE</key>' "$PLIST" 2>/dev/null; then
+  PLIST_STALE=1
+fi
+if [ -z "${TARGET_BIN:-}" ] && grep -q '<key>WBSWITCH_WORKBUDDY_BIN</key>' "$PLIST" 2>/dev/null; then
+  PLIST_STALE=1
+fi
+if [ "$STATUS_UP" = "1" ] && { [ -z "$RUNNING_VERSION" ] || [ "$RUNNING_VERSION" != "$APP_VERSION" ] || [ "$RUNNING_BUILD_ID" != "$APP_BUILD_ID" ] || [ "$PLIST_STALE" = "1" ]; }; then''')
+chooser = '''
+# 候选不唯一或自动扫描不到时交给 macOS 原生应用选择器，由用户明确选择并自动记住结果。
+if [ -z "${TARGET_BIN:-}" ] && [ -z "$APP_BIN" ]; then
+  SELECTED_APP="$(osascript <<'APPLESCRIPT' 2>/dev/null
+try
+  set chosen to choose application with prompt "请选择要使用的 WorkBuddy 客户端"
+  POSIX path of (chosen as alias)
+on error number -128
+  return ""
+on error
+  return ""
+end try
+APPLESCRIPT
+)"
+  SELECTED_APP="${SELECTED_APP%/}"
+  if [ -z "$SELECTED_APP" ]; then
+    echo "已取消客户端选择"
+    exit 0
+  fi
+  APP_BIN="$SELECTED_APP/Contents/MacOS/Electron"
+  APP_NAME="$(basename "$SELECTED_APP" .app)"
+  if [ ! -x "$APP_BIN" ]; then
+    echo "错误：所选应用不是可用的 WorkBuddy 客户端: $SELECTED_APP"
+    exit 1
+  fi
+  if ! "$NODE_BIN" "$SCRIPTS_DIR/workbuddy-target.js" --configure --platform darwin \
+      --profile="$PROFILE" --binary="$APP_BIN" --data-dir="$DATA_DIR" >/dev/null 2>"$TARGET_ERR"; then
+    echo "错误：无法保存所选 WorkBuddy 客户端: $(tr '\n' ' ' <"$TARGET_ERR")"
+    rm -f "$TARGET_ERR"
+    exit 1
+  fi
+  rm -f "$TARGET_ERR"
+fi
+'''
+source = source.replace('\n# 清理旧版常驻服务和旧 profile 自启项', chooser + '\n# 清理旧版常驻服务和旧 profile 自启项', 1)
+source = source.replace('for i in $(seq 1 15); do', 'for i in $(seq 1 60); do')
+source = source.replace('等待 15 秒未检测到调试端口', '等待 60 秒未检测到调试端口')
+source = source.replace('osascript -e "quit app \\\"${APP_NAME}\\\"" >/dev/null 2>&1 || true\nsleep 3\npkill -f "$APP_BIN" 2>/dev/null || true',
+                        'if [ -n "$APP_NAME" ]; then osascript -e "quit app \\\"${APP_NAME}\\\"" >/dev/null 2>&1 || true; fi\nsleep 3\nif [ -n "$APP_BIN" ]; then pkill -f "$APP_BIN" 2>/dev/null || true; fi')
+source = source.replace('if pgrep -f "$APP_BIN" >/dev/null 2>&1; then',
+                        'if [ -n "$APP_BIN" ] && pgrep -f "$APP_BIN" >/dev/null 2>&1; then')
+source = source.replace('  notify "WorkDaddy" "未找到 WorkBuddy 应用，启动失败"\n  exit 1',
+                        '  echo "[$(date -u +%FT%TZ)] ${APP_DISCOVERY_ERROR:-未找到 WorkBuddy 应用}: APP_NAME=${APP_NAME} APP_BIN=${APP_BIN}"\n  notify "WorkDaddy" "未找到 WorkBuddy 应用，启动失败"\n  exit 1')
+with open(path, 'w', encoding='utf-8', newline='') as f:
+    f.write(source)
+PY
+# 启动器只能复用当前 profile 的 WorkBuddy CDP；否则 CN 包会把 WorkBuddy AI 的端口
+# 当成可复用目标，随后 daemon 按 CN profile 拒绝连接，用户看到的是启动器快速失败。
+python3 - "$PACKAGE_APP/Contents/MacOS/launcher" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding='utf-8') as f:
+    source = f.read()
+replacement = r'''is_workbuddy_cdp() {
+  local p="$1" body
+  body="$(curl -fsS --max-time 1 "http://127.0.0.1:${p}/json/version" 2>/dev/null || true)"
+  case "$PROFILE" in
+    workbuddy-ai)
+      printf '%s' "$body" | grep -qiE 'WorkBuddy[[:space:]]*AI|WorkBuddyAI'
+      ;;
+    workbuddy-cn)
+      printf '%s' "$body" | grep -qi 'WorkBuddy' &&
+        ! printf '%s' "$body" | grep -qiE 'WorkBuddy[[:space:]]*AI|WorkBuddyAI'
+      ;;
+    *)
+      printf '%s' "$body" | grep -qiE 'WorkBuddy|CodeBuddy'
+      ;;
+  esac
+}'''
+updated, count = re.subn(r'is_workbuddy_cdp\(\) \{.*?\n\}', replacement, source, count=1, flags=re.S)
+if count != 1:
+    raise SystemExit('macOS launcher 缺少可替换的 profile CDP 判定函数')
+with open(path, 'w', encoding='utf-8', newline='') as f:
+    f.write(updated)
+PY
+if [ "$PROFILE" = "workbuddy-ai" ]; then
+  perl -0pi -e 's/<string>WorkDaddy<\/string>/<string>WorkDaddy AI<\/string>/g' "$PACKAGE_APP/Contents/Info.plist"
+  perl -0pi -e 's/<string>com\.workdaddy\.launcher<\/string>/<string>com.workdaddy.ai.launcher<\/string>/g' "$PACKAGE_APP/Contents/Info.plist"
+fi
+# LaunchServices must own the target app identity, rather than inheriting the shell launcher.
+python3 - "$PACKAGE_APP/Contents/MacOS/launcher" <<'PY'
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+s = p.read_text()
+old = 'nohup "$APP_BIN" --remote-debugging-port="$PORT" >/dev/null 2>&1 &\ndisown 2>/dev/null || true'
+new = '''TARGET_APP_BUNDLE="${APP_BIN%/Contents/MacOS/*}"
+if [ "$TARGET_APP_BUNDLE" = "$APP_BIN" ] || [ ! -d "$TARGET_APP_BUNDLE" ]; then
+  notify "WorkDaddy" "WorkBuddy 应用路径无效，启动失败"
+  exit 1
+fi
+if ! /usr/bin/open -a "$TARGET_APP_BUNDLE" --args "--remote-debugging-port=$PORT"; then
+  notify "WorkDaddy" "无法启动 WorkBuddy，请重试"
+  exit 1
+fi'''
+if old not in s and new not in s:
+    raise SystemExit('macOS launcher 缺少应用启动锚点')
+p.write_text(s.replace(old, new))
+PY
+# 注入完成后把目标 WorkBuddy 置前台，避免复用已有 CDP 时 Dock 仍停留在启动器上。
+python3 - "$PACKAGE_APP/Contents/MacOS/launcher" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding='utf-8') as f:
+    source = f.read()
+activation = '''activate_target_app() {
+  # WorkDaddy 只负责启动/注入；前台归属应回到用户实际使用的 WorkBuddy。
+  osascript -e "tell application \\\"${APP_NAME}\\\" to activate" >/dev/null 2>&1 || true
+}
+'''
+if 'activate_target_app() {' not in source:
+    source, count = re.subn(r'(notify\(\) \{[^\n]*\}\n)', r'\1\n' + activation, source, count=1)
+    if count != 1:
+        raise SystemExit('macOS launcher 缺少可插入激活函数的位置')
+source = source.replace('  echo "[$(date -u +%FT%TZ)] manual inject result: ${INJECT_RESULT:0:500}"\n  exit 0',
+                        '  echo "[$(date -u +%FT%TZ)] manual inject result: ${INJECT_RESULT:0:500}"\n  activate_target_app\n  exit 0')
+source = source.replace('  echo "[$(date -u +%FT%TZ)] manual inject result: ${INJECT_RESULT:0:500}"\nelse',
+                        '  echo "[$(date -u +%FT%TZ)] manual inject result: ${INJECT_RESULT:0:500}"\n  activate_target_app\nelse')
+with open(path, 'w', encoding='utf-8', newline='') as f:
+    f.write(source)
+PY
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$PACKAGE_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "$PACKAGE_APP/Contents/Info.plist"
+# 无论源码壳当前版本如何，每次产物都必须让 daemon 版本与安装包版本一致。
+perl -0pi -e "s/(const DAEMON_VERSION = ')[^']+(';)/\${1}${VERSION}\${2}/" \
+  "$PACKAGE_APP/Contents/Resources/scripts/daemon.js"
+# 壳内可能残留旧的 release-x.y.z；只替换 Build ID 的版本段，保留日期/功能后缀。
+perl -0pi -e "s/(const DAEMON_BUILD_ID = 'release-)[0-9]+\\.[0-9]+\\.[0-9]+/\${1}${VERSION}/" \
+  "$PACKAGE_APP/Contents/Resources/scripts/daemon.js"
+if ! grep -q "const DAEMON_VERSION = '${VERSION}';" "$PACKAGE_APP/Contents/Resources/scripts/daemon.js" \
+  || ! grep -q "const DAEMON_BUILD_ID = 'release-${VERSION}-" "$PACKAGE_APP/Contents/Resources/scripts/daemon.js"; then
+  echo "错误：产物 daemon.js 的版本或 Build ID 与 ${VERSION} 不一致" >&2
+  exit 1
+fi
+# app 壳可能携带滞后的 package.json；同步版本元数据，避免旧值覆盖关于页/诊断信息。
+if [ -f "$PACKAGE_APP/Contents/Resources/scripts/package.json" ]; then
+  perl -0pi -e "s/(\"version\"\s*:\s*\")([^\"]+)(\")/\${1}${VERSION}\${3}/" \
+    "$PACKAGE_APP/Contents/Resources/scripts/package.json"
+fi
+ln -s /Applications "$STAGE/Applications"
+
+# Finder 不直接显示 SVG 背景；保留 SVG 作为矢量母版，打包时用系统 sips
+# 渲染 1x/2x 位图并合成 HiDPI TIFF，避免 Retina 屏幕放大单分辨率背景。
+if [ ! -f "$DMG_BACKGROUND_SVG" ]; then
+  echo "错误：缺少 DMG 背景矢量资源 $DMG_BACKGROUND_SVG" >&2
+  exit 1
+fi
+mkdir -p "$STAGE/.background"
+BACKGROUND_1X="$STAGE/.background/background-1x.png"
+BACKGROUND_2X="$STAGE/.background/background-2x.png"
+RENDERED_BACKGROUND="$STAGE/.background/background.tiff"
+sips -s format png "$DMG_BACKGROUND_SVG" --out "$BACKGROUND_1X" >/dev/null
+sips -s format png -z 800 1240 "$DMG_BACKGROUND_SVG" --out "$BACKGROUND_2X" >/dev/null
+BACKGROUND_1X_WIDTH="$(sips -g pixelWidth "$BACKGROUND_1X" | awk '/pixelWidth:/ { print $2 }')"
+BACKGROUND_1X_HEIGHT="$(sips -g pixelHeight "$BACKGROUND_1X" | awk '/pixelHeight:/ { print $2 }')"
+BACKGROUND_2X_WIDTH="$(sips -g pixelWidth "$BACKGROUND_2X" | awk '/pixelWidth:/ { print $2 }')"
+BACKGROUND_2X_HEIGHT="$(sips -g pixelHeight "$BACKGROUND_2X" | awk '/pixelHeight:/ { print $2 }')"
+if [ "$BACKGROUND_1X_WIDTH" != "$DMG_WINDOW_WIDTH" ] || [ "$BACKGROUND_1X_HEIGHT" != "$DMG_WINDOW_HEIGHT" ]; then
+  echo "错误：DMG 1x 背景尺寸必须为 ${DMG_WINDOW_WIDTH}x${DMG_WINDOW_HEIGHT}，实际为 ${BACKGROUND_1X_WIDTH}x${BACKGROUND_1X_HEIGHT}" >&2
+  exit 1
+fi
+if [ "$BACKGROUND_2X_WIDTH" != "$((DMG_WINDOW_WIDTH * 2))" ] || [ "$BACKGROUND_2X_HEIGHT" != "$((DMG_WINDOW_HEIGHT * 2))" ]; then
+  echo "错误：DMG 2x 背景尺寸必须为 $((DMG_WINDOW_WIDTH * 2))x$((DMG_WINDOW_HEIGHT * 2))，实际为 ${BACKGROUND_2X_WIDTH}x${BACKGROUND_2X_HEIGHT}" >&2
+  exit 1
+fi
+tiffutil -cathidpicheck "$BACKGROUND_1X" "$BACKGROUND_2X" -out "$RENDERED_BACKGROUND" >/dev/null
+
+# 先创建可写镜像，让 Finder 把窗口尺寸、图标位置和背景写进卷根目录的
+# .DS_Store；布局完成后再转成只读压缩镜像。
+hdiutil create -volname "$PACKAGE_APP_NAME" -srcfolder "$STAGE" -ov -format UDRW "$RW_DMG" >/dev/null
+hdiutil attach -readwrite -noverify -noautoopen -plist "$RW_DMG" > "$ATTACH_PLIST"
+read -r DMG_DEVICE MOUNT_DIR < <(python3 - "$ATTACH_PLIST" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], 'rb') as f:
+    attached = plistlib.load(f)
+for entity in attached.get('system-entities', []):
+    mount_point = entity.get('mount-point')
+    device = entity.get('dev-entry')
+    if mount_point and device:
+        print(device, mount_point)
+        break
+PY
+)
+if [ -z "$DMG_DEVICE" ] || [ -z "$MOUNT_DIR" ]; then
+  echo "错误：无法识别可写 DMG 的挂载设备或目录" >&2
+  exit 1
+fi
+
+VOLUME_NAME="$(basename "$MOUNT_DIR")"
+# 无 GUI 会话（CI/Agent 沙箱）无法驱动 Finder 写 .DS_Store 布局：
+# 设置 WORKDADDY_SKIP_FINDER=1 跳过布局步骤，产物为无 Finder 美化布局的标准 DMG。
+if [ -z "$SKIP_FINDER" ]; then
+  sleep 2
+osascript - "$VOLUME_NAME" "${PACKAGE_APP_NAME}.app" "$DMG_WINDOW_WIDTH" "$DMG_WINDOW_HEIGHT" "$DMG_ICON_SIZE" <<'APPLESCRIPT'
+on run argv
+  set volumeName to item 1 of argv
+  set appName to item 2 of argv
+  set dmgWindowWidth to item 3 of argv as integer
+  set dmgWindowHeight to item 4 of argv as integer
+  set dmgIconSize to item 5 of argv as integer
+  set windowLeft to 200
+  set windowTop to 120
+  set windowRight to windowLeft + dmgWindowWidth
+  set windowBottom to windowTop + dmgWindowHeight
+
+  tell application "Finder"
+    tell disk (volumeName as string)
+      open
+      tell container window
+        set current view to icon view
+        set toolbar visible to false
+        set statusbar visible to false
+        set bounds to {windowLeft, windowTop, windowRight, windowBottom}
+        set position of every item to {windowRight + 100, 100}
+      end tell
+
+      set viewOptions to icon view options of container window
+      set arrangement of viewOptions to not arranged
+      set icon size of viewOptions to dmgIconSize
+      set text size of viewOptions to 13
+      set label position of viewOptions to bottom
+      set shows item info of viewOptions to false
+      set shows icon preview of viewOptions to true
+      set background picture of viewOptions to file ".background:background.tiff"
+
+      set position of item appName to {150, 190}
+      set position of item "Applications" to {470, 190}
+      close
+      open
+      delay 1
+      tell container window
+        set statusbar visible to false
+        set bounds to {windowLeft, windowTop, windowRight - 10, windowBottom - 10}
+      end tell
+    end tell
+
+    delay 1
+    tell disk (volumeName as string)
+      tell container window
+        set statusbar visible to false
+        set bounds to {windowLeft, windowTop, windowRight, windowBottom}
+      end tell
+    end tell
+    delay 2
+  end tell
+end run
+APPLESCRIPT
+fi
+
+if [ -z "$SKIP_FINDER" ]; then
+  sync
+  for _ in {1..20}; do
+    test -f "$MOUNT_DIR/.DS_Store" && break
+    sleep 0.25
+  done
+  if ! test -f "$MOUNT_DIR/.DS_Store"; then
+    echo "错误：Finder 未能把 DMG 窗口布局写入 .DS_Store" >&2
+    exit 1
+  fi
+  rm -rf -- "$MOUNT_DIR/.fseventsd"
+else
+  echo "==> 跳过 Finder 布局（WORKDADDY_SKIP_FINDER=1，无 GUI 会话）"
+  # 无 GUI 时使用预置布局：把既有的 .DS_Store（窗口尺寸/图标位置/背景引用）放进卷根，
+  # 产物保留与 Finder 布局版本一致的观感。默认取仓库内的布局源（scripts/assets/dmg-layout）。
+  DSSTORE_SOURCE="${WORKDADDY_DSSTORE_SOURCE:-}"
+  if [ -z "$DSSTORE_SOURCE" ]; then
+    DSSTORE_FALLBACK="scripts/assets/dmg-layout/workdaddy.DS_Store"
+    if [ "$PROFILE" = "workbuddy-ai" ]; then
+      DSSTORE_FALLBACK="scripts/assets/dmg-layout/workdaddy-ai.DS_Store"
+    fi
+    if [ -f "$DIR/$DSSTORE_FALLBACK" ]; then
+      DSSTORE_SOURCE="$DIR/$DSSTORE_FALLBACK"
+    fi
+  fi
+  if [ -n "$DSSTORE_SOURCE" ] && [ -f "$DSSTORE_SOURCE" ]; then
+    cp "$DSSTORE_SOURCE" "$MOUNT_DIR/.DS_Store"
+    echo "==> 已注入预置 Finder 布局: $DSSTORE_SOURCE"
+  fi
+fi
+hdiutil detach "$DMG_DEVICE" >/dev/null
+DMG_DEVICE=""
+rm -f "$OUT"
+hdiutil convert "$RW_DMG" -ov -format UDZO -imagekey zlib-level=9 -o "$OUT" >/dev/null
+
+echo "==> 完成: $(ls -lh "$OUT" | awk '{print $5}')"
+echo "    校验: hdiutil attach -nobrowse -readonly '$OUT' 后检查"
+echo "          Finder 窗口必须为 ${DMG_WINDOW_WIDTH}x${DMG_WINDOW_HEIGHT}，左右图标间显示箭头"
+echo "          launcher 权限必须为 rwxr-xr-x、daemon.js 版本为 ${VERSION}"
