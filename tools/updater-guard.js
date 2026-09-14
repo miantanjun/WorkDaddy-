@@ -146,10 +146,13 @@ check('E1', 'parseSha256 支持 `SHA256 (文件名): <hex>` 多资产写法', ()
 });
 
 // ---------- F. CI 与自建发行 ----------
-check('F1', 'CI 在打包前把 .cmd 规范化为 CRLF', () => {
-  must(/规范化换行/.test(workflow), 'CI 缺少换行规范化步骤（曾导致构建在第 4 步失败）');
-  must(/\.cmd/.test(workflow) && /\\r\\n/.test(workflow), '规范化步骤未重写 CRLF');
-  return '规范化 + 校验步骤在位';
+check('F1', 'CI 在打包前把 .cmd 规范化为 CRLF，并用字节校验（不依赖 grep）', () => {
+  must(/换行规范化|纯 CRLF/.test(workflow), 'CI 缺少换行规范化/CRLF 步骤（曾导致构建在第 4 步失败）');
+  must(/ls-files[^\n]*\*\.cmd/.test(workflow), "CI 未覆盖全部受跟踪 .cmd（只扫 scripts/*.cmd 会漏掉 scripts/win/probe/…）");
+  must(/b'\\r\\n'/.test(workflow), '规范化步骤未按字节把换行重写为 CRLF');
+  must(/shell:\s*python/.test(workflow), '换行步骤未用 python：Git Bash 的 grep 在 Windows 上可能把 CRLF 读成 LF，产生误报');
+  must(!/grep -q/.test(workflow), '换行校验又用回了 grep（Windows 上不可靠，会把 CRLF 判成 LF）');
+  return '规范化 + 逐文件字节校验到位，且不依赖 grep';
 });
 check('F2', 'CI 发布到 GitHub Release（更新器只认 Release）', () => {
   must(/softprops\/action-gh-release/.test(workflow), 'CI 未发布 Release，更新器收不到新版本');

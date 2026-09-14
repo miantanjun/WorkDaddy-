@@ -31,41 +31,51 @@ jobs:
           go-version: '1.27.0'
           cache: false
 
-      - name: 规范化换行（.cmd 必须 CRLF，否则 cmd.exe 解析括号块会失败）
-        shell: bash
+      # .cmd 必须是 CRLF，否则 cmd.exe 解析括号块会失败。
+      # 这里刻意不用 shell/grep：Git Bash 的 grep 在 Windows 上可能按文本模式读文件、
+      # 看不到 CR，导致「明明是 CRLF 却判为 LF」的误报（2026-09-14 v1.2.2 构建即因此失败）。
+      # 用 Python 二进制读原始字节做规范化 + 校验，结果才是可靠的地面真相。
+      - name: 换行规范化与校验（.cmd 必须纯 CRLF）
+        shell: python
         run: |
-          echo "--- 规范化前（git ls-files '*.cmd'）---"
-          for f in $(git ls-files '*.cmd'); do
-            if grep -q $'\r' "$f"; then echo "  CRLF     $f"; else echo "  LF(!)    $f"; fi
-          done
-          # checkout 在不同 git 配置/attributes 下可能给出 LF；这里统一重写为 CRLF，
-          # 保证打进安装包的 .cmd 一定能在 Windows 上运行（幂等，已是 CRLF 则不动）。
-          python - <<'PY'
-          import os
+          import subprocess, sys
+
+          files = subprocess.run(['git', 'ls-files', '*.cmd'],
+                                 capture_output=True, text=True, check=True).stdout.split()
+          print('受跟踪的 .cmd 共 %d 个' % len(files))
+          if not files:
+              print('::error::没有找到任何 .cmd 文件（预期至少 10 个）')
+              sys.exit(1)
+
+          # 统一成「仅 CRLF」：先归一为 LF，再把 LF 全部转 CRLF（幂等）
           changed = []
-          for root, _, files in os.walk('scripts'):
-              for fn in files:
-                  if not fn.lower().endswith('.cmd'):
-                      continue
-                  p = os.path.join(root, fn)
-                  b = open(p, 'rb').read()
-                  nb = b.replace(b'\r\n', b'\n').replace(b'\r', b'\n').replace(b'\n', b'\r\n')
-                  if nb != b:
-                      open(p, 'wb').write(nb)
-                      changed.append(p)
-          print('规范化文件数:', len(changed))
-          for p in changed:
-              print('  normalized:', p)
-          PY
-          fail=0
-          for f in $(git ls-files '*.cmd'); do
-            if ! grep -q $'\r' "$f"; then
-              echo "::error::$f 仍不是 CRLF，无法在 Windows 使用"
-              fail=1
-            fi
-          done
-          if [ "$fail" != "0" ]; then exit 1; fi
-          echo "全部 .cmd 已确认为 CRLF ✓"
+          for f in files:
+              raw = open(f, 'rb').read()
+              norm = raw.replace(b'\r\n', b'\n').replace(b'\r', b'\n').replace(b'\n', b'\r\n')
+              if norm != raw:
+                  open(f, 'wb').write(norm)
+                  changed.append(f)
+          print('需要规范化的文件数: %d' % len(changed))
+          for f in changed:
+              print('  normalized: %s' % f)
+
+          bad = []
+          for f in files:
+              raw = open(f, 'rb').read()
+              crlf = raw.count(b'\r\n')
+              lone_lf = raw.count(b'\n') - crlf
+              lone_cr = raw.count(b'\r') - crlf
+              ok = crlf > 0 and lone_lf == 0 and lone_cr == 0
+              print('  %-4s %-45s CRLF=%d 裸LF=%d 裸CR=%d'
+                    % ('CRLF' if ok else 'BAD', f, crlf, lone_lf, lone_cr))
+              if not ok:
+                  bad.append(f)
+
+          if bad:
+              for f in bad:
+                  print('::error::%s 不是纯 CRLF，无法在 Windows cmd.exe 使用' % f)
+              sys.exit(1)
+          print('全部 %d 个 .cmd 已确认为纯 CRLF ✓' % len(files))
 
       - name: 解析版本号
         id: ver
