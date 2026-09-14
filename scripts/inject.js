@@ -1111,6 +1111,21 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '通知组件未加载': 'Notification component not loaded', '通知组件已关闭': 'Notification component closed',
     '暂不支持 iframe 内的输入或点击，请使用主页面定位器': 'Input and clicks inside iframes are unsupported; use a main-page locator', 'HTTP 响应超过 1 MiB': 'HTTP response exceeds 1 MiB', '任务不兼容': 'Incompatible task', '任务与当前 WorkDaddy 不兼容，请升级或使用适配版本': 'This task is incompatible with this WorkDaddy. Update or use a compatible version.', '排队中': 'Queued', '页面加载': 'Page load', '账号切换后': 'After account switch', '让 WorkBuddy 帮我创建': 'Create with WorkBuddy', '自动化需求': 'Automation requirements', '描述触发时机和需要执行的操作，WorkBuddy 会生成任务并添加到自动化列表。': 'Describe when to trigger and what to do. WorkBuddy will create the task in your automation list.', '例如：每次打开面板时，显示一条欢迎提示。': 'For example: show a welcome notification whenever the panel opens.', '将在新的 WorkBuddy 会话中创建': 'Creates in a new WorkBuddy conversation', '自动化需求必须是 1–6000 字的文本': 'Automation requirements must contain 1–6000 characters',
     '一键创建': 'Quick create', '主账号': 'Primary', '设为主账号': 'Set as primary account', '已设为主账号，自动化任务可据此识别主账号': 'Primary account set. Automations can use it to identify your primary account.',
+    '账号自动切换': 'Account auto-switch', '闲置后自动切回主账号': 'Switch back to primary when idle',
+    '闲置多久算不用了': 'Idle threshold', '分钟': 'min', '未指定': 'Not set',
+    '开启后：不在主账号上、且连续闲置超过阈值时自动切回主账号': 'When on: switch back to the primary account after this much idle time on another account',
+    '还没指定主账号 —— 指定之后才会自动切回。': 'No primary account set — pick one to enable automatic switch-back.',
+    '已关闭：不会自动切回主账号。': 'Disabled: no automatic switch-back.',
+    '当前就在主账号上，不需要切回。': 'Already on the primary account, nothing to do.',
+    '有任务在跑或有切号流程在进行，先让位。': 'A task or account switch is in progress; standing by.',
+    '主账号还在限流窗口内，等窗口过去再切。': 'The primary account is still rate-limited; waiting for the window to pass.',
+    '⚠️ 主账号的备份不在账号列表里（可能已被删除）。': 'Warning: the primary account backup is not in the account list.',
+    '已清除主账号设置': 'Primary account cleared', '闲置阈值需要在 5 ~ 1440 分钟之间': 'Idle threshold must be between 5 and 1440 minutes',
+    '模型限流自动切号续跑': 'Auto switch account on rate limit',
+    '当前账号被限流时，自动切到另一个账号、保持同一个模型、把同一条任务续跑下去。注意：这与 WorkBuddy 官方内置的「切模型 + 续跑」不是一回事 —— 官方换的是模型，这里换的是账号，模型保持不变。限流提示只出现在输入框上方的横幅里（.rate-limit-info-banner / .cb-input-banner--error 等），不在消息流中，所以探测落在横幅上。快路由 renderer 侧 MutationObserver 侦测到横幅后直接 POST /api/limit-failover/trigger 触发本任务；本任务的 1 分钟定时只作兜底。续跑内容优先取变量 prompt，为空则取当前会话里最后一条用户消息原样重发。被判定限流的账号 10 分钟内不再被选为接管方，交接成功后记录自动清除；所有账号都接管不了则回退原账号并提示。':
+      'When the current account hits a rate limit, switch to another account, keep the same model and re-send the same task. This is NOT the same as WorkBuddy’s built-in “switch model + continue”: that one changes the model, while here only the account changes. The notice only shows in the banner above the composer (.rate-limit-info-banner / .cb-input-banner--error), never in the message stream, so detection targets banners. The fast path fires this task via POST /api/limit-failover/trigger when the renderer-side MutationObserver spots a banner; the 1-minute schedule is just a fallback. The continued prompt comes from the `prompt` variable, otherwise the last user message of the current session. An account judged rate-limited is skipped for 10 minutes and the mark is cleared after a successful handover; if nothing can take over, it stays on the original account and notifies you.',
+    '当前账号被限流时，自动切到另一个账号、保持同一个模型、把同一条任务续跑下去。注意：这与 WorkBuddy 官方内置的「切模型 + 续跑」不是一回事 —— 官方换的是模型，这里换的是账号，模型保持不变。限流提示只出现在输入框上方的横幅里（.rate-limit-info-banner / .cb-input-banner--error 等），不在消息流中，所以探测落在横幅上。快路由 renderer 侧 MutationObserver 侦测到横幅后直接 POST /api/limit-failover/trigger 触发本任务；本任务的 1 分钟定时只作兜底。续跑内容优先取变量 prompt，为空则取当前会话里最后一条用户消息原样重发。被判定限流的账号 10 分钟内不再被选为接管方，交接成功后记录自动清除；所有账号都接管不了则回退原账号并提示。续跑跑完后会自动把账号切回主账号（阈值/开关见面板「账号」页），并在桌面留一份大白话日志。':
+      'When the current account hits a rate limit, switch to another account, keep the same model and re-send the same task. This is NOT the same as WorkBuddy’s built-in “switch model + continue”: that one changes the model, while here only the account changes. The notice only shows in the banner above the composer (.rate-limit-info-banner / .cb-input-banner--error), never in the message stream, so detection targets banners. The fast path fires this task via POST /api/limit-failover/trigger when the renderer-side MutationObserver spots a banner; the 1-minute schedule is just a fallback. The continued prompt comes from the `prompt` variable, otherwise the last user message of the current session. An account judged rate-limited is skipped for 10 minutes and the mark is cleared after a successful handover; if nothing can take over, it stays on the original account and notifies you. After the continued run finishes, the account is switched back to your primary account (threshold and toggle live on the panel’s Account tab) and a plain-language log is written to the desktop.',
     '原输入框草稿已保存到暂存': 'Your previous draft was saved to Stash.',
     '设置主账号失败': 'Failed to set primary account',
     '无效会话记录': 'Invalid session record', '没有可导入的会话': 'No sessions to import', '会话文件目标不在 managed parent 内': 'Session file target is outside the managed parent',
@@ -1267,12 +1282,22 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     return !!task && [
       'buddy-fuel-station-close-on-account-switch',
       'daily-account-checkin',
-      'keep-accounts-active-1-plus-1'
+      'keep-accounts-active-1-plus-1',
+      'mu0mg334-rate-limit-auto-switch'
     ].indexOf(task.id) >= 0;
   }
 
   function wbsBuiltinAutomationText(task, field) {
     var defaults = {
+      "mu0mg334-rate-limit-auto-switch": {
+        "name": [
+          "模型限流自动切号续跑"
+        ],
+        "description": [
+          "当前账号被限流时，自动切到另一个账号、保持同一个模型、把同一条任务续跑下去。注意：这与 WorkBuddy 官方内置的「切模型 + 续跑」不是一回事 —— 官方换的是模型，这里换的是账号，模型保持不变。限流提示只出现在输入框上方的横幅里（.rate-limit-info-banner / .cb-input-banner--error 等），不在消息流中，所以探测落在横幅上。快路由 renderer 侧 MutationObserver 侦测到横幅后直接 POST /api/limit-failover/trigger 触发本任务；本任务的 1 分钟定时只作兜底。续跑内容优先取变量 prompt，为空则取当前会话里最后一条用户消息原样重发。被判定限流的账号 10 分钟内不再被选为接管方，交接成功后记录自动清除；所有账号都接管不了则回退原账号并提示。",
+          "当前账号被限流时，自动切到另一个账号、保持同一个模型、把同一条任务续跑下去。注意：这与 WorkBuddy 官方内置的「切模型 + 续跑」不是一回事 —— 官方换的是模型，这里换的是账号，模型保持不变。限流提示只出现在输入框上方的横幅里（.rate-limit-info-banner / .cb-input-banner--error 等），不在消息流中，所以探测落在横幅上。快路由 renderer 侧 MutationObserver 侦测到横幅后直接 POST /api/limit-failover/trigger 触发本任务；本任务的 1 分钟定时只作兜底。续跑内容优先取变量 prompt，为空则取当前会话里最后一条用户消息原样重发。被判定限流的账号 10 分钟内不再被选为接管方，交接成功后记录自动清除；所有账号都接管不了则回退原账号并提示。续跑跑完后会自动把账号切回主账号（阈值/开关见面板「账号」页），并在桌面留一份大白话日志。"
+        ]
+      },
       "daily-account-checkin": {
         "name": [
           "循环账号静默签到"
@@ -4723,6 +4748,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '</div>' +
         '</div>' +
         '<div class="wbs-acct-list"></div>' +
+        // 账号自动切换：主账号 + 闲置阈值。放在账号页 —— 这是「账号使用策略」，不是自动化任务。
+        '<div class="wbs-pcard wbs-idle-card" id="wbs-idle-card">' +
+        '<div class="wbs-idle-title">账号自动切换</div>' +
+        '<div class="wbs-idle-row"><span class="wbs-idle-label">主账号</span>' +
+        '<select class="wbs-idle-select" id="wbs-idle-primary" aria-label="主账号"></select></div>' +
+        '<div class="wbs-idle-row"><span class="wbs-idle-label">闲置后自动切回主账号</span>' +
+        '<label class="wbs-switch wbs-idle-enabled" title="开启后：不在主账号上、且连续闲置超过阈值时自动切回主账号"><input type="checkbox" id="wbs-idle-enabled" aria-label="闲置后自动切回主账号"><span class="wbs-switch-slider"></span></label></div>' +
+        '<div class="wbs-idle-row"><span class="wbs-idle-label">闲置多久算不用了</span>' +
+        '<input class="wbs-idle-input" id="wbs-idle-minutes" type="number" min="5" max="1440" step="5" aria-label="闲置阈值（分钟）">' +
+        '<span class="wbs-idle-unit">分钟</span></div>' +
+        '<div class="wbs-idle-note" id="wbs-idle-note"></div>' +
+        '</div>' +
         '<button class="wbs-logout-btn" type="button" data-act="logout">' + LOGOUT_SVG + '<span>登录新账号</span></button>' +
         '<input type="file" id="wbs-import-file" accept=".json,application/json" style="display:none">';
       root.querySelector('[data-act="account-more"]').addEventListener('click', openAccountOrderModal);
@@ -4736,6 +4773,107 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         openAccountImportChoice();
       });
       root.querySelector('#wbs-import-file').addEventListener('change', onImportFile);
+    }
+
+    /* ---- 账号自动切换卡片：主账号 + 闲置超阈值自动切回 ----
+       判定与切号都在 daemon 的后台拍子里（见 §19），面板这里只做「设置 + 状态显示」：
+       · 主账号走已有的 POST /api/accounts/primary（此前前端没有任何入口，顺手补上）
+       · 开关/阈值走 GET|POST /api/idle-switchback
+       · 状态行直接读后端算好的 idleMs，前端不自己计时（避免两个时钟对不上）*/
+    var idleCard = accountsPane ? accountsPane.querySelector('#wbs-idle-card') : null;
+
+    function idleMinutesText(ms) {
+      var total = Math.max(0, Math.round((Number(ms) || 0) / 60000));
+      if (total < 60) return total + ' 分钟';
+      var hours = Math.floor(total / 60);
+      return hours + ' 小时 ' + (total % 60) + ' 分钟';
+    }
+
+    function renderIdleCard(data) {
+      if (!idleCard) return;
+      var info = data && typeof data === 'object' ? data : {};
+      var primarySelect = idleCard.querySelector('#wbs-idle-primary');
+      var enabledBox = idleCard.querySelector('#wbs-idle-enabled');
+      var minutesInput = idleCard.querySelector('#wbs-idle-minutes');
+      var note = idleCard.querySelector('#wbs-idle-note');
+      var accounts = state.accounts || [];
+      var primaryUid = info.primary ? String(info.primary.uid || '') : '';
+      var options = ['<option value="">未指定</option>'];
+      for (var i = 0; i < accounts.length; i++) {
+        var account = accounts[i];
+        options.push('<option value="' + escAttr(account.uid) + '"' + (String(account.uid) === primaryUid ? ' selected' : '') + '>' +
+          esc(account.nickname || account.uid) + '</option>');
+      }
+      primarySelect.innerHTML = options.join('');
+      enabledBox.checked = info.enabled !== false;
+      minutesInput.disabled = info.enabled === false;
+      if (document.activeElement !== minutesInput) {
+        minutesInput.value = String(info.minutes || (info.range && info.range.default) || 30);
+      }
+      var lines = [];
+      var currentLabel = info.current ? (info.current.nickname || info.current.uid) : '';
+      if (!primaryUid) {
+        lines.push('还没指定主账号 —— 指定之后才会自动切回。');
+      } else if (info.enabled === false) {
+        lines.push('已关闭：不会自动切回主账号。');
+      } else if (!info.onOtherAccount) {
+        lines.push('当前就在主账号上，不需要切回。');
+      } else {
+        lines.push('当前账号：' + (currentLabel || '读不到') + '（非主账号）');
+        lines.push('已闲置 ' + idleMinutesText(info.idleMs) + '，阈值 ' + info.minutes + ' 分钟');
+      }
+      if (info.onOtherAccount && info.busy) lines.push('有任务在跑或有切号流程在进行，先让位。');
+      if (info.onOtherAccount && Number(info.blockedUntil || 0) > Date.now()) lines.push('主账号还在限流窗口内，等窗口过去再切。');
+      if (primaryUid && info.primaryUsable === false) lines.push('⚠️ 主账号的备份不在账号列表里（可能已被删除）。');
+      note.innerHTML = lines.join('<br>');
+    }
+
+    function refreshIdleCard() {
+      if (!idleCard) return Promise.resolve(null);
+      return api('/api/idle-switchback').then(function (data) {
+        if (idleCard && idleCard.isConnected) renderIdleCard(data);
+        return data;
+      }).catch(function () { return null; });
+    }
+
+    function saveIdleCard(patch) {
+      return api('/api/idle-switchback', { method: 'POST', body: JSON.stringify(patch) }).then(function (data) {
+        if (data && data.ok === false) {
+          if (typeof toast === 'function') toast(data.error || '保存失败', true);
+          return refreshIdleCard();
+        }
+        renderIdleCard(data);
+        return data;
+      }).catch(function (error) {
+        if (typeof toast === 'function') toast((error && error.message) || '保存失败', true);
+        return refreshIdleCard();
+      });
+    }
+
+    if (idleCard) {
+      idleCard.querySelector('#wbs-idle-primary').addEventListener('change', function () {
+        var uid = String(this.value || '');
+        api('/api/accounts/primary', { method: 'POST', body: JSON.stringify({ uid: uid }) })
+          .then(function (data) {
+            if (typeof toast === 'function') toast(uid ? '已设为主账号，自动化任务可据此识别主账号' : '已清除主账号设置', false);
+            return refreshIdleCard();
+          })
+          .catch(function (error) {
+            if (typeof toast === 'function') toast((error && error.message) || '设置主账号失败', true);
+            return refreshIdleCard();
+          });
+      });
+      idleCard.querySelector('#wbs-idle-enabled').addEventListener('change', function () {
+        saveIdleCard({ enabled: !!this.checked });
+      });
+      idleCard.querySelector('#wbs-idle-minutes').addEventListener('change', function () {
+        var value = Number(this.value);
+        if (!isFinite(value) || value < 5 || value > 1440) {
+          if (typeof toast === 'function') toast('闲置阈值需要在 5 ~ 1440 分钟之间', true);
+          return refreshIdleCard();
+        }
+        return saveIdleCard({ minutes: Math.round(value) });
+      });
     }
 
     function openAccountOrderModal() {
@@ -5487,6 +5625,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (name === 'spaces' && spacesPane && !spacesPane.dataset.built) buildSpacesPane();
       // 空间页只读：进入时先取缓存秒出，没有缓存就给「开始扫描」，同时接管正在跑的任务进度。
       if (name === 'spaces') { try { refreshSpaceScan(); } catch (e) {} }
+      // 账号页：每次进入都刷一次「账号自动切换」卡片的闲置进度（后端算的 idleMs，前端不自己计时）
+      if (name === 'account') { try { refreshIdleCard(); } catch (e) {} }
       // 每次进入会话页都补一次进度探测（面板可能刚重建，定时器已被清理）
       if (name === 'sessions') { try { watchAutoCopyProgress(); } catch (e) {} }
       if (name === 'models' && modelsPane && !modelsPane.dataset.built) buildModelsPane();
@@ -12647,6 +12787,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var currentChanged = previous.length > 0 && (state.current && state.current.uid) !== (data.current && data.current.uid);
       state.current = data.current;
       state.accounts = mergeAccountSnapshot(previous, data.accounts || []);
+      // 账号列表到手后再刷一次「账号自动切换」卡片：主账号下拉要拿账号清单来渲染
+      try { refreshIdleCard(); } catch (e) {}
       state.accountOrder = data.accountOrder || state.accountOrder || { mode: 'expiry' };
       // 页面重载后还没有积分缓存，或刚切换账号：等本轮积分齐备后校正一次顺序。
       if (currentChanged || (!previous.length && state.accounts.some(function (account) { return !Array.isArray(account.creditSegments); }))) {
@@ -14264,6 +14406,20 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-acct-io span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
     '.wbs-acct-icon{width:28px;height:28px;padding:0;border-radius:8px}',
     '.wbs-acct-list{flex:1;min-height:0;overflow-y:auto;padding-right:2px}',
+    /* 账号自动切换卡片（主账号 + 闲置阈值）：放在账号列表与「登录新账号」之间 */
+    '.wbs-idle-card{flex:0 0 auto;margin:8px 0 0}',
+    '.wbs-idle-title{font-size:12px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f);margin-bottom:8px}',
+    '.wbs-idle-row{display:flex;align-items:center;gap:8px;margin-bottom:7px}',
+    '.wbs-idle-row:last-child{margin-bottom:0}',
+    '.wbs-idle-label{flex:1;min-width:0;font-size:12px;color:var(--wb-icon-secondary,#666);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.wbs-idle-select,.wbs-idle-input{flex:0 0 auto;height:28px;padding:0 7px;border:1px solid var(--wb-border-default,#e2e4e8);border-radius:8px;background:var(--wb-bg-popover,#fff);color:var(--wb-color-text-primary,#1f1f1f);font:inherit;font-size:12px;font-family:inherit}',
+    '.wbs-idle-select{max-width:180px}',
+    '.wbs-idle-input{width:72px;text-align:right}',
+    '.wbs-idle-input:disabled{opacity:.5}',
+    '.wbs-idle-unit{flex:0 0 auto;font-size:11px;color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-idle-note{margin-top:7px;font-size:11px;line-height:1.6;color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-idle-note b{color:var(--wb-color-text-secondary,#555);font-weight:600}',
+    '.wbs-idle-select:focus-visible,.wbs-idle-input:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:1px}',
     '.wbs-logout-btn{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;margin-top:10px;padding:10px 0;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:12px;background:transparent;color:var(--wb-icon-secondary,#666);font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit;flex-shrink:0}',
     '.wbs-logout-btn:hover{background:var(--wb-bg-hover,#f5f5f5);color:var(--wb-color-text-primary,#1f1f1f);border-color:var(--wb-border-default,#d5d5d5)}',
     '.wbs-logout-btn.armed{background:#f53f3f;color:#fff;border-color:#f53f3f}',

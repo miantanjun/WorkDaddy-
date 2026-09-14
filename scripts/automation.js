@@ -332,6 +332,42 @@ function installBuiltinTask(dataDir, file) {
   return { status: 'upgraded', revision };
 }
 
+/**
+ * 把「已存在、但还没登记为内置」的同 id 任务**认领**为内置。
+ *
+ * 为什么需要它：内置定义是照着用户已装好的任务反推出来的，首次引入时 installBuiltinTask 会把
+ * 同 id 的既有任务判为「可能属于用户」，写一条 managed:false 之后**永久跳过** —— 那样这个任务
+ * 永远不会显示「内置」角标，也永远不会跟随内置改动升级。先认领一次，之后再走正常升级路径。
+ *
+ * 认领条件（两个满足其一，否则什么都不做、绝不覆盖用户的东西）：
+ *   ① 装机内容与当前内置定义**完全一致**（hash 相同）→ 记下当前 revision；
+ *   ② 装机内容命中 `upgradeFromContentHashes` 列出的历史版本 → 记 revision=1，
+ *      好让紧跟着的 installBuiltinTask 走升级路径把内容拉到最新。
+ */
+function adoptBuiltinTask(dataDir, file) {
+  const task = validateTask(JSON.parse(fs.readFileSync(file, 'utf8')));
+  const revision = Number.isInteger(task.revision) && task.revision > 0 ? task.revision : 1;
+  const markerFile = path.join(dataDir, 'automation-builtins.json');
+  let markers = {};
+  try { markers = JSON.parse(fs.readFileSync(markerFile, 'utf8')); } catch (_) {}
+  const previous = markers[task.id];
+  if (previous === true || (previous && typeof previous === 'object' && previous.managed === true)) {
+    return { status: 'already-managed', revision };
+  }
+  const tasks = readAutomations(dataDir);
+  const index = tasks.findIndex((item) => item && item.id === task.id);
+  if (index === -1) return { status: 'not-installed', revision };
+  const installedHash = builtinContentHash(tasks[index]);
+  const sameAsBuiltin = installedHash === builtinContentHash(task);
+  const known = Array.isArray(task.upgradeFromContentHashes) ? task.upgradeFromContentHashes : [];
+  if (!sameAsBuiltin && known.indexOf(installedHash) < 0) {
+    return { status: 'content-mismatch', revision };
+  }
+  const markerRevision = sameAsBuiltin ? revision : 1;
+  atomicWriteText(markerFile, JSON.stringify({ ...markers, [task.id]: { managed: true, revision: markerRevision, contentHash: installedHash } }) + '\n');
+  return { status: 'adopted', revision: markerRevision, contentHash: installedHash, willUpgrade: !sameAsBuiltin && revision > markerRevision };
+}
+
 function validateLocator(locator) {
   if (!locator || typeof locator !== 'object') throw new Error('缺少 locator');
   const kind = String(locator.kind || '').trim();
@@ -933,6 +969,7 @@ module.exports = {
   taskNeedsPanelClosed,
   taskIsPassiveCleanup,
   installBuiltinTask,
+  adoptBuiltinTask,
   SCHEMA_VERSION,
   CAPABILITIES,
   SUPPORTED_OPS,

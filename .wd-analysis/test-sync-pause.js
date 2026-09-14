@@ -389,6 +389,8 @@ function waitSettled(jobs, ms) {
       'selfhost-1.3.0-20260914-space-scan-backend',
       'selfhost-1.3.0-20260914-space-scan-nested-fix',
       'selfhost-1.3.0-20260914-space-scan-slug-fix',
+      'selfhost-1.3.0-20260914-limit-switchback',
+      'selfhost-1.3.0-20260914-idle-switchback',
     ];
     ok(KNOWN_BUILDS.indexOf(live) >= 0, 'D0 daemon 已加载本阶段（或更晚）的构建', live);
 

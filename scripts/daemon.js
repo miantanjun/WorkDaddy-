@@ -205,6 +205,7 @@ const {
   isTaskCompatible,
   configureAutomationRuntime,
   installBuiltinTask,
+  adoptBuiltinTask,
 } = require('./automation.js');
 
 const { assertAccountRequestUrl, createTaskState, cancellableWait, createRendererGate, probeSessionReceipt, receiptComplete } = require('./automation-runtime.js');
@@ -388,7 +389,7 @@ const DAEMON_VERSION = '1.3.0';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-space-scan-slug-fix';
+const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-idle-switchback';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -427,6 +428,8 @@ const CREDIT_USAGE_REFRESH_MS = 15000;
 const creditUsageSyncInFlight = new Map();
 const { selectRotationCandidate } = require('./credit-rotation.js');
 const limitFailover = require('./limit-failover.js');
+const accountSwitchLog = require('./account-switch-log.js');
+const idleSwitchback = require('./idle-switchback.js');
 const creditRotationCache = new Map();
 const WATCH_INTERVAL = 3000; // 文件监听兜底
 const BACKUP_DEBOUNCE = 1500; // CDP 事件触发的备份防抖
@@ -3438,6 +3441,11 @@ async function runLimitFailoverCore(detail, ports) {
       await ports.notify('warning', '检测到模型限流，但当前会话里没有可续跑的用户消息');
       return { ok: false, reason: 'no-task-text', modelId, fromUid: current.uid };
     }
+    // 把续跑内容交给调用方（桌面日志要写「重发了什么」的摘要）。
+    // 走回调而不是塞进返回值：返回值会进自动化运行记录、被 API 透出，不适合带正文。
+    if (typeof ports.captureTaskText === 'function') {
+      try { ports.captureTaskText(taskText); } catch (_) {}
+    }
 
     ports.log('limit-failover:start ' + JSON.stringify({ fromUid: current.uid, modelId, taskSource, textLength: taskText.length, at: new Date(now).toISOString() }));
     const tried = [];
@@ -3489,6 +3497,537 @@ async function runLimitFailoverCore(detail, ports) {
     resolveInFlight();
     limitFailoverInFlight = null;
   }
+}
+
+/* ---------------- 续跑结束后自动切回主账号 + 桌面大白话日志 ---------------- */
+//
+// 用户诉求（2026-09-14）：
+//   1) 因限流自动切号续跑、且这次续跑成功结束后，自动把账号切回**主账号**；
+//   2) 每次触发限流切号，都在**桌面**留一份大白话报告（不用翻 daemon.log）。
+//
+// 三条语义（改之前先读）：
+//   · 触发条件：一次**真的换了号**的交接（runLimitFailoverCore 返回 ok:true）。
+//     skip（已有一轮在跑）/ 复核未通过 / 没能换号 → 只写日志，不排切回。
+//   · 执行时机：**续跑回复跑完**（无流式请求 + 最后一条是已完成的 assistant，连续 3 轮确认）
+//     → 再沉降 6 秒 → 才切回。⚠️ 账号切换会 Page.reload，回复还在流式时切 = 当场把续跑掐死，
+//     所以「先等跑完 → 再切号」的顺序绝不能反。
+//   · 异常处理：主账号没设/备份没了 → 不切回；主账号仍在限流窗口内 → 等到窗口结束再切
+//     （窗口内切回去立刻又会被限流，会来回横跳）；等超上限 → 放弃；等待期间账号又变了
+//     （新一轮切号 / 手动切换）→ 放弃，交给新一轮；没法确认续跑真的跑起来 → 放弃
+//     （宁可不动账号）；切号本身抛错 → 记日志，不影响 daemon。
+
+const LIMIT_FAILOVER_SWITCHBACK_ENABLED = String(process.env.WBSWITCH_LIMIT_FAILOVER_SWITCHBACK || '').trim() !== '0';
+const LIMIT_FAILOVER_REPLY_START_WAIT_MS = 90 * 1000;    // 交接后多久内必须看到「续跑真的开始生成」
+const LIMIT_FAILOVER_REPLY_MAX_MS = 45 * 60 * 1000;      // 等续跑回复结束的上限
+const LIMIT_FAILOVER_REPLY_POLL_MS = 3000;
+const LIMIT_FAILOVER_REPLY_STABLE_ROUNDS = 3;            // 连续几轮都 idle 才算「跑完了」（抗抖动）
+const LIMIT_FAILOVER_REPLY_SETTLE_MS = 6000;             // 确认跑完后再等这么久才动账号
+const LIMIT_FAILOVER_UNBLOCK_MAX_MS = 11 * 60 * 1000;    // 等主账号限流窗口过去的上限
+
+let limitFailoverSwitchBack = null;       // { plan, cancelled }
+let limitFailoverSwitchBackLast = null;   // { plan, outcome, at }
+let accountSwitchLogFile = '';
+let limitFailoverNotifier = null;
+
+function limitFailoverDesktopLogDir() {
+  try {
+    return accountSwitchLog.resolveLogDir({ env: process.env, existsSync: fs.existsSync, fallbackDir: DATA_DIR });
+  } catch (_) {
+    return DATA_DIR;
+  }
+}
+
+// 写桌面日志。**任何情况下都不抛**：日志写不出来不能影响切号本身。
+function writeAccountSwitchDesktopLog(text, now) {
+  const at = Number(now) || Date.now();
+  let result;
+  try {
+    result = accountSwitchLog.appendReport({ dir: limitFailoverDesktopLogDir(), at, text, fsImpl: fs });
+  } catch (error) {
+    result = { ok: false, error: String((error && error.message) || error) };
+  }
+  if (result && result.ok) accountSwitchLogFile = result.file;
+  log('[limit-failover] 桌面日志 ' + (result && result.ok ? '已写入 ' : '写入失败 ') +
+    (result && result.file ? result.file : '') + (result && result.error ? ' (' + result.error + ')' : ''));
+  return result;
+}
+
+function limitFailoverNotify(level, message) {
+  try {
+    if (!cdp.connected) return;
+    if (!limitFailoverNotifier) limitFailoverNotifier = createAutomationNotifier(automationNotifyToast, 'limit-switchback');
+    Promise.resolve(limitFailoverNotifier.show(level, message, { duration: 9000 })).catch(() => {});
+  } catch (_) { /* 通知失败无所谓 */ }
+}
+
+function readLimitReplyIdle() {
+  return runCdpExpression(limitFailover.limitReplyIdleExpression(), { awaitPromise: false });
+}
+
+function limitFailoverAccountByUid(uid) {
+  const key = String(uid || '').trim();
+  if (!key) return null;
+  return listAccounts(DATA_DIR).find((account) => String(account && account.uid || '') === key) || null;
+}
+
+function limitFailoverPrimaryUid() {
+  try { return String(primaryAccountStore.get() || '').trim(); } catch (_) { return ''; }
+}
+
+// 该账号的限流窗口什么时候结束（没记录 → 0）
+function limitFailoverBlockedUntil(uid) {
+  const entry = readLimitFailoverState()[String(uid || '')];
+  const at = Number(entry && entry.blockedAt || 0);
+  if (!Number.isFinite(at) || at <= 0) return 0;
+  return at + limitFailover.LIMIT_FAILOVER_WINDOW_MS;
+}
+
+// 当前账号相对这次切号计划的状态：target(还在续跑账号) / primary(已经回到主账号) / other / unknown
+function limitFailoverLiveRole(plan) {
+  const live = currentAccount();
+  const liveUid = live ? String(live.uid || '') : '';
+  if (!liveUid) return 'unknown';
+  if (liveUid === String(plan && plan.toUid || '')) return 'target';
+  if (plan && plan.primaryUid && liveUid === String(plan.primaryUid)) return 'primary';
+  return 'other';
+}
+
+function cancelLimitFailoverSwitchBack(reason) {
+  if (!limitFailoverSwitchBack) return false;
+  const why = String(reason || '');
+  // 取消标记必须打在 **plan 对象**上：全局槽位会立刻被新一轮覆盖，
+  // 看槽位的 cancelled 会让上一轮的 watcher 以为自己还合法（→ 两个流程抢账号）。
+  limitFailoverSwitchBack.cancelled = true;
+  if (limitFailoverSwitchBack.plan) {
+    limitFailoverSwitchBack.plan.cancelled = true;
+    limitFailoverSwitchBack.plan.cancelledReason = why;
+  }
+  return true;
+}
+
+function limitFailoverPlanCancelled(plan) {
+  return !!(plan && plan.cancelled === true);
+}
+
+function finishLimitFailoverSwitchBack(plan, outcome) {
+  const at = Date.now();
+  const result = Object.assign({}, outcome || {});
+  let written = null;
+  try {
+    written = writeAccountSwitchDesktopLog(accountSwitchLog.buildSwitchBackReport({ at, plan, outcome: result }), at);
+  } catch (error) {
+    log('[limit-failover] 收尾日志渲染失败: ' + String((error && error.message) || error));
+  }
+  limitFailoverSwitchBackLast = { plan, outcome: result, at, logFile: written && written.file ? written.file : '' };
+  log('[limit-failover] 切回主账号收尾 ' + JSON.stringify({
+    status: result.status,
+    from: plan.fromUid,
+    to: plan.toUid,
+    primary: result.primaryUid || plan.primaryUid || '',
+    waitedMs: result.waitedMs || 0,
+    elapsedMs: result.elapsedMs || 0,
+  }));
+  if (limitFailoverSwitchBack && limitFailoverSwitchBack.plan === plan) limitFailoverSwitchBack = null;
+  return result;
+}
+
+// 分片等待：期间随时可被「新一轮切号 / 手动切号 / 取消」打断
+async function waitLimitFailoverChunks(ms, plan, primaryUid) {
+  const end = Date.now() + Math.max(0, Number(ms) || 0);
+  while (Date.now() < end) {
+    if (limitFailoverPlanCancelled(plan)) return 'cancelled';
+    if (limitFailoverInFlight) return 'superseded';
+    const role = limitFailoverLiveRole(plan);
+    if (primaryUid && role === 'primary') return 'already';
+    if (role !== 'target' && role !== 'unknown') return 'superseded';
+    const chunk = Math.min(2000, end - Date.now());
+    if (chunk <= 0) break;
+    await sleep(chunk);
+  }
+  return 'ok';
+}
+
+async function runLimitFailoverSwitchBack(plan) {
+  const isCancelled = () => limitFailoverPlanCancelled(plan);
+  const elapsedMs = () => Date.now() - Number(plan.scheduledAt || Date.now());
+  const stopIfUnsafe = () => {
+    if (isCancelled()) return finishLimitFailoverSwitchBack(plan, { status: 'superseded', elapsedMs: elapsedMs() });
+    if (limitFailoverInFlight) return finishLimitFailoverSwitchBack(plan, { status: 'superseded', elapsedMs: elapsedMs() });
+    const role = limitFailoverLiveRole(plan);
+    if (role === 'primary') return finishLimitFailoverSwitchBack(plan, { status: 'already', primaryUid: plan.primaryUid, primaryNickname: plan.primaryNickname, elapsedMs: elapsedMs() });
+    if (role !== 'target' && role !== 'unknown') return finishLimitFailoverSwitchBack(plan, { status: 'superseded', elapsedMs: elapsedMs() });
+    return null;
+  };
+
+  // ① 等「续跑跑起来」+「续跑跑完」：一轮循环同时判两件事
+  const hardEnd = Date.now() + LIMIT_FAILOVER_REPLY_MAX_MS;
+  const startDeadline = Date.now() + LIMIT_FAILOVER_REPLY_START_WAIT_MS;
+  let sawRunning = false;
+  let idleRounds = 0;
+  let finished = false;
+  while (Date.now() < hardEnd) {
+    const unsafe = stopIfUnsafe();
+    if (unsafe) return unsafe;
+    const idle = await readLimitReplyIdle().catch(() => null);
+    if (idle && idle.ok === true) {
+      if (idle.idle === true) {
+        idleRounds += 1;
+        if (idleRounds >= LIMIT_FAILOVER_REPLY_STABLE_ROUNDS) { sawRunning = true; finished = true; break; }
+      } else {
+        if (idle.why === 'streaming' || idle.why === 'loading') sawRunning = true;
+        idleRounds = 0;
+      }
+    } else {
+      idleRounds = 0;   // 读不到（页面刷新中/不在会话里）不算 idle，继续等
+    }
+    if (!sawRunning && Date.now() >= startDeadline) {
+      return finishLimitFailoverSwitchBack(plan, { status: 'unsure', startWaitMs: LIMIT_FAILOVER_REPLY_START_WAIT_MS, elapsedMs: elapsedMs() });
+    }
+    await sleep(LIMIT_FAILOVER_REPLY_POLL_MS);
+  }
+  if (!finished) {
+    return finishLimitFailoverSwitchBack(plan, {
+      status: sawRunning ? 'timeout' : 'unsure',
+      startWaitMs: LIMIT_FAILOVER_REPLY_START_WAIT_MS,
+      maxWaitMs: LIMIT_FAILOVER_REPLY_MAX_MS,
+      elapsedMs: elapsedMs(),
+    });
+  }
+
+  // ② 沉降：回复渲染完就动账号太突兀，也容易撞上前端还在收尾的请求
+  for (let waited = 0; waited < LIMIT_FAILOVER_REPLY_SETTLE_MS; waited += 500) {
+    const unsafe = stopIfUnsafe();
+    if (unsafe) return unsafe;
+    await sleep(500);
+  }
+
+  // ③ 切号前最后一道关：此刻不能有限流横幅（说明又要切号了，别和它抢账号）
+  const banner = await readLimitBanner().catch(() => null);
+  if (banner && banner.hit) {
+    return finishLimitFailoverSwitchBack(plan, { status: 'superseded', reason: 'banner', elapsedMs: elapsedMs() });
+  }
+  const preCheck = stopIfUnsafe();
+  if (preCheck) return preCheck;
+
+  // ④ 解析主账号（此刻重新读，用户可能刚改过设置）
+  const primaryUid = limitFailoverPrimaryUid();
+  if (!primaryUid) return finishLimitFailoverSwitchBack(plan, { status: 'no-primary', elapsedMs: elapsedMs() });
+  if (primaryUid === String(plan.toUid || '')) {
+    return finishLimitFailoverSwitchBack(plan, { status: 'no-need', primaryUid, elapsedMs: elapsedMs() });
+  }
+  const primaryAccount = limitFailoverAccountByUid(primaryUid);
+  if (!primaryAccount) return finishLimitFailoverSwitchBack(plan, { status: 'unavailable', primaryUid, elapsedMs: elapsedMs() });
+  const primaryNickname = String(primaryAccount.nickname || '');
+  plan.primaryUid = primaryUid;
+  plan.primaryNickname = primaryNickname;
+
+  // ⑤ 主账号还在限流窗口里 → 等到窗口结束再切（否则切回去立刻又被限流，来回横跳）
+  let waitedMs = 0;
+  const blockedUntil = limitFailoverBlockedUntil(primaryUid);
+  if (blockedUntil > Date.now()) {
+    const need = blockedUntil - Date.now();
+    if (need > LIMIT_FAILOVER_UNBLOCK_MAX_MS) {
+      return finishLimitFailoverSwitchBack(plan, { status: 'blocked', primaryUid, primaryNickname, blockedUntil, elapsedMs: elapsedMs() });
+    }
+    waitedMs = need;
+    const waited = await waitLimitFailoverChunks(need, plan, primaryUid);
+    if (waited === 'already') return finishLimitFailoverSwitchBack(plan, { status: 'already', primaryUid, primaryNickname, waitedMs, elapsedMs: elapsedMs() });
+    if (waited !== 'ok') return finishLimitFailoverSwitchBack(plan, { status: 'superseded', primaryUid, primaryNickname, waitedMs, elapsedMs: elapsedMs() });
+    const stillBlocked = limitFailoverBlockedUntil(primaryUid);
+    if (stillBlocked > Date.now()) {
+      return finishLimitFailoverSwitchBack(plan, { status: 'blocked', primaryUid, primaryNickname, blockedUntil: stillBlocked, waitedMs, elapsedMs: elapsedMs() });
+    }
+  }
+
+  // ⑥ 切回主账号（会整页 reload —— 这是它的正常动作）
+  try {
+    await automationSwitchAccount({ uid: primaryUid });
+    const after = currentAccount();
+    const afterUid = after ? String(after.uid || '') : '';
+    if (afterUid !== primaryUid) throw new Error('切回后当前账号不是主账号（期望 ' + primaryUid.slice(0, 8) + '，实际 ' + (afterUid || '读不到') + '）');
+    const outcome = {
+      status: waitedMs > 0 ? 'waited' : 'switched',
+      primaryUid,
+      primaryNickname,
+      waitedMs,
+      blockedUntil: waitedMs > 0 ? blockedUntil : 0,
+      elapsedMs: elapsedMs(),
+    };
+    finishLimitFailoverSwitchBack(plan, outcome);
+    limitFailoverNotify('success', '续跑已结束，已自动切回主账号 ' + (primaryNickname || primaryUid.slice(0, 8)));
+    return outcome;
+  } catch (error) {
+    return finishLimitFailoverSwitchBack(plan, {
+      status: 'failed',
+      primaryUid,
+      primaryNickname,
+      error: String((error && error.message) || error),
+      elapsedMs: elapsedMs(),
+    });
+  }
+}
+
+function scheduleLimitFailoverSwitchBack(result, context) {
+  if (!LIMIT_FAILOVER_SWITCHBACK_ENABLED) return null;
+  if (!result || result.ok !== true || !result.toUid) return null;
+  const ctx = context || {};
+  const plannedFor = { scheduledAt: Date.now(), taskText: String(ctx.taskText || '') };
+  const fromNickname = String(ctx.fromNickname || '');
+  const primaryUid = limitFailoverPrimaryUid();
+  const primaryAccount = primaryUid ? limitFailoverAccountByUid(primaryUid) : null;
+  const plan = {
+    fromUid: String(result.fromUid || ''),
+    fromNickname,
+    toUid: String(result.toUid || ''),
+    toNickname: String(result.toNickname || ''),
+    modelId: String(result.modelId || ''),
+    taskSource: String(result.taskSource || ''),
+    taskText: String(ctx.taskText || ''),
+    tried: Array.isArray(result.tried) ? result.tried.slice() : [],
+    primaryUid,
+    primaryNickname: primaryAccount ? String(primaryAccount.nickname || '') : '',
+    scheduledAt: plannedFor.scheduledAt,
+  };
+  // 新一轮切号覆盖上一轮：上一轮的切回计划作废（当前账号已经又变了，两个流程抢账号会乱）
+  if (limitFailoverSwitchBack) cancelLimitFailoverSwitchBack('新一轮切号开始');
+  limitFailoverSwitchBack = { plan, cancelled: false };
+  log('[limit-failover] 已排定「续跑结束后切回主账号」' + JSON.stringify({
+    from: plan.fromUid, to: plan.toUid, primary: plan.primaryUid || '(未设置)', at: new Date(plan.scheduledAt).toISOString(),
+  }));
+  runLimitFailoverSwitchBack(plan).catch((error) => {
+    try { finishLimitFailoverSwitchBack(plan, { status: 'failed', error: String((error && error.message) || error) }); } catch (_) {}
+  });
+  return plan;
+}
+
+// 一次限流切号「走完」之后的统一收尾：写桌面日志 + （成功时）排定切回主账号。
+// 注意 skip 不算「触发」，不写日志也不排切回。
+function handleLimitFailoverOutcome(result, context) {
+  if (!result || typeof result !== 'object' || result.skipped) return result;
+  const ctx = context || {};
+  const at = Date.now();
+  const fromUid = String(result.fromUid || '');
+  const fromNickname = String(ctx.fromNickname || '');
+  if (result.ok === true && result.toUid) {
+    writeAccountSwitchDesktopLog(accountSwitchLog.buildTriggerReport({
+      at,
+      fromUid,
+      fromNickname,
+      toUid: result.toUid,
+      toNickname: result.toNickname,
+      modelId: result.modelId,
+      taskSource: result.taskSource,
+      taskText: String(ctx.taskText || ''),
+      triedCount: Array.isArray(result.tried) ? result.tried.length : 1,
+    }), at);
+    scheduleLimitFailoverSwitchBack(result, { at, taskText: String(ctx.taskText || ''), fromNickname });
+    return result;
+  }
+  writeAccountSwitchDesktopLog(accountSwitchLog.buildFailureReport({
+    at,
+    fromUid,
+    fromNickname,
+    reason: String(result.reason || ''),
+    error: String(result.error || ''),
+    triedLabels: Array.isArray(result.tried) ? result.tried.map((uid) => accountSwitchLog.accountLabel(uid, '')) : [],
+  }), at);
+  return result;
+}
+
+/* ---------------- 非主账号闲置超时 → 自动切回主账号 ---------------- */
+//
+// 用户诉求（2026-09-14）：当前用的是非主账号时，若上一轮会话任务结束后**连续闲置**超过阈值
+// （默认 30 分钟，面板「账号」页可调 / 可关），自动切回主账号。
+//
+// 为什么放在 daemon 而不是做成自动化任务：
+//   · 判定要看「页面此刻有没有在生成回复 / 输入框里有没有草稿」，这是渲染侧实时状态；
+//   · 它和限流切回抢同一个动作（切账号 = 整页 reload），必须与 limitFailoverInFlight、
+//     待执行的切回计划互斥 —— 写在同一个进程里最容易保证不打架。
+//   · 它不依赖自动化任务是否启用，属于「账号使用策略」，所以设置项放在面板「账号」页。
+//
+// 四条铁律（改之前先读）：
+//   1) 正在生成回复时绝不切（会当场把任务掐死）——「正在生成」本身就算活动，计时归零；
+//   2) 有任务在跑 / 有限流切号在飞 / 有待执行的切回计划 → 一律让位（视为活动，计时归零）；
+//   3) 主账号还在限流窗口内 → 这一拍不切（窗口内切回去立刻又被限流），下一拍再看；
+//   4) 只有「同一账号」的计时才连续：一旦换号，闲置计时从头开始。
+
+const IDLE_SWITCHBACK_TICK_MS = 30000;
+const IDLE_SWITCHBACK_BOOT_DELAY_MS = 20000;   // 启动后先等一会儿（等 CDP 连上、页面就绪）
+const idleSwitchbackStore = idleSwitchback.createIdleSwitchbackStore(DATA_DIR, fs);
+const idleSwitchbackStateStore = idleSwitchback.createIdleSwitchbackStateStore(DATA_DIR, fs);
+let idleSwitchbackTimer = null;
+let idleSwitchbackSwitching = false;
+let idleSwitchbackLastDecision = null;
+
+// 此刻是否「不该抢账号」：任何任务在跑、切号在飞、切回计划待执行都算
+function idleSwitchbackBusy() {
+  if (limitFailoverInFlight) return true;
+  if (limitFailoverSwitchBack) return true;
+  if (idleSwitchbackSwitching) return true;
+  for (const run of automationRuns.values()) {
+    if (run && run.status === 'running') return true;
+  }
+  return false;
+}
+
+function readSessionActivity() {
+  if (!cdp.connected) return null;
+  return runCdpExpression(idleSwitchback.sessionActivityExpression(), { awaitPromise: false }).catch(() => null);
+}
+
+function idleSwitchbackPublicState() {
+  const config = idleSwitchbackStore.get();
+  const current = currentAccount();
+  const primaryUid = limitFailoverPrimaryUid();
+  const primaryAccount = primaryUid ? limitFailoverAccountByUid(primaryUid) : null;
+  const stored = idleSwitchbackStateStore.get();
+  const now = Date.now();
+  const currentUid = current ? String(current.uid || '') : '';
+  const onOtherAccount = !!currentUid && !!primaryUid && currentUid !== String(primaryUid);
+  const sameAccount = !!currentUid && String(stored.uid || '') === currentUid;
+  return {
+    enabled: config.enabled,
+    minutes: config.minutes,
+    thresholdMs: config.minutes * 60000,
+    current: current ? { uid: current.uid, nickname: current.nickname } : null,
+    primary: primaryUid ? { uid: primaryUid, nickname: primaryAccount ? String(primaryAccount.nickname || '') : '' } : null,
+    primaryUsable: !!primaryAccount,
+    blockedUntil: limitFailoverBlockedUntil(primaryUid),
+    onOtherAccount,
+    idleMs: onOtherAccount && sameAccount ? Math.max(0, now - Number(stored.lastActivityAt || 0)) : 0,
+    lastActivityAt: sameAccount ? Number(stored.lastActivityAt || 0) : 0,
+    lastReason: sameAccount ? String(stored.lastReason || '') : '',
+    busy: idleSwitchbackBusy(),
+    switching: idleSwitchbackSwitching,
+    lastDecision: idleSwitchbackLastDecision,
+    logDir: limitFailoverDesktopLogDir(),
+    logFile: accountSwitchLogFile,
+    range: { min: idleSwitchback.MIN_MINUTES, max: idleSwitchback.MAX_MINUTES, default: idleSwitchback.DEFAULTS.minutes },
+  };
+}
+
+// 真正执行一次「闲置切回」。切之前把所有前置条件再确认一遍（等待期间世界可能已经变了）。
+async function runIdleSwitchBack(plan) {
+  if (idleSwitchbackSwitching) return null;
+  idleSwitchbackSwitching = true;
+  const at = Date.now();
+  const from = plan && plan.current ? plan.current : {};
+  const report = {
+    idleMs: Number(plan && plan.idleMs) || 0,
+    minutes: Number(plan && plan.minutes) || 0,
+    fromUid: String(from.uid || ''),
+    fromNickname: String(from.nickname || ''),
+    primaryUid: String(plan && plan.primaryUid || ''),
+    primaryNickname: String(plan && plan.primaryNickname || ''),
+  };
+  try {
+    if (limitFailoverInFlight || limitFailoverSwitchBack) throw new Error('有限流切号流程正在进行，让位给它');
+    const live = currentAccount();
+    const liveUid = live ? String(live.uid || '') : '';
+    if (!liveUid || liveUid !== report.fromUid) throw new Error('当前账号已经变了（现在 ' + (liveUid || '读不到') + '）');
+    if (liveUid === report.primaryUid) {
+      log('[idle-switchback] 已经是主账号了，无需切换');
+      return { status: 'no-need', idleMs: report.idleMs };
+    }
+    const banner = await readLimitBanner().catch(() => null);
+    if (banner && banner.hit) throw new Error('页面上还有限流横幅，先让限流流程处理');
+
+    await automationSwitchAccount({ uid: report.primaryUid });
+    const after = currentAccount();
+    const afterUid = after ? String(after.uid || '') : '';
+    if (afterUid !== report.primaryUid) {
+      throw new Error('切回后当前账号不是主账号（期望 ' + report.primaryUid.slice(0, 8) + '，实际 ' + (afterUid || '读不到') + '）');
+    }
+    const outcome = { status: 'switched', primaryUid: report.primaryUid, primaryNickname: report.primaryNickname, idleMs: report.idleMs };
+    idleSwitchbackStateStore.set(idleSwitchback.resetState(report.primaryUid, Date.now()));
+    writeAccountSwitchDesktopLog(accountSwitchLog.buildIdleSwitchBackReport({ at, plan: report, outcome }), at);
+    limitFailoverNotify('success', '已闲置 ' + accountSwitchLog.formatDuration(report.idleMs) +
+      '，已自动切回主账号 ' + (report.primaryNickname || report.primaryUid.slice(0, 8)));
+    log('[idle-switchback] 闲置 ' + report.idleMs + 'ms，已切回主账号 ' + report.primaryUid);
+    return outcome;
+  } catch (error) {
+    const message = String((error && error.message) || error);
+    log('[idle-switchback] 切回失败: ' + message);
+    writeAccountSwitchDesktopLog(accountSwitchLog.buildIdleSwitchBackReport({
+      at,
+      plan: report,
+      outcome: { status: 'failed', primaryUid: report.primaryUid, primaryNickname: report.primaryNickname, idleMs: report.idleMs, error: message },
+    }), at);
+    return { status: 'failed', error: message, idleMs: report.idleMs };
+  } finally {
+    idleSwitchbackSwitching = false;
+  }
+}
+
+async function idleSwitchbackTick() {
+  try {
+    const config = idleSwitchbackStore.get();
+    const now = Date.now();
+    if (!config.enabled) {
+      idleSwitchbackLastDecision = { action: 'none', reason: 'disabled', at: now };
+      idleSwitchbackStateStore.set(idleSwitchback.resetState((currentAccount() || {}).uid || '', now));
+      return;
+    }
+    // CDP 断开（WorkBuddy 关了 / 页面没了）时不判定：切号本来就做不了，别白白把计时跑掉
+    if (!cdp.connected) {
+      idleSwitchbackLastDecision = { action: 'none', reason: 'cdp-offline', at: now };
+      return;
+    }
+    const current = currentAccount();
+    const primaryUid = limitFailoverPrimaryUid();
+    const currentUid = current ? String(current.uid || '') : '';
+    if (!currentUid || !primaryUid || currentUid === String(primaryUid)) {
+      const reason = !primaryUid ? 'no-primary' : (!currentUid ? 'no-current' : 'already-primary');
+      idleSwitchbackStateStore.set(idleSwitchback.resetState(currentUid, now));
+      idleSwitchbackLastDecision = { action: 'none', reason, at: now };
+      return;
+    }
+    const busy = idleSwitchbackBusy();
+    const probe = busy ? null : await readSessionActivity();
+    const primaryAccount = limitFailoverAccountByUid(primaryUid);
+    const decision = idleSwitchback.decideIdleSwitchBack({
+      config,
+      now: Date.now(),
+      current,
+      primaryUid,
+      primaryUsable: !!primaryAccount,
+      blockedUntil: limitFailoverBlockedUntil(primaryUid),
+      busy,
+      probe,
+      state: idleSwitchbackStateStore.get(),
+    });
+    idleSwitchbackStateStore.set(decision.nextState);
+    idleSwitchbackLastDecision = {
+      action: decision.action,
+      reason: decision.reason,
+      idleMs: Number(decision.idleMs) || 0,
+      thresholdMs: Number(decision.threshold) || config.minutes * 60000,
+      at: Date.now(),
+    };
+    if (decision.action !== 'switch') return;
+    log('[idle-switchback] 闲置已达阈值，开始切回主账号 ' + JSON.stringify({ idleMs: decision.idleMs, minutes: config.minutes, from: currentUid, to: primaryUid }));
+    await runIdleSwitchBack({
+      idleMs: decision.idleMs,
+      minutes: config.minutes,
+      current,
+      primaryUid,
+      primaryNickname: primaryAccount ? String(primaryAccount.nickname || '') : '',
+    });
+  } catch (error) {
+    log('[idle-switchback] tick 失败: ' + String((error && error.message) || error));
+  }
+}
+
+function startIdleSwitchbackTicker() {
+  if (idleSwitchbackTimer) return idleSwitchbackTimer;
+  const boot = setTimeout(() => {
+    idleSwitchbackTick().catch(() => {});
+    idleSwitchbackTimer = setInterval(() => { idleSwitchbackTick().catch(() => {}); }, IDLE_SWITCHBACK_TICK_MS);
+    if (idleSwitchbackTimer.unref) idleSwitchbackTimer.unref();
+  }, IDLE_SWITCHBACK_BOOT_DELAY_MS);
+  if (boot.unref) boot.unref();
+  log('[idle-switchback] 已启动：闲置超阈值自动切回主账号（默认 ' + idleSwitchback.DEFAULTS.minutes + ' 分钟，可在「账号」页调整）');
+  return boot;
 }
 
 function automationSwitchAccount(account) {
@@ -3667,8 +4206,12 @@ function startAutomationRun(task, event = null) {
     return result;
   }, httpRequest: automationHttpRequest, domAction: (op, locator, detail) => ['dom.click','dom.type','dom.clear','dom.press'].includes(op) ? withInput(() => automationDomAction(op, locator, { ...detail, isCancelled })) : automationDomAction(op, locator, { ...detail, isCancelled }), sessionSendCurrent, sessionWaitReply, getState: runScopedState, setState: setRunState, isCancelled, notifyToast: async (level, message, detail) => { const result = await runNotifier.show(level, message, detail); appendRunLog('notify:toast:' + level); return result; }, notifySession: async () => { throw new Error('主账号会话通知尚未启用，请先验证 WorkBuddy 会话 API'); }, log: appendRunLog, limitProbe: () => readLimitBanner(), modelGet: () => readLiveModel(), modelSet: (modelId) => withInput(() => setLiveModel(modelId)), limitFailover: (detail) => withInput(async () => {
     const wasPanelOpen = await automationPanelIsOpen().catch(() => false);
-    return runLimitFailoverCore(detail, {
+    // 切号前的账号必须在这里抓：core 成功返回时 currentAccount() 已经是新账号了
+    const accountBeforeFailover = currentAccount();
+    let capturedTaskText = '';
+    const result = await runLimitFailoverCore(detail, {
       readBanner: readLimitBanner,
+      captureTaskText: (text) => { capturedTaskText = String(text || ''); },
       replyStarted: limitReplyStarted,
       readModel: readLiveModel,
       setModel: setLiveModel,
@@ -3682,6 +4225,17 @@ function startAutomationRun(task, event = null) {
       setPanelOpen: (open) => automationPanelSetOpen(open),
       wasPanelOpen,
     });
+    // 一次切号走完后的统一收尾：桌面大白话日志 + （成功时）排定「续跑结束后切回主账号」。
+    // 放在 withInput 里只是为了拿到刚才那次运行的结果；真正的等待/切号在后台跑，不占租约。
+    try {
+      handleLimitFailoverOutcome(result, {
+        taskText: capturedTaskText || String(detail && detail.prompt || ''),
+        fromNickname: String(accountBeforeFailover && accountBeforeFailover.nickname || ''),
+      });
+    } catch (error) {
+      log('[limit-failover] 收尾处理失败: ' + String((error && error.message) || error));
+    }
+    return result;
   }) };
   // 等「收起面板」完成后才开始执行任务（executeTask 内部第一步就点新建任务/聚焦 composer，
   // 若面板还没收会抢焦点）。结束按 run.wasPanelOpen 恢复展开，若运行前本就收起则保持收起。
@@ -8394,6 +8948,15 @@ function handleApi(req, res) {
         inFlight: !!limitFailoverInFlight,
         banner,
         state: readLimitFailoverState(),
+        switchBack: {
+          enabled: LIMIT_FAILOVER_SWITCHBACK_ENABLED,
+          pending: limitFailoverSwitchBack
+            ? Object.assign({}, limitFailoverSwitchBack.plan, { cancelled: !!limitFailoverSwitchBack.cancelled })
+            : null,
+          last: limitFailoverSwitchBackLast,
+          logDir: limitFailoverDesktopLogDir(),
+          logFile: accountSwitchLogFile,
+        },
         windowMs: limitFailover.LIMIT_FAILOVER_WINDOW_MS,
         selectors: limitFailover.LIMIT_BANNER_SELECTORS,
         runs,
@@ -8402,6 +8965,91 @@ function handleApi(req, res) {
   }
 
   // 清掉窗口内的"该账号已被判定限流"记录（例如用户手动确认某账号其实还能用）。
+  // 「续跑结束后自动切回主账号」的只读视图：排定中/最近一次的结果 + 桌面日志落在哪 + 文案样例。
+  // 样例用**当前真实账号名**渲染，但**不落盘** —— 方便先确认大白话写法，不用等真触发。
+  if (req.method === 'GET' && p === '/api/limit-failover/switchback') {
+    try {
+      const primaryUid = limitFailoverPrimaryUid();
+      const primaryAccount = primaryUid ? limitFailoverAccountByUid(primaryUid) : null;
+      const primary = { uid: primaryUid, nickname: primaryAccount ? String(primaryAccount.nickname || '') : '' };
+      const current = currentAccount();
+      const now = Date.now();
+      return json(res, 200, {
+        ok: true,
+        enabled: LIMIT_FAILOVER_SWITCHBACK_ENABLED,
+        timing: {
+          replyStartWaitMs: LIMIT_FAILOVER_REPLY_START_WAIT_MS,
+          replyMaxMs: LIMIT_FAILOVER_REPLY_MAX_MS,
+          pollMs: LIMIT_FAILOVER_REPLY_POLL_MS,
+          stableRounds: LIMIT_FAILOVER_REPLY_STABLE_ROUNDS,
+          settleMs: LIMIT_FAILOVER_REPLY_SETTLE_MS,
+          unblockMaxMs: LIMIT_FAILOVER_UNBLOCK_MAX_MS,
+          windowMs: limitFailover.LIMIT_FAILOVER_WINDOW_MS,
+        },
+        primary,
+        current: current ? { uid: current.uid, nickname: current.nickname } : null,
+        pending: limitFailoverSwitchBack
+          ? Object.assign({}, limitFailoverSwitchBack.plan, { cancelled: !!limitFailoverSwitchBack.cancelled })
+          : null,
+        last: limitFailoverSwitchBackLast,
+        logDir: limitFailoverDesktopLogDir(),
+        logFile: accountSwitchLogFile,
+        sample: {
+          note: '下面是示例文案（用你当前的账号名渲染，只是预览，没有落盘）',
+          trigger: accountSwitchLog.buildTriggerReport({
+            at: now,
+            fromUid: primary.uid || (current && current.uid) || '',
+            fromNickname: primary.nickname || (current && current.nickname) || '',
+            toUid: (current && current.uid) || '',
+            toNickname: (current && current.nickname) || '',
+            modelId: '示例模型',
+            taskSource: 'lastUserMessage',
+            taskText: '示例：把上一条任务原样重发一遍',
+            triedCount: 1,
+          }),
+          switchBack: accountSwitchLog.buildSwitchBackReport({
+            at: now,
+            plan: { toUid: (current && current.uid) || '', toNickname: (current && current.nickname) || '', primaryUid: primary.uid, primaryNickname: primary.nickname },
+            outcome: { status: 'switched', primaryUid: primary.uid, primaryNickname: primary.nickname, elapsedMs: 532000 },
+          }),
+        },
+      });
+    } catch (error) {
+      return json(res, 500, { ok: false, error: String((error && error.message) || error) });
+    }
+  }
+
+  // 闲置自动切回主账号：读 / 改配置。设置项在面板「账号」页（开关 + 阈值分钟数）。
+  if (req.method === 'GET' && p === '/api/idle-switchback') {
+    try {
+      return json(res, 200, Object.assign({ ok: true }, idleSwitchbackPublicState()));
+    } catch (error) {
+      return json(res, 500, { ok: false, error: String((error && error.message) || error) });
+    }
+  }
+
+  if (req.method === 'POST' && p === '/api/idle-switchback') {
+    return readBody(req).then((body) => {
+      const patch = {};
+      if (body && body.enabled !== undefined) patch.enabled = !!body.enabled;
+      if (body && body.minutes !== undefined) {
+        const minutes = Number(body.minutes);
+        if (!Number.isFinite(minutes) || minutes < idleSwitchback.MIN_MINUTES || minutes > idleSwitchback.MAX_MINUTES) {
+          return json(res, 400, {
+            ok: false,
+            error: '阈值需要在 ' + idleSwitchback.MIN_MINUTES + ' ~ ' + idleSwitchback.MAX_MINUTES + ' 分钟之间',
+          });
+        }
+        patch.minutes = minutes;
+      }
+      if (!Object.keys(patch).length) return json(res, 400, { ok: false, error: '没有要修改的字段（enabled / minutes）' });
+      const config = idleSwitchbackStore.set(patch);
+      // 刻意**不**重置闲置计时：把阈值从 30 调到 20 时，已经攒下的闲置时间应当立刻生效。
+      log('[idle-switchback] 配置已更新 ' + JSON.stringify(config));
+      return json(res, 200, Object.assign({ ok: true }, idleSwitchbackPublicState()));
+    }).catch((error) => json(res, 400, { ok: false, error: String((error && error.message) || error) }));
+  }
+
   if (req.method === 'POST' && p === '/api/limit-failover/clear') {
     return readBody(req).then((body) => {
       const uid = String(body && body.uid || '').trim();
@@ -10998,6 +11646,19 @@ if (PROFILE.capabilities.accounts && PROFILE.capabilities.checkin !== false) {
   catch (_) { log('[automation] 初始化签到任务失败'); }
   initializeCheckinConsent(DATA_DIR);
 }
+// 限流自动切号续跑：先「认领」用户机器上已存在的同名任务（只在内容一致时），
+// 再走正常的内置安装/升级路径 —— 这样它才有「内置」角标、才能跟随内置定义升级。
+if (PROFILE.capabilities.accounts) {
+  try {
+    const presetFile = path.join(__dirname, 'builtin/automations/rate-limit-auto-switch.json');
+    const adopted = adoptBuiltinTask(DATA_DIR, presetFile);
+    if (adopted && adopted.status === 'adopted') log(`[automation] 内置任务已认领: rate-limit-auto-switch (revision ${adopted.revision}${adopted.willUpgrade ? '，将升级到新版' : ''})`);
+    if (adopted && adopted.status === 'content-mismatch') log('[automation] 内置任务未认领: rate-limit-auto-switch 已被用户改过，保持原样');
+    const result = installBuiltinTask(DATA_DIR, presetFile);
+    if (result && result.status === 'installed') log(`[automation] 内置任务已安装: rate-limit-auto-switch (revision ${result.revision})`);
+    if (result && result.status === 'upgraded') log(`[automation] 内置任务已升级: rate-limit-auto-switch (revision ${result.revision})`);
+  } catch (_) { log('[automation] 初始化内置任务失败: rate-limit-auto-switch'); }
+}
 restoreSleepMode();
 startServer();
 cdpLoop();
@@ -11010,6 +11671,8 @@ function runAutomationSchedules() {
 runAutomationSchedules();
 const automationScheduleTimer = setInterval(runAutomationSchedules, 1000);
 automationScheduleTimer.unref && automationScheduleTimer.unref();
+// 闲置切回主账号：独立后台拍子（不依赖自动化任务是否启用 —— 这是「账号使用策略」）
+startIdleSwitchbackTicker();
 // 自动更新：启动时检查一次（延迟 8s 等网络就绪），之后每 6 小时一次
 setTimeout(() => { checkUpdateBoth(true).catch(() => {}); }, 8000);
 updateTimer = setInterval(() => { checkUpdateBoth(false).catch(() => {}); }, UPDATE_CHECK_INTERVAL);

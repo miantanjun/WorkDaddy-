@@ -105,6 +105,29 @@ function lastUserTaskTextExpression(maxChars) {
   '}catch(e){return {ok:false,error:String(e&&e.message||e)}}})()';
 }
 
+// 续跑是否「已经跑完」：既没有流式请求，最后一条消息也是**已完成的 assistant 回复**。
+//
+// 用于「续跑结束后自动切回主账号」——账号切换会 Page.reload，回复还在流式输出时动手
+// 等于把续跑当场掐死，所以「先确认跑完、再切号」的顺序不能反。
+// 返回 {ok, idle, why}：ok=false 表示**页面读不到**（刷新中/不在会话里），调用方应当继续等，
+// 不要把「读不到」当成「跑完了」。
+function limitReplyIdleExpression() {
+  return '(function(){try{' +
+    'var compat=window.__wbsWorkBuddyCompat;if(!compat)return {ok:false,idle:false,why:"no-compat"};' +
+    'var list;try{list=compat.findConversationControllers(document)}catch(e){list=null};' +
+    'if(!list||!list.length)return {ok:false,idle:false,why:"no-controller"};' +
+    'var ctl=list[0];' +
+    'var st=ctl.messageStore.getState();' +
+    'if(st.streamingRequestId||st.streamingMessageId)return {ok:true,idle:false,why:"streaming"};' +
+    'var msgs=st.messages||[];var last=null;' +
+    'for(var i=msgs.length-1;i>=0;i--){if(msgs[i]){last=msgs[i];break}}' +
+    'if(!last)return {ok:true,idle:false,why:"empty"};' +
+    'if(last.loading)return {ok:true,idle:false,why:"loading"};' +
+    'if(last.messageType!=="assistant")return {ok:true,idle:false,why:"last-is-"+String(last.messageType||"?")};' +
+    'return {ok:true,idle:true,why:"assistant-done",conversationId:ctl.conversationId||null}' +
+  '}catch(e){return {ok:false,idle:false,why:"threw",error:String(e&&e.message||e)}}})()';
+}
+
 function normalizeState(state) {
   return state && typeof state === 'object' && !Array.isArray(state) ? state : {};
 }
@@ -185,6 +208,7 @@ module.exports = {
   LIMIT_BANNER_SELECTORS,
   LIMIT_TEXT_PATTERN,
   limitBannerProbeExpression,
+  limitReplyIdleExpression,
   liveModelExpression,
   lastUserTaskTextExpression,
   isAccountBlocked,
