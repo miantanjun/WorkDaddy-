@@ -730,7 +730,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   var AC_SUPPORTED = true;
   // 客户端身份只控制真实的 profile 差异；DOM 与队列能力由 WBS_COMPAT 独立判断。
   var WBS_PROFILE_IS_AI = PROFILE_ID === 'workbuddy-ai';
-  var WBS_BRAND = WBS_PROFILE_IS_AI ? 'WorkDaddy AI' : 'WorkDaddy';
+  var WBS_BRAND = WBS_PROFILE_IS_AI ? 'WorkBuddy 助手 AI' : 'WorkBuddy 助手';
 
   // User-facing strings are translated at the injected root so dynamically-built
   // panes and toasts follow the same language without touching WorkBuddy's DOM.
@@ -7374,12 +7374,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           '<span class="wbs-about-badge" id="wbs-about-badge">本机回环 CDP 注入 · 不改官方安装包</span>' +
           '<div class="wbs-about-desc">一个基于 <b>Chrome DevTools Protocol (CDP)</b> 的 WorkBuddy 桌面端增强工具。零侵入、零重签名——只把界面组件注入到正在运行的 WorkBuddy 渲染进程里。</div>' +
           '<div class="wbs-about-support">' +
-            '<span class="wbs-about-support-text" title="如果 WorkDaddy 对你有帮助，欢迎在 GitHub 点个 Star。你的支持会让这个小项目持续更新。">如果 WorkDaddy 对你有帮助，欢迎在 GitHub 点个 Star。你的支持会让这个小项目持续更新。</span>' +
-            '<a class="wbs-about-feedback" id="wbs-about-issues" href="https://github.com/babygoton/WorkDaddy/issues" target="_blank" rel="noopener" title="去 GitHub Issues 反馈问题">' +
+            '<span class="wbs-about-support-text" title="如果 WorkBuddy 助手 对你有帮助，欢迎在 GitHub 点个 Star。你的支持会让这个小项目持续更新。">如果 WorkBuddy 助手 对你有帮助，欢迎在 GitHub 点个 Star。你的支持会让这个小项目持续更新。</span>' +
+            '<a class="wbs-about-feedback" id="wbs-about-issues" href="https://github.com/miantanjun/WorkDaddy-/issues" target="_blank" rel="noopener" title="去 GitHub Issues 反馈问题">' +
               '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>' +
               '<span>问题反馈</span>' +
             '</a>' +
-            '<a class="wbs-about-ghbtn" id="wbs-about-repo" href="https://github.com/babygoton/WorkDaddy" target="_blank" rel="noopener" aria-label="在 GitHub 上给 WorkDaddy 点 Star" title="在 GitHub 上给 WorkDaddy 点 Star">' +
+            '<a class="wbs-about-ghbtn" id="wbs-about-repo" href="https://github.com/miantanjun/WorkDaddy-" target="_blank" rel="noopener" aria-label="在 GitHub 上给 WorkBuddy 助手 点 Star" title="在 GitHub 上给 WorkBuddy 助手 点 Star">' +
               '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M12 .3a12 12 0 0 0-3.79 23.39c.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.74.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.66-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.81 5.62-5.49 5.92.43.37.82 1.1.82 2.22v3.29c0 .32.22.7.83.58A12 12 0 0 0 12 .3z"/></svg>' +
             '</a>' +
           '</div>' +

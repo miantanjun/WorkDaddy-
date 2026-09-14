@@ -1,6 +1,26 @@
 # 本机数据与构建产物，不入库
 _backup/
 scripts/runtime/
-unins000.dat
-卸载 WorkDaddy.dat
+release/windows/
+release/.cache/
+
+# Inno 卸载器状态（含本机安装路径，机器专属，不能跨机同步）
+unins000.*
+卸载 WorkDaddy.*
+卸载 WorkBuddy 助手.*
+
+# 日志
 *.log
+daemon.log
+
+# Node
+node_modules/
+npm-debug.log*
+
+# macOS
+.DS_Store
+
+# 本地运行数据与维护记录（不入库）
+.workbuddy/
+.workbuddy-ai/
+/.private-docs/

@@ -28,7 +28,7 @@ function sharedDataDir() {
 
 const PROFILES = {
   'workbuddy-cn': {
-    id: 'workbuddy-cn', name: 'WorkBuddy', appName: 'WorkDaddy', region: 'cn', kind: 'workbuddy', mode: 'agents',
+    id: 'workbuddy-cn', name: 'WorkBuddy', appName: 'WorkBuddy 助手', region: 'cn', kind: 'workbuddy', mode: 'agents',
     appPath: appPath('WorkBuddy'),
     dataRoot: path.join(home, '.workbuddy'),
     authFile: path.join(extensionAuth, 'workbuddy-desktop.info'),
@@ -40,7 +40,7 @@ const PROFILES = {
     targetHints: ['workbuddy'],
   },
   'workbuddy-ai': {
-    id: 'workbuddy-ai', name: 'WorkBuddy AI', appName: 'WorkDaddy AI', region: 'intl', kind: 'workbuddy', mode: 'agents',
+    id: 'workbuddy-ai', name: 'WorkBuddy AI', appName: 'WorkBuddy 助手 AI', region: 'intl', kind: 'workbuddy', mode: 'agents',
     // Windows 安装目录无空格：%LOCALAPPDATA%\Programs\WorkBuddyAI\WorkBuddyAI.exe（PR#8 实机确认）
     appPath: appPath('WorkBuddy AI', 'WorkBuddyAI.exe', 'WorkBuddyAI'),
     dataRoot: path.join(home, '.workbuddy-ai'),

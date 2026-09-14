@@ -23,7 +23,7 @@
   #error StartDescription must be supplied by build-win-installer.ps1
 #endif
 
-#define AppUrl "https://github.com/babygoton/WorkDaddy"
+#define AppUrl "https://github.com/miantanjun/WorkDaddy-"
 
 [Setup]
 AppId={#AppGuid}
@@ -33,7 +33,7 @@ AppVerName={#ProductName} {#AppVersion}
 AppPublisher={#ProductName} 团队
 AppPublisherURL={#AppUrl}
 AppSupportURL={#AppUrl}
-AppUpdatesURL=https://github.com/babygoton/WorkDaddy/releases
+AppUpdatesURL=https://github.com/miantanjun/WorkDaddy-/releases
 DefaultDirName={localappdata}\Programs\{#ProductName}
 DefaultGroupName={#ProductName}
 DisableProgramGroupPage=yes
@@ -66,6 +66,11 @@ Source: "{#StageRoot}\scripts\runtime\node\*"; DestDir: "{app}\scripts\runtime\n
 [InstallDelete]
 Type: files; Name: "{app}\scripts\WorkDaddy.ico"
 Type: files; Name: "{app}\scripts\WorkDaddy-*.ico"
+; 显示名从 WorkDaddy 改为 WorkBuddy 助手后的过渡清理：旧卸载程序/旧快捷方式/旧开始菜单目录
+Type: files; Name: "{app}\卸载 WorkDaddy.exe"
+Type: files; Name: "{app}\卸载 WorkDaddy.dat"
+Type: files; Name: "{userdesktop}\WorkDaddy.lnk"
+Type: filesandordirs; Name: "{userprograms}\WorkDaddy"
 
 [Icons]
 Name: "{group}\{#ProductName}"; Filename: "{app}\WorkDaddyLauncher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\scripts\{#PackageName}-{#AppVersion}.ico"

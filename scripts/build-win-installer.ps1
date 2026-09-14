@@ -17,9 +17,9 @@ if (-not $versionMatch.Success) { throw 'daemon.js does not contain DAEMON_VERSI
 $version = if ([string]::IsNullOrWhiteSpace($Version)) { $versionMatch.Groups[1].Value } else { $Version.Trim() }
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid daemon version: $version" }
 
-$productName = if ($Profile -eq 'workbuddy-ai') { 'WorkDaddy AI' } else { 'WorkDaddy' }
+$productName = if ($Profile -eq 'workbuddy-ai') { 'WorkBuddy 助手 AI' } else { 'WorkBuddy 助手' }
 $packageName = if ($Profile -eq 'workbuddy-ai') { 'WorkDaddy-AI' } else { 'WorkDaddy' }
-$startDescription = if ($Profile -eq 'workbuddy-ai') { '立即打开 WorkDaddy AI' } else { '立即打开 WorkDaddy' }
+$startDescription = if ($Profile -eq 'workbuddy-ai') { '立即打开 WorkBuddy 助手 AI' } else { '立即打开 WorkBuddy 助手' }
 $appGuid = if ($Profile -eq 'workbuddy-ai') {
   '{{D1A8A90C-1F55-4E56-8BB2-7F12A39B9D12}'
 } else {

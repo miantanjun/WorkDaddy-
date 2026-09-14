@@ -377,13 +377,15 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 const DAEMON_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 直接对齐发布版本号，否则 About 页会显示 1.2.42、且更新检查会误判已是最新。
-const DAEMON_BUILD_ID = 'release-1.2.2-20260914-streaming-session-transfer-local-quitfix-autocopy-progress-delacct-idem-ws-hardlink';
+const DAEMON_BUILD_ID = 'release-1.2.2-20260914-streaming-session-transfer-local-quitfix-autocopy-progress-delacct-idem-ws-hardlink-selfhost';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
 const IS_WIN = process.platform === 'win32'; // Windows 移植：平台分支开关（macOS 行为保持不变）
 // Windows 安装目录（install.ps1 铺、launcher 用、更新替换目标），对应 macOS 的 /Applications/WorkDaddy.app
 const WORKDADDY_INSTALL_NAME = PROFILE.id === 'workbuddy-ai' ? 'WorkDaddy AI' : 'WorkDaddy';
+// 仅用于界面展示的品牌名。与 WORKDADDY_INSTALL_NAME（macOS .app 包名 / 更新路径，不可改）严格分离。
+const WORKDADDY_DISPLAY_NAME = PROFILE.id === 'workbuddy-ai' ? 'WorkBuddy 助手 AI' : 'WorkBuddy 助手';
 const WORKDADDY_DIR_WIN = process.env.WBSWITCH_APP_DIR || path.resolve(__dirname, '..');
 const UI_PORT_BASE = parseInt(process.env.WBSWITCH_PORT || String(profileUiPortCandidates(PROFILE.id)[0]), 10);
 const ALLOW_UI_PORT_FALLBACK = !process.env.WBSWITCH_PORT;
@@ -568,7 +570,7 @@ async function selectCdpPort(logFn = log) {
  * 面板红点提示 → 用户点更新 → daemon 下载 dmg + SHA-256 校验 → 挂载拷贝出新 app →
  * 写 apply-update.sh 由独立脚本接管替换（运行中的 app 无法自删，必须由外部脚本完成）→ relaunch。
  */
-const UPDATE_REPO = process.env.WBSWITCH_UPDATE_REPO || 'babygoton/WorkDaddy';
+const UPDATE_REPO = process.env.WBSWITCH_UPDATE_REPO || 'miantanjun/WorkDaddy-';
 const UPDATE_API = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
 const UPDATE_CHECK_INTERVAL = 6 * 3600 * 1000; // 每 6 小时检查一次（GitHub 未认证限流 60 次/h）
 const UPDATE_REQ_TIMEOUT = 10000; // 网络超时，超时静默失败不阻塞面板
@@ -9278,15 +9280,15 @@ function handleApi(req, res) {
     updateDebug('about-version', { daemonVersion: DAEMON_VERSION, packageVersion: build.packageVersion || null, appVersion, shownVersion: DAEMON_VERSION });
     return json(res, 200, {
       ok: true,
-      name: WORKDADDY_INSTALL_NAME,
+      name: WORKDADDY_DISPLAY_NAME,
       tagline: PROFILE.name + ' 的多账号 · 主题 · 增强工具集',
       version: DAEMON_VERSION,
       appVersion: appVersion,
       license: 'AGPL-3.0',
-      repository: 'https://github.com/babygoton/WorkDaddy',
+      repository: 'https://github.com/miantanjun/WorkDaddy-',
       principle: '本机回环 CDP 注入 · 不改官方安装包',
       platform: IS_WIN ? 'Windows 10+（x64）' : 'macOS 11+',
-      author: WORKDADDY_INSTALL_NAME,
+      author: WORKDADDY_DISPLAY_NAME,
       nodeVersion: process.version,
       ...platform,
       ...build,
@@ -9774,9 +9776,9 @@ function startServer() {
       const c = currentAccount();
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(
-        '<!doctype html><html lang="zh"><meta charset="utf-8"><title>' + WORKDADDY_INSTALL_NAME + '</title>' +
+        '<!doctype html><html lang="zh"><meta charset="utf-8"><title>' + WORKDADDY_DISPLAY_NAME + '</title>' +
         '<body style="font-family:-apple-system,sans-serif;background:#0f1115;color:#e6e6e8;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">' +
-        '<div style="text-align:center"><h1 style="margin:0 0 8px">' + WORKDADDY_INSTALL_NAME + ' v' + DAEMON_VERSION + '</h1>' +
+        '<div style="text-align:center"><h1 style="margin:0 0 8px">' + WORKDADDY_DISPLAY_NAME + ' v' + DAEMON_VERSION + '</h1>' +
         '<p style="color:#9a9aa0;margin:0">面板入口：' + PROFILE.name + ' 右下角机器人按钮</p>' +
         '<p style="color:#555;font-size:12px;margin-top:16px">守护进程运行中 · CDP ' + (cdp.connected ? '已连接' : '未连接') +
         (c && c.nickname ? ' · 当前账号：' + String(c.nickname).replace(/</g, '&lt;') : '') + '</p></div></body></html>'
