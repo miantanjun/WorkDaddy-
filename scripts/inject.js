@@ -7544,7 +7544,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           guardTimer = null;
           if (checkBtn) { checkBtn.disabled = false; checkBtn.textContent = '检查更新'; }
           if (status) { status.textContent = '检查超时（网络较慢），可稍后重试'; status.className = 'wbs-about-ver-status is-error'; }
-        }, 25000);
+        }, 20000);
       }
       return api('/api/update-check?force=1').then(function (d) {
         clearGuard();

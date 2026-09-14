@@ -380,7 +380,7 @@ const DAEMON_VERSION = '1.3.0';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-upstream-1.2.2-dualversion-r5';
+const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-dualversion-final2';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -580,8 +580,8 @@ const UPDATE_API = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`
 const UPSTREAM_REPO = process.env.WBSWITCH_UPSTREAM_REPO || 'babygoton/WorkDaddy';
 const UPSTREAM_API = `https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest`;
 const UPDATE_CHECK_INTERVAL = 6 * 3600 * 1000; // 每 6 小时检查一次（GitHub 未认证限流 60 次/h）
-const UPDATE_REQ_TIMEOUT = 10000; // 网络超时，超时静默失败不阻塞面板
-const UPDATE_FALLBACK_TIMEOUT = 5000; // 网页兜底通道的超时（更短，避免「检查更新」按钮卡太久）
+const UPDATE_REQ_TIMEOUT = 8000; // 网络超时，超时静默失败不阻塞面板
+const UPDATE_FALLBACK_TIMEOUT = 4000; // 网页兜底通道的超时（更短，避免「检查更新」按钮卡太久）
 const UPDATE_DIR = path.join(DATA_DIR, 'update'); // 下载/解包目录
 const UPDATE_CHECK_CACHE = path.join(DATA_DIR, 'update-check.json');
 const UPDATE_UPSTREAM_CACHE = path.join(DATA_DIR, 'update-upstream.json'); // 上游版本对照缓存（离线兜底）
@@ -718,21 +718,42 @@ function semverCompare(a, b) {
   return 0;
 }
 
+// 硬超时：Node 的 req.setTimeout 在 TLS 握手/连接受阻时不能保证按时触发（实测 10s 设置要 20s 才报错），
+// 这里用独立定时器到点强制 destroy + reject，保证「检查更新」不会长时间挂着。返回取消函数。
+function hardTimeout(req, ms, reject) {
+  let done = false;
+  const timer = setTimeout(() => {
+    if (done) return;
+    done = true;
+    try { req.destroy(); } catch (_) {}
+    reject(new Error('request timeout'));
+  }, ms);
+  return () => { if (!done) { done = true; clearTimeout(timer); } };
+}
+
 // 带超时的 HTTPS GET（返回 statusCode + body + headers）
 function httpsGet(url, timeoutMs, extraHeaders) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https:') ? require('https') : require('http');
+    const limit = timeoutMs || UPDATE_REQ_TIMEOUT;
     const headers = Object.assign({
       'User-Agent': 'WorkDaddy/' + DAEMON_VERSION,
       Accept: 'application/vnd.github+json',
     }, extraHeaders || {});
+    let cancel = () => {};
     const req = mod.get(url, { headers }, (res) => {
+      cancel();                                   // 连接阶段结束
+      cancel = hardTimeout(req, limit, reject);    // 读 body 阶段重新计时
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
-      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8'), headers: res.headers }));
+      res.on('end', () => {
+        cancel();
+        resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8'), headers: res.headers });
+      });
     });
-    req.on('error', reject);
-    req.setTimeout(timeoutMs || UPDATE_REQ_TIMEOUT, () => { req.destroy(new Error('request timeout')); });
+    cancel = hardTimeout(req, limit, reject);
+    req.on('error', (e) => { cancel(); reject(e); });
+    req.setTimeout(limit, () => { req.destroy(new Error('request timeout')); });
   });
 }
 
@@ -752,9 +773,11 @@ function githubAuthHeaders() {
 // 这条路径不消耗 GitHub API 配额，是 API 被限流时的兜底检测手段（拿不到资产名与 SHA-256）。
 function latestTagViaHtml(repo) {
   return new Promise((resolve, reject) => {
+    let cancel = () => {};
     const req = require('https').get('https://github.com/' + repo + '/releases/latest', {
       headers: Object.assign({ 'User-Agent': 'WorkDaddy/' + DAEMON_VERSION, Accept: 'text/html' }, githubAuthHeaders()),
     }, (res) => {
+      cancel();
       res.resume();
       const loc = String(res.headers.location || '');
       const m = loc.match(/\/releases\/tag\/(.+)$/);
@@ -764,7 +787,8 @@ function latestTagViaHtml(repo) {
       if (res.statusCode === 404) return reject(new Error(repo + ' 无 Release 或不可见（404）'));
       return reject(new Error(repo + ' 网页检测未取到版本号（HTTP ' + res.statusCode + '）'));
     });
-    req.on('error', reject);
+    cancel = hardTimeout(req, UPDATE_FALLBACK_TIMEOUT, reject);
+    req.on('error', (e) => { cancel(); reject(e); });
     req.setTimeout(UPDATE_FALLBACK_TIMEOUT, () => { req.destroy(new Error('request timeout')); });
   });
 }
