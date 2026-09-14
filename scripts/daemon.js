@@ -218,6 +218,7 @@ const { exportTasks, previewImport, importTasks, readTransferBody } = require('.
 const { createAutomationNotifier } = require('./toast-options.js');
 const { runCompletionReport, probeAccountCompletion } = require('./completion-report.js');
 const { createPrimaryAccountStore } = require('./primary-account.js');
+const { scanSpace, spaceSlug, SPACE_SCAN_VERSION } = require('./space-scan.js');
 const PROFILE = getProfile();
 const DATA_DIR = defaultDataDir();
 const thirdPartyModels = createThirdPartyImport({ targetFile: workbuddyModelsFile(), dataDir: DATA_DIR });
@@ -387,7 +388,7 @@ const DAEMON_VERSION = '1.3.0';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-sync-pause-resume';
+const DAEMON_BUILD_ID = 'selfhost-1.3.0-20260914-space-scan-slug-fix';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -5542,6 +5543,161 @@ function publicAutoCopyJob(job) {
   };
 }
 
+// ===== 空间占用扫描（Phase 3）=====
+// 与 autoCopyJobs 分开：扫描是只读的 IO 密集型任务，和复制任务抢占没有意义，
+// 也没必要串在一起排队 —— 因此单独一个「同一时刻只跑一个」的槽位。
+const SPACE_SCAN_CACHE = path.join(DATA_DIR, 'space-scan.json');
+const spaceScanJobs = new Map();
+let activeSpaceScanJob = null;
+// 最近一次启动过的任务（不论成败）。扫描收尾时 activeSpaceScanJob 会被置空，若 status 只认
+// activeSpaceScanJob，前端轮询就**永远看不到 done / cancelled** —— 轮询间隔恰好跨过收尾那一刻时
+// 只能拿到 null，UI 会一直停在「扫描中」。所以不带 id 的 status 用「在跑的 → 最近一次的」兜底。
+let lastSpaceScanJob = null;
+
+function publicSpaceScanJob(job) {
+  if (!job) return null;
+  return {
+    id: job.id,
+    status: job.status,
+    startedAt: job.startedAt,
+    updatedAt: job.updatedAt,
+    finishedAt: job.finishedAt || null,
+    elapsedMs: job.startedAt ? ((job.finishedAt || Date.now()) - job.startedAt) : 0,
+    processed: job.processed || 0,
+    files: job.files || 0,
+    bytes: job.bytes || 0,
+    rawBytes: job.rawBytes || 0,
+    dirs: job.dirs || 0,
+    dedupedFiles: job.dedupedFiles || 0,
+    dedupedBytes: job.dedupedBytes || 0,
+    unreadable: job.unreadable || 0,
+    current: job.current || '',
+    cancelRequested: !!job.cancelRequested,
+    error: job.error || null,
+    hasResult: !!job.result,
+  };
+}
+
+async function buildSpaceScanResolvers() {
+  const rows = await sqliteQuery('SELECT id, user_id, cwd FROM sessions;').catch(() => []);
+  const byId = new Map();
+  const cwdBySlug = new Map();
+  for (const row of (rows || [])) {
+    const id = String((row && row.id) || '');
+    if (!id) continue;
+    const uid = String((row && row.user_id) || '');
+    const cwd = row && row.cwd ? String(row.cwd) : '';
+    // 同一个会话 id 在两处出现时保留有归属的那条（deleted_at 的行 uid 也可能为空）
+    const prev = byId.get(id);
+    if (!prev || (!prev.uid && uid)) byId.set(id, { uid, cwd: cwd || (prev && prev.cwd) || '' });
+    if (cwd) cwdBySlug.set(spaceSlug(cwd), cwd);
+  }
+  const uids = listAccounts(DATA_DIR).map((a) => String(a.uid || '')).filter(Boolean);
+  return {
+    resolveSession: (key) => byId.get(String(key)) || null,
+    // storage/ 下是 `user-<uid>` / `user-<uid>-<suffix>`；memory/ 下是 `<uid>`（扩展名与
+    // `_` 之后的内容已在扫描器里剥掉）。两种形式都归一到 uid。
+    resolveAccountName: (name) => {
+      const base = String(name || '').replace(/^user-/, '');
+      if (!base) return null;
+      for (const uid of uids) {
+        if (base === uid || base.startsWith(uid)) return uid;
+      }
+      return null;
+    },
+    resolveSpaceSlug: (slug) => cwdBySlug.get(String(slug)) || null,
+  };
+}
+
+/** 读缓存：面板打开时先用旧结果秒出，再决定要不要重扫。 */
+function readSpaceScanCache() {
+  try {
+    if (!fs.existsSync(SPACE_SCAN_CACHE)) return null;
+    const raw = JSON.parse(fs.readFileSync(SPACE_SCAN_CACHE, 'utf8'));
+    if (!raw || raw.version !== SPACE_SCAN_VERSION) return null;
+    return raw;
+  } catch (error) {
+    log('[space-scan] 读取缓存失败: ' + error.message);
+    return null;
+  }
+}
+
+function startSpaceScanJob() {
+  if (activeSpaceScanJob && (activeSpaceScanJob.status === 'running')) return activeSpaceScanJob;
+  const job = {
+    id: crypto.randomUUID(),
+    status: 'running',
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    finishedAt: null,
+    processed: 0, files: 0, bytes: 0, rawBytes: 0, dirs: 0,
+    dedupedFiles: 0, dedupedBytes: 0, unreadable: 0,
+    current: '',
+    cancelRequested: false,
+    error: null,
+    result: null,
+  };
+  spaceScanJobs.set(job.id, job);
+  activeSpaceScanJob = job;
+  lastSpaceScanJob = job;
+  const wbHome = PROFILE.dataRoot;
+
+  (async () => {
+    try {
+      const resolvers = await buildSpaceScanResolvers();
+      const result = await scanSpace(wbHome, Object.assign({}, resolvers, {
+        progressEvery: 100,
+        yieldEvery: 100,
+        shouldCancel: () => job.cancelRequested === true,
+        onProgress: (info) => {
+          job.processed = info.processed;
+          job.files = info.files;
+          job.bytes = info.bytes;
+          job.rawBytes = info.rawBytes;
+          job.dirs = info.dirs;
+          job.dedupedFiles = info.dedupedFiles;
+          job.dedupedBytes = info.dedupedBytes;
+          job.unreadable = info.unreadable;
+          job.current = info.current;
+          job.updatedAt = Date.now();
+        },
+      }));
+      // 昵称在这里补：扫描引擎只认 uid，不碰账号列表。
+      const nicknames = new Map(listAccounts(DATA_DIR).map((a) => [String(a.uid || ''), a.nickname || '']));
+      result.accounts = (result.accounts || []).map((a) => Object.assign({}, a, { nickname: nicknames.get(a.uid) || '' }));
+      job.result = result;
+      job.status = result.cancelled ? 'cancelled' : 'done';
+      job.finishedAt = Date.now();
+      job.updatedAt = job.finishedAt;
+      if (job.status === 'done') {
+        try {
+          await replaceFileWithRetry(SPACE_SCAN_CACHE, JSON.stringify(result));
+        } catch (error) {
+          log('[space-scan] 写入缓存失败: ' + error.message);
+        }
+      }
+      log(`[space-scan] ${job.status} 文件=${result.totals.files} 去重前=${result.totals.rawBytes} 去重后=${result.totals.bytes} 账号=${result.accounts.length} 空间=${result.spaces.length} 用时=${result.elapsedMs}ms`);
+    } catch (error) {
+      job.status = 'error';
+      job.error = (error && error.message) || String(error);
+      job.finishedAt = Date.now();
+      job.updatedAt = job.finishedAt;
+      log('[space-scan] 失败: ' + job.error);
+    } finally {
+      if (activeSpaceScanJob === job) activeSpaceScanJob = null;
+      const cleanup = setTimeout(() => {
+        spaceScanJobs.delete(job.id);
+        // 兜底引用是会话级状态，任务被回收后不能继续挂在上面（否则 status 会一直报一个
+        // 已经不在 Map 里的旧任务，前端误以为还在收尾）。
+        if (lastSpaceScanJob === job) lastSpaceScanJob = null;
+      }, 30 * 60 * 1000);
+      if (cleanup.unref) cleanup.unref();
+    }
+  })();
+
+  return job;
+}
+
 const MAX_SESSION_ID_LENGTH = 200;
 
 function isValidSessionId(id) {
@@ -9560,8 +9716,69 @@ function handleApi(req, res) {
       }
     });
   }
-  // 立即同步：POST /api/sessions/sync-now { targetUid }
-  //   不切号、不刷新页面 —— 以「当前账号」为源，把已开启自动复制的会话同步到 targetUid。
+  // ===== 空间占用扫描（Phase 3）=====
+  // 开始扫描：POST /api/space/scan/start
+  //   同一时刻只跑一个；已有在跑的直接复用它（防连点）。全量扫描可能超过 2 分钟，
+  //   所以这里**立即返回**，进度靠 /api/space/scan/status 轮询。
+  if (req.method === 'POST' && p === '/api/space/scan/start') {
+    try {
+      const reused = !!(activeSpaceScanJob && activeSpaceScanJob.status === 'running');
+      const job = startSpaceScanJob();
+      return json(res, 200, { ok: true, reused, job: publicSpaceScanJob(job) });
+    } catch (e) {
+      return json(res, 500, { ok: false, error: e.message });
+    }
+  }
+  // 扫描进度：GET /api/space/scan/status?id=<jobId>
+  //   不带 id 时返回「正在跑的那个」；已经跑完 / 被取消的返回**最近一次**的任务，
+  //   这样前端轮询一定能看到 running → done/cancelled 的收尾（否则会永远停在 running）。
+  //   从未扫描过才返回 null，前端据此判定空闲。
+  if (req.method === 'GET' && p === '/api/space/scan/status') {
+    const wanted = String(url.searchParams.get('id') || '').trim();
+    const job = wanted ? spaceScanJobs.get(wanted) : (activeSpaceScanJob || lastSpaceScanJob);
+    const cache = readSpaceScanCache();
+    return json(res, 200, {
+      ok: true,
+      job: publicSpaceScanJob(job || null),
+      cached: cache ? { finishedAt: cache.finishedAt || null, elapsedMs: cache.elapsedMs || 0 } : null,
+    });
+  }
+  // 中断扫描：POST /api/space/scan/cancel { jobId? }
+  //   只置标记，扫描器在下一个检查点（每 100 个条目）收尾并返回**部分结果**；
+  //   部分结果不写缓存（缓存只留完整的一次）。
+  if (req.method === 'POST' && p === '/api/space/scan/cancel') {
+    return readBody(req).then((body) => {
+      try {
+        const wanted = String((body && body.jobId) || '').trim();
+        const job = wanted ? spaceScanJobs.get(wanted) : activeSpaceScanJob;
+        if (!job) return json(res, 404, { ok: false, error: '没有正在进行的空间扫描' });
+        if (job.status === 'running') job.cancelRequested = true;
+        return json(res, 200, { ok: true, job: publicSpaceScanJob(job) });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: e.message });
+      }
+    });
+  }
+  // 扫描结果：GET /api/space/scan/result
+  //   优先返回内存里最近一次完整结果，否则回落到磁盘缓存 —— 面板打开时能秒出。
+  if (req.method === 'GET' && p === '/api/space/scan/result') {
+    let result = null;
+    if (activeSpaceScanJob && activeSpaceScanJob.result) result = activeSpaceScanJob.result;
+    if (!result) {
+      for (const job of spaceScanJobs.values()) {
+        if (job.result && job.status === 'done') { result = job.result; break; }
+      }
+    }
+    if (!result) result = readSpaceScanCache();
+    if (!result) return json(res, 200, { ok: true, result: null, stale: true });
+    return json(res, 200, {
+      ok: true,
+      result,
+      ageMs: result.finishedAt ? (Date.now() - result.finishedAt) : null,
+      busy: !!(activeSpaceScanJob && activeSpaceScanJob.status === 'running'),
+    });
+  }
+  // 立即同步：POST /api/sessions/sync-now { targetUid }  //   不切号、不刷新页面 —— 以「当前账号」为源，把已开启自动复制的会话同步到 targetUid。
   //   复用同一个任务队列（startAutoCopyJob），因此与切号触发的复制共享串行语义和进度接口。
   if (req.method === 'POST' && p === '/api/sessions/sync-now') {
     return readBody(req).then((body) => {

@@ -380,7 +380,17 @@ function waitSettled(jobs, ms) {
   } else {
     const live = probe.body && probe.body.buildId;
     console.log('  info  daemon buildId = ' + live);
-    ok(live === 'selfhost-1.3.0-20260914-sync-pause-resume', 'D0 daemon 已加载本阶段构建', live);
+    // 这条断言的目的是「别让测试跑在一个还没加载新代码的旧 daemon 上」，而不是钉死某个具体版本。
+    // 因此用**名单**：本阶段及其之后（含本阶段改动的）自建构建都算通过。每落地一个新阶段，
+    // 把新 buildId 追加进来即可，否则测试会在新阶段误报 D0 失败。
+    const KNOWN_BUILDS = [
+      'selfhost-1.3.0-20260914-sync-pause-resume',
+      'selfhost-1.3.0-20260914-cascade-delete',
+      'selfhost-1.3.0-20260914-space-scan-backend',
+      'selfhost-1.3.0-20260914-space-scan-nested-fix',
+      'selfhost-1.3.0-20260914-space-scan-slug-fix',
+    ];
+    ok(KNOWN_BUILDS.indexOf(live) >= 0, 'D0 daemon 已加载本阶段（或更晚）的构建', live);
 
     const a = await apiCall('GET', '/api/sessions/auto-copy/active');
     ok(a.status === 200 && a.body && a.body.ok === true, 'D1a active 接口 200/ok');
