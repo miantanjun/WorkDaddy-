@@ -198,3 +198,24 @@ jobs:
             release/windows/WorkDaddy-Setup-*.exe
             release/windows/WorkDaddy-AI-Setup-*.exe
           generate_release_notes: true
+
+      # ⚠️ action-gh-release 在更新**已存在**的 Release 时，实测出现过「资产换新了、正文却停在上一版」
+      # 的情况（2026-09-15 v1.3.0 第二次发版）。正文里的 SHA256 是内置更新器的**兜底**校验值
+      # （正常路径走 asset.digest，所以不影响更新，但兜底值不对是隐患）。这里用 API 再 PATCH 一次，
+      # 保证正文与本次产物必然一致。
+      - name: 校正 Release 说明（确保 SHA256 与本次产物一致）
+        if: success()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.ver.outputs.version) }}"
+          $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" `
+                   -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
+          $body = (Get-Content -Raw -LiteralPath release\notes-sha.txt) + "`n"
+          $payload = @{ body = $body } | ConvertTo-Json
+          Invoke-RestMethod -Method Patch -Uri "https://api.github.com/repos/${{ github.repository }}/releases/$($rel.id)" `
+            -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' } `
+            -ContentType 'application/json' -Body $payload | Out-Null
+          Write-Host "Release 正文已校正："
+          Write-Host $body
