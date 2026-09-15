@@ -831,39 +831,107 @@ function ensureAutoCopySession(dataDir, uid, sessionId, options) {
 // lineage. Older copy jobs could append a second session for the same account
 // when a mapping was stale. Preserve every physical row, but move duplicates
 // to their own lineage so the next all-session reconciliation can pair them.
+/**
+ * 登记体检：**只检测，绝不改结构**。
+ *
+ * 历史教训（2026-09-15）：这里原本会把「同一账号在同一 lineage 里出现两个成员」拆成一条**新 lineage**
+ * 并把 sessionIndex 改写指向新 lineage。后果是源账号里那份会话变成「只有自己一员的孤立 lineage」，
+ * 下次切号复制时目标账号看不到对应成员 → copySessionRecord 又新建一份副本 →
+ * 主账号里冒出第二份同名会话（28 个会话一次性全中）。
+ *
+ * 现在只做一件事：把「同 uid 多成员」记进 config.duplicates 供告警与清理；
+ * 真正的修复走「认领 + 合并血缘」（daemon.adoptExistingCopyTarget / mergeAutoCopyLineages）。
+ */
 function normalizeAutoCopyLineages(dataDir) {
   const meta = readMeta(dataDir);
   const config = ensureAutoCopyMeta(meta);
-  let changed = false;
+  const duplicates = [];
   for (const lineageId of Object.keys(config.sessions)) {
     const lineage = config.sessions[lineageId];
     if (!lineage || !Array.isArray(lineage.members)) continue;
     const seenUids = new Set();
-    const kept = [];
     for (const member of lineage.members) {
       const uid = String(member && member.uid || '').trim();
       const id = String(member && member.id || '').trim();
-      if (!uid || !id || !seenUids.has(uid)) {
-        if (uid) seenUids.add(uid);
-        kept.push(member);
-        continue;
-      }
-      const replacementId = crypto.randomUUID();
-      config.sessions[replacementId] = {
-        originLineageId: lineage.originLineageId || lineageId,
-        enabled: lineage.enabled !== false,
-        members: [{ uid, id }],
-        createdAt: Date.now(),
-      };
-      if (!config.sessionIndex[uid]) config.sessionIndex[uid] = {};
-      config.sessionIndex[uid][id] = replacementId;
-      changed = true;
+      if (!uid || !id) continue;
+      if (!seenUids.has(uid)) { seenUids.add(uid); continue; }
+      duplicates.push({ lineageId, uid, id });
     }
-    if (kept.length !== lineage.members.length) lineage.members = kept;
   }
-  if (changed) writeMeta(dataDir, meta);
-  return changed;
+  const prev = Array.isArray(config.duplicates) ? config.duplicates : [];
+  const same = prev.length === duplicates.length && prev.every((item, index) => item
+    && String(item.lineageId) === duplicates[index].lineageId
+    && String(item.uid) === duplicates[index].uid
+    && String(item.id) === duplicates[index].id);
+  if (same) return false;
+  config.duplicates = duplicates;
+  writeMeta(dataDir, meta);
+  return duplicates.length > 0;
 }
+
+/**
+ * 把 fromLineage 整个并进 intoLineage —— 用于修复「同一条逻辑会话被拆成两条 lineage」。
+ *
+ * 规则（保守优先，宁可少动）：
+ *   · members：into 里已经有该账号的成员 → 跳过（保留 into 那份）；否则搬过去
+ *   · sessionIndex：所有**指向 from** 的条目改指向 into（否则 index 悬空 → 下次复制又新建）
+ *   · copies 登记：from 的登记搬到 into；into 已有同账号登记则保留 into 的
+ *   · 最后删掉 from
+ */
+function mergeAutoCopyLineages(dataDir, fromLineageId, intoLineageId) {
+  const meta = readMeta(dataDir);
+  const config = ensureAutoCopyMeta(meta);
+  const from = String(fromLineageId || '').trim();
+  const into = String(intoLineageId || '').trim();
+  if (!from || !into || from === into) return { ok: false, reason: 'invalid' };
+  const fromLineage = config.sessions[from];
+  const intoLineage = config.sessions[into];
+  if (!fromLineage || !intoLineage) return { ok: false, reason: 'missing' };
+
+  const intoUids = new Set((intoLineage.members || []).map((m) => String(m && m.uid || '')));
+  let movedMembers = 0;
+  let skippedMembers = 0;
+  for (const member of fromLineage.members || []) {
+    const uid = String(member && member.uid || '');
+    const id = String(member && member.id || '');
+    if (!uid || !id) continue;
+    if (intoUids.has(uid)) { skippedMembers += 1; continue; }
+    intoLineage.members = intoLineage.members || [];
+    intoLineage.members.push({ uid, id });
+    intoUids.add(uid);
+    movedMembers += 1;
+  }
+
+  let movedIndex = 0;
+  for (const uid of Object.keys(config.sessionIndex)) {
+    const map = config.sessionIndex[uid];
+    if (!map || typeof map !== 'object') continue;
+    for (const sessionId of Object.keys(map)) {
+      if (map[sessionId] !== from) continue;
+      map[sessionId] = into;
+      movedIndex += 1;
+    }
+  }
+
+  let movedCopies = 0;
+  for (const key of Object.keys(config.copies || {})) {
+    let lineageKey;
+    let targetUid;
+    try { [lineageKey, targetUid] = JSON.parse(key); } catch (_) { continue; }
+    if (lineageKey !== from) continue;
+    const intoKey = JSON.stringify([into, targetUid]);
+    if (!config.copies[intoKey]) {
+      config.copies[intoKey] = config.copies[key];
+      movedCopies += 1;
+    }
+    delete config.copies[key];
+  }
+
+  delete config.sessions[from];
+  writeMeta(dataDir, meta);
+  return { ok: true, movedMembers, skippedMembers, movedIndex, movedCopies };
+}
+
 
 function addAutoCopySessionMember(dataDir, lineageId, uid, sessionId) {
   const meta = readMeta(dataDir);
@@ -1766,6 +1834,7 @@ module.exports = {
   ensureAutoCopySessions,
   ensureAutoCopySession,
   normalizeAutoCopyLineages,
+  mergeAutoCopyLineages,
   addAutoCopySessionMember,
   removeAutoCopySessionMember,
   moveAutoCopySession,

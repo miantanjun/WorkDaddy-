@@ -389,6 +389,7 @@ function waitSettled(jobs, ms) {
       // 2026-09-14 起改回上游命名约定 release-x.y.z-…（打包脚本会校验这个格式）；
       // 旧的 selfhost-1.3.0-… 系列已全部并入 release-1.3.0-20260914-failover-continue
       'release-1.3.0-20260914-failover-continue',
+      'release-1.3.0-20260915-dedupe-copy',
     ];
     ok(KNOWN_BUILDS.indexOf(live) >= 0, 'D0 daemon 已加载本阶段（或更晚）的构建', live);
 
@@ -416,8 +417,13 @@ function waitSettled(jobs, ms) {
       // 也就是会**真的开始复制**。测试里绝不能这么打 —— 必须显式给出 sourceUid 才走校验分支。
       const s3 = await apiCall('POST', '/api/sessions/sync-now', { targetUid: cur, sourceUid: cur });
       ok(s3.status === 400, 'D6 sync-now 源=目标 → 400', s3.status);
-      const s4 = await apiCall('POST', '/api/sessions/sync-now', { targetUid: cur, sourceUid: '__wd_missing_uid__' });
-      ok(s4.status === 400, 'D7 sync-now 显式源不存在 → 400', s4.status);
+    const s4 = await apiCall('POST', '/api/sessions/sync-now', { targetUid: cur, sourceUid: '__wd_missing_uid__' });
+    ok(s4.status === 400, 'D7 sync-now 显式源不存在 → 400', s4.status);
+    // purge-copy：只删这一份副本的原语（重复副本清理用）。只打校验分支，绝不删真实会话。
+    const p1 = await apiCall('POST', '/api/sessions/purge-copy', {});
+    ok(p1.status === 400, 'D8 purge-copy 缺 id → 400', p1.status);
+    const p2 = await apiCall('POST', '/api/sessions/purge-copy', { id: '__wd_missing_session__' });
+    ok(p2.status === 404, 'D9 purge-copy 不存在的会话 → 404（不会误删）', p2.status);
     } else {
       console.log('  skip  D6/D7 取不到当前账号 uid');
     }

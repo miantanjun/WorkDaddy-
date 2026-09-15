@@ -115,9 +115,11 @@ const {
   ensureAutoCopySessions,
   ensureAutoCopySession,
   normalizeAutoCopyLineages,
+  mergeAutoCopyLineages,
   addAutoCopySessionMember,
   moveAutoCopySession,
   removeAutoCopySession,
+  removeAutoCopySessionMember,
   removeAutoCopyAccount,
   collectLineageMembersForDelete,
   resolveSessionDeletePlan,
@@ -389,7 +391,7 @@ const DAEMON_VERSION = '1.3.0';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.0-20260914-failover-continue';
+const DAEMON_BUILD_ID = 'release-1.3.0-20260915-dedupe-copy';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -5583,35 +5585,65 @@ async function importSessionArchives(payload, targetUid, staged = false) {
 }
 
 /**
- * 登记丢失时的兜底认领。
+ * 复制前的「同源已有副本」认领 —— 三道防线里最后也是最关键的一道。
  *
- * 幂等判定原本只看 meta 里的两处登记（copies 映射 + lineage 成员），它们都是「uid 维度」的
- * 元数据；一旦被外部原因破坏（例如删除账号备份时被清、meta 被重建），代码就会把「目标账号
- * 明明已经有这个会话」误判成「没有副本」，于是新建一份 —— 这正是重复复制的来源。
+ * 幂等判定原本只看 meta 两处登记（copies 映射 + lineage 成员），它们都是「uid 维度」的元数据；
+ * 一旦登记被破坏（账号备份被删、meta 被重建、**或者 lineage 被拆分**），代码就会把「目标账号
+ * 明明已经有这个会话」误判成「没有副本」→ 新建一份 = 重复复制。
  *
- * 这里提供第三条、不依赖 meta 的依据：insertCopiedSession 会把源会话的 created_at（13 位
- * 毫秒）原样复制给副本，副本的副本也如此。因此「同一 uid + 同 created_at + 尚未被任何
- * lineage 认领」是可靠的同源判据。多个候选取 updated_at 最早的那个（最接近原始那份，避免
- * 认领到后来产生的重复）。
+ * 这里用第三条、不依赖 meta 的依据：insertCopiedSession 会把源会话的 created_at（13 位毫秒）
+ * 原样复制给副本，副本的副本也如此 → 「同一 uid + 同 created_at」是可靠的同源判据。
  *
- * 正常路径（登记完好）走不到这里；这里只在两处登记都查不到时才生效，属于自愈防线。
+ * 两种情况分别处理：
+ *   ① 同源会话**未被任何 lineage 登记** → 直接认领（把它作为目标账号的副本）
+ *   ② 同源会话**已登记、但登记在另一条 lineage 上** → 说明这条逻辑会话被拆成了两条血缘
+ *      （2026-09-15 那次重复复制的直接成因）：把「当前这条」**并进那条已存在的血缘**，
+ *      然后复用那条里的副本 —— 绝不新建第二份。
+ *
+ * 返回 { targetId, lineageId }（lineageId 是合并后真正生效的那条）或 null。
  */
-async function adoptOrphanAutoCopyTarget(src, targetUid) {
+async function adoptExistingCopyTarget(src, targetUid, currentLineageId) {
   const created = Number(src && src.created_at || 0);
   const uid = String(targetUid || '').trim();
   if (!created || !uid) return null;
   const rows = await sqliteQuery(
-    'SELECT id FROM sessions WHERE user_id = ? AND created_at = ? AND deleted_at IS NULL ORDER BY updated_at LIMIT 4;',
+    'SELECT id FROM sessions WHERE user_id = ? AND created_at = ? AND deleted_at IS NULL ORDER BY updated_at LIMIT 6;',
     [uid, created]
   );
   if (!rows.length) return null;
-  const claimed = new Set(Object.keys(getAutoCopyRules(DATA_DIR, uid).allLineages || {}));
   const sourceId = String(src && src.id || '');
+  const rules = getAutoCopyRules(DATA_DIR, uid);
+  const claimed = new Set(Object.keys(rules.allLineages || {}));
+
+  // ① 未登记的同源会话：直接认领（取 updated_at 最早的那个，最接近原始那份）
   const orphans = rows
     .map((row) => String(row.id || ''))
     .filter((id) => id && id !== sourceId && !claimed.has(id));
-  if (!orphans.length) return null;
-  return orphans[0];
+  if (orphans.length) {
+    return { targetId: orphans[0], lineageId: currentLineageId || null, adopted: 'orphan' };
+  }
+
+  // ② 已登记在**另一条** lineage 上：合并血缘后复用它
+  const current = String(currentLineageId || '').trim();
+  for (const row of rows) {
+    const targetId = String(row.id || '');
+    if (!targetId || targetId === sourceId) continue;
+    const otherLineage = String(rules.allLineages[targetId] || '').trim();
+    if (!otherLineage || otherLineage === current) continue;
+    let effectiveLineage = otherLineage;
+    if (current) {
+      const merged = mergeAutoCopyLineages(DATA_DIR, current, otherLineage);
+      if (merged && merged.ok) {
+        log('[sessions-auto-copy] 血缘合并：' + JSON.stringify({ from: current.slice(0, 8), into: otherLineage.slice(0, 8), ...merged }));
+      } else {
+        // 合并不成（比如当前 lineage 已不存在）也要复用那条副本，别再新建
+        log('[sessions-auto-copy] 血缘合并失败（' + JSON.stringify(merged) + '），仍复用已有副本 ' + targetId.slice(0, 8));
+      }
+      effectiveLineage = otherLineage;
+    }
+    return { targetId, lineageId: effectiveLineage, adopted: 'merge-lineage' };
+  }
+  return null;
 }
 
 async function copySessionRecord(src, targetUid, options = {}) {
@@ -5689,20 +5721,22 @@ const files = await copySessionFiles(wbHome, src.id, canonicalId, ownerIds, { sk
     }
   }
 
-  // 兜底：两处登记都查不到时，先看目标账号里是否已存在同源会话（见 adoptOrphanAutoCopyTarget）。
-  // 命中就认领它，而不是再造一份重复会话 —— 修的是「登记被外部清掉后重新复制」这一类问题。
-  const adoptedId = await adoptOrphanAutoCopyTarget(src, targetUid);
-  if (adoptedId) {
+  // 兜底：两处登记都查不到时，先看目标账号里是否已存在同源会话（见 adoptExistingCopyTarget）。
+  // 命中就认领它（必要时先把两条血缘合并），而不是再造一份重复会话。
+  const adopted = await adoptExistingCopyTarget(src, targetUid, lineageId);
+  if (adopted && adopted.targetId) {
+    const adoptedId = adopted.targetId;
+    const effectiveLineageId = adopted.lineageId || lineageId;
     const files = await copySessionFiles(wbHome, src.id, adoptedId, ownerIds, { skipWorkspaceSessions: auto });
-    if (lineageId) {
-      addAutoCopySessionMember(DATA_DIR, lineageId, targetUid, adoptedId);
-      setAutoCopyMapping(DATA_DIR, lineageId, targetUid, {
+    if (effectiveLineageId) {
+      addAutoCopySessionMember(DATA_DIR, effectiveLineageId, targetUid, adoptedId);
+      setAutoCopyMapping(DATA_DIR, effectiveLineageId, targetUid, {
         targetId: adoptedId,
         status: files.failed ? 'partial' : 'copied',
         failedFiles: files.failed,
       });
     }
-    log(`[sessions-auto-copy] 登记缺失但目标账号已有同源会话，复用 ${String(adoptedId).slice(0, 8)}（源 ${String(src.id).slice(0, 8)}），未新建副本`);
+    log(`[sessions-auto-copy] ${adopted.adopted === 'merge-lineage' ? '血缘被拆开但目标账号已有同源会话，已合并并复用' : '登记缺失但目标账号已有同源会话，复用'} ${String(adoptedId).slice(0, 8)}（源 ${String(src.id).slice(0, 8)}），未新建副本`);
     return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: adoptedId, failedFiles: files.failed, workspacePending: files.workspacePending };
   }
 
@@ -10822,6 +10856,41 @@ function handleApi(req, res) {
   //
   // 这里取代了上游 1.1.46 的「双向全删」：旧行为对任意账号删除都会展开整条 lineage，
   // 于是从非主账号删一次就把主账号的会话也删了 —— 正是本功能要修正的方向错误。
+  // 只删「这一份物理副本」：**不级联、不写抑制、不动同 lineage 的其它账号副本**。
+  // 为什么需要它：清理「切号复制产生的重复副本」时，重复的那份通常落在**主账号**上，
+  // 而普通删除对主账号是向下级联的 —— 会连源账号里那条正在用的会话一起删掉。
+  // 用途：重复副本清理（见 §21）与内部的孤儿副本自愈。
+  if (req.method === 'POST' && p === '/api/sessions/purge-copy') {
+    return readBody(req).then(async (body) => {
+      const id = String((body && body.id) || '').trim();
+      if (!isValidSessionId(id)) return json(res, 400, { ok: false, error: '无效的会话 ID' });
+      const expectUid = String((body && body.uid) || '').trim();
+      try {
+        const rows = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id = ?;', [id]);
+        if (!rows.length) return json(res, 404, { ok: false, error: '会话不存在' });
+        const ownerUid = String(rows[0].user_id || '');
+        if (expectUid && ownerUid !== expectUid) {
+          return json(res, 409, { ok: false, error: '会话归属账号与请求不一致，已拒绝' });
+        }
+        let filesRemoved = 0;
+        try { filesRemoved = deleteSessionFiles(PROFILE.dataRoot, id); }
+        catch (error) { log('[sessions-purge] 删文件失败 ' + id + ': ' + error.message); }
+        await sqliteRun('DELETE FROM sessions WHERE id = ?;', [id]);
+        // 元数据只摘掉这一份成员登记（其它账号的副本原样保留）
+        try {
+          const lineageId = getAutoCopySession(DATA_DIR, ownerUid, id).lineageId;
+          if (lineageId) removeAutoCopySessionMember(DATA_DIR, lineageId, ownerUid, id);
+        } catch (error) {
+          log('[sessions-purge] 摘除成员登记失败 ' + id + ': ' + error.message);
+        }
+        log('[sessions-purge] 已删除单份副本 ' + JSON.stringify({ id, uid: ownerUid, filesRemoved }));
+        return json(res, 200, { ok: true, id, uid: ownerUid, filesRemoved });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: e.message });
+      }
+    });
+  }
+
   if (req.method === 'POST' && p === '/api/sessions/delete') {
     return readBody(req).then(async (body) => {
       let ids;

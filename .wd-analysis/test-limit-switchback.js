@@ -477,7 +477,7 @@ clearLogs(); clockOffset = 0;
   // 别钉死具体后缀（每落地一个阶段都要回来改一次）：只要求「本轮之后的自建构建」。
   // 命名约定 2026-09-14 起回归上游的 release-x.y.z-…（打包脚本校验这个格式），selfhost- 系列已弃用。
   const buildId = (src.match(/const DAEMON_BUILD_ID = '([^']+)'/) || [])[1] || '';
-  ok(/^(selfhost|release)-1\.3\.0-20260914-/.test(buildId) && buildId.indexOf('space-scan-slug-fix') < 0,
+  ok(/^(selfhost|release)-1\.3\.0-\d{8}-/.test(buildId) && buildId.indexOf('space-scan-slug-fix') < 0,
     'W16n DAEMON_BUILD_ID 已提升（不提升改了也不生效）', buildId);
 }
 
