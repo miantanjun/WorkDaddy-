@@ -385,13 +385,11 @@ function waitSettled(jobs, ms) {
     // 这条断言的目的是「别让测试跑在一个还没加载新代码的旧 daemon 上」，而不是钉死某个具体版本。
     // 因此用**名单**：本阶段及其之后（含本阶段改动的）自建构建都算通过。每落地一个新阶段，
     // 把新 buildId 追加进来即可，否则测试会在新阶段误报 D0 失败。
-    const KNOWN_BUILDS = [
-      // 2026-09-14 起改回上游命名约定 release-x.y.z-…（打包脚本会校验这个格式）；
-      // 旧的 selfhost-1.3.0-… 系列已全部并入 release-1.3.0-20260914-failover-continue
-      'release-1.3.0-20260914-failover-continue',
-      'release-1.3.0-20260915-dedupe-copy',
-    ];
-    ok(KNOWN_BUILDS.indexOf(live) >= 0, 'D0 daemon 已加载本阶段（或更晚）的构建', live);
+    // 别再往名单里堆具体版本了（堆了三次，每次都要回来改）：只要跑的是「本阶段或更晚的
+    // 自建构建」就算通过 —— 前缀 + 日期形态 + 不是引入本功能之前的那个即可。
+    const BUILD_RE = /^(selfhost|release)-1\.3\.0-\d{8}-/;
+    ok(BUILD_RE.test(live) && live !== 'release-1.3.0-20260914-failover-continue',
+      'D0 daemon 已加载本阶段（或更晚）的构建', live);
 
     const a = await apiCall('GET', '/api/sessions/auto-copy/active');
     ok(a.status === 200 && a.body && a.body.ok === true, 'D1a active 接口 200/ok');

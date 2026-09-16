@@ -1088,6 +1088,21 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '以「不让当前账号登录身份过期」的方式切到登录页，可以登录新账号，也可以切回已登录账号': 'Goes to the login page without letting the current account expire; log in a new account or switch back to an existing one.',
     '不退出 WorkBuddy，在浏览器完成授权后新账号自动加入列表': 'Keeps WorkBuddy running; after authorizing in the browser, the new account is added to the list automatically.',
     '正在发起授权…': 'Starting authorization…', '再想想': 'Not now',
+    // ===== 云端残留（会话删除只删本机，其它设备看的是云端那份）=====
+    '云端残留': 'Cloud leftovers',
+    '删除会话只删本机；手机端、其它电脑看到的是云端那份，不会跟着消失。': 'Deleting a session only removes it on this computer; phones and other computers read the cloud copy, which stays.',
+    '检测': 'Check',
+    '正在检测云端…': 'Checking the cloud…',
+    '本机已删、云端仍在': 'deleted locally, still in the cloud',
+    '云端已无': 'already gone from the cloud',
+    '立即清理': 'Clean up now',
+    '切到该账号清理': 'Switch account and clean',
+    '会整页刷新一次，清完自动切回当前账号': 'The page reloads once, then switches back automatically',
+    '没有发现云端残留': 'No cloud leftovers found',
+    '清理完成，删除 {n} 条': 'Done — removed {n}',
+    '{n} 条属于其它账号，需要切到那个账号才能清': '{n} belong to other accounts and need a switch to clean',
+    '尚有 {n} 条没能清理': '{n} could not be cleaned',
+    '本机删除不会同步到其它设备，手机端／其它电脑上仍可能看到这些会话。': 'Local deletion does not sync to other devices — phones and other computers may still show these sessions.',
     '如果未完成，继续执行；已完成则回复"已完成"': 'If unfinished, continue; if finished, reply “Finished”.',
     '暂无可用积分': 'No credits available', '今日已使用': 'Used today', '不限量': 'Unlimited',
     '正在': '', '安装包': 'installer package', '归档': 'archive', '重复': 'duplicate', '选择': 'selection', '读取': 'read', '尚未': 'not yet',
@@ -6207,6 +6222,23 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '</div>' +
         '</div>' +
         '<input type="file" id="wbs-sess-import-file" accept=".wds,.json,application/json,application/octet-stream" style="display:none">' +
+        // 云端残留：桌面删除只删本机，手机端/其它电脑读的是云端那份（删除不会通知云端）。
+        // 这里做「检测 + 清理」；跨账号的残留必须切到那个账号才删得掉（云侧按当前登录账号鉴权）。
+        '<div class="wbs-cloud-card" id="wbs-cloud-card">' +
+        '<div class="wbs-cloud-head" id="wbs-cloud-head" role="button" tabindex="0" aria-expanded="false">' +
+        '<span class="wbs-cloud-caret" aria-hidden="true"></span>' +
+        '<span class="wbs-cloud-title">云端残留</span>' +
+        '<span class="wbs-cloud-summary" id="wbs-cloud-summary"></span>' +
+        '</div>' +
+        '<div class="wbs-cloud-body" id="wbs-cloud-body" hidden>' +
+        '<div class="wbs-cloud-note">删除会话只删本机；手机端、其它电脑看到的是云端那份，不会跟着消失。</div>' +
+        '<div class="wbs-cloud-bar">' +
+        '<button class="wbs-sess-bbtn" type="button" id="wbs-cloud-check">检测</button>' +
+        '<span class="wbs-cloud-status" id="wbs-cloud-status"></span>' +
+        '</div>' +
+        '<div class="wbs-cloud-result" id="wbs-cloud-result"></div>' +
+        '</div>' +
+        '</div>' +
         '<div class="wbs-sess-list" id="wbs-sess-list"></div>' +
         '</div>' +
         '<div class="wbs-modal-mask" id="wbs-sess-modal" style="display:none">' +
@@ -6220,8 +6252,159 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '</div>' +
         '</div>';
       wireSessionsPane();
+      wireCloudCard();
       loadSessionAccounts();
       loadSessions();
+    }
+
+    // ===== 云端残留卡片：检测 + 清理 =====
+    // 桌面删除只删本机（手机端/其它电脑读的是云端那份），而云侧按「当前登录账号」鉴权：
+    // 本账号的能直接删；别账号的必须切过去清，清完自动切回。
+    var cloudState = { report: null, busy: false, armed: '' };
+
+    function cloudEls() {
+      var card = sessionsPane && sessionsPane.querySelector('#wbs-cloud-card');
+      if (!card) return null;
+      return {
+        card: card,
+        summary: card.querySelector('#wbs-cloud-summary'),
+        status: card.querySelector('#wbs-cloud-status'),
+        result: card.querySelector('#wbs-cloud-result'),
+        check: card.querySelector('#wbs-cloud-check'),
+      };
+    }
+
+    function cloudAccountName(uid) {
+      var list = (cloudState.report && cloudState.report.accounts) || [];
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].uid === uid) return list[i].nickname || uid.slice(0, 8);
+      }
+      return uid ? uid.slice(0, 8) : '未知账号';
+    }
+
+    function renderCloudCard() {
+      var els = cloudEls();
+      if (!els) return;
+      var r = cloudState.report;
+      if (!r) { els.summary.textContent = ''; els.result.innerHTML = ''; return; }
+      var s = r.summary || {};
+      var pending = (s.deletable || 0) + (s.needsSwitch || 0);
+      els.summary.textContent = pending ? (pending + ' 条本机已删、云端仍在') : '没有发现云端残留';
+      var groups = {};
+      var collect = function (items, mine) {
+        (items || []).forEach(function (it) {
+          var uid = it.uid || '';
+          if (!groups[uid]) groups[uid] = { count: 0, mine: false };
+          groups[uid].count += 1;
+          if (mine) groups[uid].mine = true;
+        });
+      };
+      collect(r.plan && r.plan.current, true);
+      collect(r.plan && r.plan.other, false);
+      var rows = Object.keys(groups).map(function (uid) {
+        var mine = uid === r.currentUid;
+        return '<div class="wbs-cloud-row">'
+          + '<span class="wbs-cloud-who">' + esc(cloudAccountName(uid)) + (mine ? '' : '<span class="wbs-cloud-hint">其它账号</span>') + '</span>'
+          + '<span class="wbs-cloud-num">' + groups[uid].count + ' 条</span>'
+          + '<button class="wbs-cloud-btn" type="button" data-cloud-uid="' + escAttr(uid) + '" data-cloud-switch="' + (mine ? '0' : '1') + '">'
+          + (mine ? '立即清理' : '切到该账号清理') + '</button>'
+          + '</div>';
+      }).join('');
+      var tail = [];
+      if (s.alreadyGone) tail.push(s.alreadyGone + ' 条云端已无');
+      if (s.unknown) tail.push(s.unknown + ' 条没探到（云端限流或页面未就绪）');
+      els.result.innerHTML = (rows ? '<div class="wbs-cloud-list">' + rows + '</div>' : '<div class="wbs-cloud-empty">没有发现云端残留</div>')
+        + (tail.length ? '<div class="wbs-cloud-tail">' + tail.join('；') + '</div>' : '');
+      // 跨账号按钮走两段式确认：切号会整页刷新，必须先让用户看清楚再点。
+      var btns = els.result.querySelectorAll('[data-cloud-uid]');
+      for (var i = 0; i < btns.length; i++) {
+        btns[i].addEventListener('click', function () {
+          var uid = this.getAttribute('data-cloud-uid');
+          var isSwitch = this.getAttribute('data-cloud-switch') === '1';
+          if (isSwitch && cloudState.armed !== uid) {
+            cloudState.armed = uid;
+            this.textContent = '确认清理（会整页刷新一次，清完自动切回当前账号）';
+            this.classList.add('wbs-cloud-btn-armed');
+            return;
+          }
+          cloudState.armed = '';
+          runCloudPurge({ uid: uid, all: true, switchAccount: isSwitch });
+        });
+      }
+    }
+
+    function checkCloudGhosts() {
+      var els = cloudEls();
+      if (!els || cloudState.busy) return;
+      cloudState.busy = true;
+      cloudState.armed = '';
+      if (els.check) els.check.disabled = true;
+      if (els.status) els.status.textContent = '正在检测云端…';
+      api('/api/cloud/ghosts').then(function (d) {
+        cloudState.busy = false;
+        if (els.check) els.check.disabled = false;
+        if (els.status) els.status.textContent = '';
+        cloudState.report = d || null;
+        renderCloudCard();
+      }).catch(function (e) {
+        cloudState.busy = false;
+        if (els.check) els.check.disabled = false;
+        var msg = (e && e.message) || String(e);
+        if (els.status) els.status.textContent = '检测失败：' + msg;
+        toast('检测云端残留失败: ' + msg, true, root);
+      });
+    }
+
+    function runCloudPurge(payload) {
+      var els = cloudEls();
+      if (!els || cloudState.busy) return;
+      cloudState.busy = true;
+      if (els.check) els.check.disabled = true;
+      if (els.status) els.status.textContent = (payload && payload.switchAccount) ? '正在切号并清理，页面会刷新一次…' : '正在清理…';
+      api('/api/cloud/ghosts/purge', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+      }).then(function (d) {
+        cloudState.busy = false;
+        if (els.check) els.check.disabled = false;
+        if (els.status) els.status.textContent = '';
+        var n = (d && d.deleted) || 0;
+        var failed = ((d && d.failed) || []).length;
+        var parts = ['清理完成，删除 ' + n + ' 条'];
+        if (failed) parts.push(failed + ' 条没能清理');
+        if (d && d.note && !n) parts.push(String(d.note));
+        toast(parts.join('，'), failed > 0, root);
+        checkCloudGhosts();
+      }).catch(function (e) {
+        cloudState.busy = false;
+        if (els.check) els.check.disabled = false;
+        if (els.status) els.status.textContent = '';
+        toast('清理失败: ' + ((e && e.message) || e), true, root);
+      });
+    }
+
+    function wireCloudCard() {
+      var els = cloudEls();
+      if (!els) return;
+      var head = els.card.querySelector('#wbs-cloud-head');
+      var body = els.card.querySelector('#wbs-cloud-body');
+      var isOpen = function () { return els.card.classList.contains('open'); };
+      var setOpen = function (open) {
+        els.card.classList.toggle('open', open);
+        if (body) body.hidden = !open;
+        if (head) head.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open && !cloudState.report && !cloudState.busy) checkCloudGhosts();
+      };
+      if (head) {
+        head.addEventListener('click', function () { setOpen(!isOpen()); });
+        head.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(!isOpen()); }
+        });
+      }
+      if (els.check) els.check.addEventListener('click', checkCloudGhosts);
+      setOpen(false);
+      renderCloudCard();
     }
 
     // 加载账号下拉（当前账号 + 全部备份账号 + 全部账号）
@@ -6978,7 +7161,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           body.innerHTML = '<p>已选 ' + ids.length + ' 个会话</p>'
             + '<div class="wbs-modal-warn">其中包含<b>主账号</b>的会话，按单向级联规则会一并删除其它账号中同一会话的副本。'
             + '此操作不可恢复。</div>'
-            + (lines ? '<p style="margin:8px 0 0">删除范围（共 ' + (p.total || 0) + ' 份）</p><div style="font-size:12px;line-height:1.7">' + lines + '</div>' : '');
+            + (lines ? '<p style="margin:8px 0 0">删除范围（共 ' + (p.total || 0) + ' 份）</p><div style="font-size:12px;line-height:1.7">' + lines + '</div>' : '')
+            + '<div class="wbs-modal-note">本机删除不会同步到其它设备，手机端／其它电脑上仍可能看到这些会话。</div>';
           okBtn.textContent = confirmed ? '永久删除' : '继续确认';
         } else {
           titleEl.textContent = '删除 ' + ids.length + ' 个会话？';
@@ -6986,7 +7170,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             + '<div class="wbs-modal-warn">删除的是<b>非主账号</b>中的会话，因此只删除这些账号自己的副本：'
             + '主账号与其它账号中的同一会话<b>保持不动</b>。</div>'
             + '<div class="wbs-modal-warn">已登记抑制标记，自动复制不会再把它复制回来。'
-            + '此操作不可恢复。</div>';
+            + '此操作不可恢复。</div>'
+            + '<div class="wbs-modal-note">本机删除不会同步到其它设备，手机端／其它电脑上仍可能看到这些会话。</div>';
           okBtn.textContent = '确定';
         }
         okBtn.disabled = false;
@@ -14451,6 +14636,27 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-acct-list{flex:1;min-height:0;overflow-y:auto;padding-right:2px}',
     /* 账号自动切换卡片（主账号 + 闲置阈值）：放在账号列表与「登录新账号」之间 */
     '.wbs-idle-card{flex:0 0 auto;margin:8px 0 0}',
+    // 云端残留卡片：折叠头常显一行摘要，展开才是检测/清理（跨账号那步要切号，用红色按钮警示）
+    '.wbs-cloud-card{flex:0 0 auto;margin:0 0 8px;border:1px solid color-mix(in srgb,var(--wb-color-border,#e5e5e5) 70%,transparent);border-radius:10px;background:color-mix(in srgb,var(--wb-bg-secondary,#f7f7f7) 55%,transparent)}',
+    '.wbs-cloud-head{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;user-select:none;border-radius:10px}',
+    '.wbs-cloud-head:hover{background:color-mix(in srgb,var(--wb-bg-hover,#f0f0f0) 60%,transparent)}',
+    '.wbs-cloud-caret{width:0;height:0;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;opacity:.5;transition:transform .15s ease;flex:0 0 auto}',
+    '.wbs-cloud-card.open .wbs-cloud-caret{transform:rotate(90deg)}',
+    '.wbs-cloud-title{font-size:12px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f);flex:0 0 auto}',
+    '.wbs-cloud-summary{font-size:11px;color:var(--wb-icon-tertiary,#999);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:auto}',
+    '.wbs-cloud-body{padding:0 10px 10px}',
+    '.wbs-cloud-note{font-size:11px;line-height:1.6;color:var(--wb-icon-tertiary,#999);margin-bottom:8px}',
+    '.wbs-cloud-bar{display:flex;align-items:center;gap:8px}',
+    '.wbs-cloud-status{font-size:11px;color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-cloud-list{display:flex;flex-direction:column;gap:6px;margin-top:8px}',
+    '.wbs-cloud-row{display:flex;align-items:center;gap:8px;font-size:12px}',
+    '.wbs-cloud-who{color:var(--wb-color-text-primary,#1f1f1f);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.wbs-cloud-hint{margin-left:6px;font-size:10px;color:var(--wb-icon-tertiary,#999);border:1px solid currentColor;border-radius:4px;padding:0 4px}',
+    '.wbs-cloud-num{color:var(--wb-icon-tertiary,#999);flex:0 0 auto}',
+    '.wbs-cloud-btn{margin-left:auto;height:26px;padding:0 10px;border:1px solid color-mix(in srgb,var(--wb-color-border,#e5e5e5) 80%,transparent);border-radius:8px;background:transparent;color:var(--wb-color-text-primary,#1f1f1f);font-size:11px;cursor:pointer;flex:0 0 auto;white-space:nowrap}',
+    '.wbs-cloud-btn:hover{background:var(--wb-bg-hover,#f5f5f5)}',
+    '.wbs-cloud-btn-armed{border-color:#e24b4a;color:#e24b4a}',
+    '.wbs-cloud-empty,.wbs-cloud-tail{font-size:11px;color:var(--wb-icon-tertiary,#999);margin-top:8px}',
     '.wbs-idle-head{display:flex;align-items:center;gap:7px;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}',
     '.wbs-idle-head:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:2px;border-radius:6px}',
     '.wbs-idle-chevron{flex:0 0 auto;width:7px;height:7px;margin-left:1px;border-right:1.6px solid var(--wb-icon-tertiary,#999);border-bottom:1.6px solid var(--wb-icon-tertiary,#999);transform:rotate(-45deg);transition:transform .18s}',

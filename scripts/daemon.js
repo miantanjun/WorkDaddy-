@@ -222,6 +222,7 @@ const { createAutomationNotifier } = require('./toast-options.js');
 const { runCompletionReport, probeAccountCompletion } = require('./completion-report.js');
 const { createPrimaryAccountStore } = require('./primary-account.js');
 const { scanSpace, spaceSlug, SPACE_SCAN_VERSION } = require('./space-scan.js');
+const cloudCleanup = require('./cloud-cleanup.js');
 const PROFILE = getProfile();
 const DATA_DIR = defaultDataDir();
 const thirdPartyModels = createThirdPartyImport({ targetFile: workbuddyModelsFile(), dataDir: DATA_DIR });
@@ -391,7 +392,7 @@ const DAEMON_VERSION = '1.3.0';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.0-20260915-dedupe-copy';
+const DAEMON_BUILD_ID = 'release-1.3.0-20260916-cloud-ghosts';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -3358,6 +3359,337 @@ function setLiveModel(modelId) {
 function readLastUserTaskText() {
   return runCdpExpression(limitFailover.lastUserTaskTextExpression(20000), { awaitPromise: false });
 }
+
+/* ================= CLOUD_GHOSTS_MARK：云端会话残留（幽灵会话）================= */
+// 桌面删除只删本地；手机端/其它电脑看到的那一份来自云端，而删除**不会**通知云端。
+// 见 scripts/cloud-cleanup.js 顶部：云侧按「当前登录账号」鉴权，跨账号只能 access denied。
+// 本区块提供：① 检测（哪条会话本地没了、云端还留着）② 清理 ③ 删除后顺带清云端。
+
+/**
+ * 在渲染层里取 WorkBuddy 自己的 daemon 客户端（它持有 cloudAgent* 云侧能力）。
+ * 必须**自包含**且每次重新查找：页面 reload（切号）后旧引用会失效。
+ * 查找路径：React fiber → adapter/controller → `.daemonClient`（实测 697 个方法）。
+ */
+function pickWorkbuddyDaemonClient() {
+  var found = null;
+  function walk(fiber, depth) {
+    if (found || !fiber || depth > 40) return;
+    var cur = fiber;
+    var guard = 0;
+    while (cur && guard < 300 && !found) {
+      guard += 1;
+      try {
+        var cands = [];
+        if (cur.stateNode) cands.push(cur.stateNode);
+        if (cur.memoizedProps) {
+          cands.push(cur.memoizedProps.adapter);
+          cands.push(cur.memoizedProps.value);
+          cands.push(cur.memoizedProps.client);
+        }
+        for (var i = 0; i < cands.length; i++) {
+          var o = cands[i];
+          if (!o || typeof o !== 'object') continue;
+          var dc = null;
+          try { dc = o.daemonClient; } catch (e) {}
+          if (dc && typeof dc === 'object' && typeof dc.cloudAgentDeleteConversation === 'function') { found = dc; break; }
+        }
+      } catch (e) {}
+      cur = cur.return;
+    }
+  }
+  var roots = document.querySelectorAll('#root, body > div, .conversation-shell');
+  for (var r = 0; r < roots.length && !found; r++) {
+    var el = roots[r];
+    var keys = Object.keys(el).filter(function (k) {
+      return k.indexOf('__reactContainer$') === 0 || k.indexOf('__reactFiber$') === 0;
+    });
+    for (var k = 0; k < keys.length && !found; k++) walk(el[keys[k]], 0);
+  }
+  return found;
+}
+
+/** 拼一次「渲染层调用 daemonClient[method](params)」的自包含表达式。 */
+function cloudAgentCallExpression(method, params) {
+  const payload = JSON.stringify({ method: String(method || ''), params: params === undefined ? null : params })
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+  return '(async function(){var req=' + payload + ';'
+    + 'var dc=(' + pickWorkbuddyDaemonClient.toString() + ')();'
+    + 'if(!dc)return{ok:false,error:{code:"NO-CLIENT",message:"渲染层取不到 WorkBuddy 的 daemon 客户端（页面可能还没就绪或已切号刷新）"}};'
+    + 'if(typeof dc[req.method]!=="function")return{ok:false,error:{code:"NO-METHOD",message:"当前客户端不支持 "+req.method}};'
+    + 'try{var v=req.params===null?await dc[req.method]():await dc[req.method](req.params);'
+    + 'return{ok:true,value:v===undefined?null:v};}'
+    + 'catch(e){return{ok:false,error:{code:String((e&&e.code)||""),message:String((e&&e.message)||e).slice(0,300)}};}'
+    + '})()';
+}
+
+/** 调一次云侧能力，永不外抛 —— 失败以 `{ok:false,error}` 返回，便于上层分类。 */
+async function cloudAgentCall(method, params) {
+  if (!cdp.connected) return { ok: false, error: { code: 'CDP-OFFLINE', message: 'WorkBuddy 未连接' } };
+  try {
+    const value = await runCdpExpression(cloudAgentCallExpression(method, params));
+    if (!value || typeof value !== 'object') {
+      return { ok: false, error: { code: 'BAD-RESULT', message: '渲染层返回了非预期结果' } };
+    }
+    return value;
+  } catch (error) {
+    return { ok: false, error: { code: 'CDP-FAILED', message: String((error && error.message) || error).slice(0, 300) } };
+  }
+}
+
+/**
+ * 定位本地 edge-sync 映射库。文件名带版本后缀（实测 v2/v3/v4 并存），
+ * 取版本号最大的那个 —— 写死版本号会在 WorkBuddy 升级后静默读到旧库。
+ */
+function edgeSyncMappingDbPath(dataRoot) {
+  let best = '';
+  let bestVersion = -1;
+  try {
+    for (const name of fs.readdirSync(dataRoot)) {
+      const m = /^edge-sync-mapping(?:-v(\d+))?\.db$/.exec(name);
+      if (!m) continue;
+      const version = m[1] ? parseInt(m[1], 10) : 1;
+      if (version > bestVersion) { bestVersion = version; best = path.join(dataRoot, name); }
+    }
+  } catch (_) {}
+  return best;
+}
+
+let edgeSyncDbCache = { path: '', db: null };
+function getEdgeSyncDb(dbPath) {
+  if (!dbPath) return null;
+  if (edgeSyncDbCache.path !== dbPath || !edgeSyncDbCache.db) {
+    edgeSyncDbCache = { path: dbPath, db: createSessionDb({ dbPath }) };
+  }
+  return edgeSyncDbCache.db;
+}
+
+/**
+ * 读 edge-sync 映射表：`session_id ↔ msg_channel(convmsg:<uid>)`。
+ * 这张表是「本地会话曾同步到云端」的**唯一本地凭据** —— 云端列表接口会被限流（429），
+ * 所以先用它缩小候选范围，再用云侧探测逐条确认。
+ */
+async function readEdgeSyncRows() {
+  const dbPath = edgeSyncMappingDbPath(PROFILE.dataRoot);
+  if (!dbPath) return { ok: false, reason: 'no-db', rows: [] };
+  const db = getEdgeSyncDb(dbPath);
+  try {
+    const rows = await db.all('SELECT session_id, conversation_id, msg_channel FROM edge_sync_mapping;', []);
+    return { ok: true, reason: '', dbPath, rows: Array.isArray(rows) ? rows : [] };
+  } catch (error) {
+    return { ok: false, reason: String((error && error.message) || error), rows: [], dbPath };
+  }
+}
+
+/** 本地仍存在的会话 id 集合（跨全部账号）——只有「本地已没了」的才算残留。 */
+async function listLocalSessionIds() {
+  const ids = new Set();
+  const accounts = listAccounts(DATA_DIR);
+  for (const account of accounts) {
+    const uid = String((account && account.uid) || '').trim();
+    if (!uid) continue;
+    try {
+      const rows = await sqliteQuery('SELECT id FROM sessions WHERE user_id = ? AND deleted_at IS NULL;', [uid]);
+      for (const row of rows) {
+        const id = String((row && row.id) || '').trim();
+        if (id) ids.add(id);
+      }
+    } catch (error) {
+      log('[cloud-ghosts] 读本地会话失败 ' + uid.slice(0, 8) + ': ' + String((error && error.message) || error));
+    }
+  }
+  return ids;
+}
+
+const CLOUD_PROBE_LIMIT = 80;
+const CLOUD_PROBE_GAP_MS = 120;
+
+/**
+ * 逐条问云端「这条会话还在吗」。
+ * `access denied` 也是**存在**的证据（不归当前账号而已），所以不能只按「没报错」判。
+ */
+async function probeCloudConversations(candidates, options) {
+  const opts = options || {};
+  const limit = Math.max(0, Math.min(Number(opts.limit) || CLOUD_PROBE_LIMIT, 400));
+  const gapMs = Number(opts.gapMs) >= 0 ? Number(opts.gapMs) : CLOUD_PROBE_GAP_MS;
+  const out = [];
+  let probed = 0;
+  for (const item of candidates) {
+    const id = String((item && item.id) || '').trim();
+    if (!id) continue;
+    if (probed >= limit) { out.push({ ...item, state: 'unknown', reason: 'probe-limit' }); continue; }
+    probed += 1;
+    const result = await cloudAgentCall(cloudCleanup.CLOUD_DETAIL_METHOD, { conversationId: id });
+    const state = cloudCleanup.interpretProbe(result);
+    out.push({
+      ...item,
+      state,
+      reason: state === 'exists' && result && result.error ? 'denied' : (result && result.error ? String(result.error.code || '') : ''),
+    });
+    if (gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
+  }
+  return out;
+}
+
+/**
+ * 汇总「云端残留」清单（只读）。
+ * @param {{uid?:string, probe?:boolean, probeLimit?:number}} options
+ */
+async function collectCloudGhosts(options) {
+  const opts = options && typeof options === 'object' ? options : {};
+  const current = currentAccount();
+  const currentUid = String((current && current.uid) || '');
+  const filterUid = String(opts.uid || '').trim();
+  const mapping = await readEdgeSyncRows();
+  const localIds = await listLocalSessionIds();
+  const seen = new Set();
+  const candidates = [];
+  for (const row of mapping.rows) {
+    const id = String((row && (row.session_id || row.conversation_id)) || '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const uid = cloudCleanup.parseCloudChannel(row && row.msg_channel);
+    if (filterUid && uid !== filterUid) continue;
+    if (localIds.has(id)) continue;          // 本地还在 → 不是残留
+    candidates.push({ id, uid, state: 'unknown' });
+  }
+  const probed = opts.probe === false ? candidates : await probeCloudConversations(candidates, { limit: opts.probeLimit });
+  const plan = cloudCleanup.planCloudGhosts({ candidates: probed, localIds: [], currentUid });
+  return {
+    ok: true,
+    currentUid,
+    accounts: listAccounts(DATA_DIR).map((a) => ({ uid: a.uid, nickname: a.nickname || '' })),
+    mappingReady: mapping.ok,
+    mappingReason: mapping.reason || '',
+    mappingDb: mapping.dbPath || '',
+    localSessions: localIds.size,
+    syncedSessions: seen.size,
+    plan,
+    summary: cloudCleanup.summarizeGhostPlan(plan),
+  };
+}
+
+/**
+ * 逐条调云侧删除。
+ * @param {Array<{id:string,uid?:string}>} items
+ */
+async function purgeCloudConversations(items, options) {
+  const opts = options && typeof options === 'object' ? options : {};
+  const current = currentAccount();
+  const currentUid = String((current && current.uid) || '');
+  const gapMs = Number(opts.gapMs) >= 0 ? Number(opts.gapMs) : 150;
+  const failed = [];
+  let deleted = 0;
+  let skipped = 0;
+  for (const item of Array.isArray(items) ? items : []) {
+    const id = String((item && item.id) || '').trim();
+    const uid = String((item && item.uid) || '').trim();
+    if (!id) { skipped += 1; continue; }
+    // 跨账号的删不掉（云侧按当前账号鉴权）——提前拦下并说明原因，别把 403 当成"已尽力"
+    if (uid && currentUid && uid !== currentUid) {
+      failed.push({ id, uid, reason: 'other-account', message: '这条属于账号 ' + uid.slice(0, 8) + '，需要切到该账号再清' });
+      continue;
+    }
+    const result = await cloudAgentCall(cloudCleanup.CLOUD_DELETE_METHOD, { conversationId: id });
+    if (result && result.ok === true) {
+      deleted += 1;
+    } else {
+      const classified = cloudCleanup.classifyCloudError(result && result.error);
+      if (classified.kind === 'missing') { skipped += 1; continue; }   // 云端本来就没有：不算失败
+      failed.push({ id, uid, reason: classified.kind, message: classified.message });
+    }
+    if (gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
+  }
+  return { requested: (Array.isArray(items) ? items.length : 0), deleted, skipped, failed };
+}
+
+/**
+ * 删除本地会话之后，顺带把云端那份也删掉（**火后不理**，绝不阻塞删除）。
+ * 这是「本地删了、手机端还在」的根治点：不补这一刀，幽灵会持续产生。
+ */
+function purgeCloudCopiesAfterLocalDelete(ids, uidByAccount) {
+  const list = Array.isArray(ids) ? ids.map(String).filter(Boolean) : [];
+  if (!list.length) return;
+  const items = list.map((id) => ({ id, uid: String((uidByAccount && uidByAccount[id]) || '') }));
+  setTimeout(() => {
+    purgeCloudConversations(items)
+      .then((result) => {
+        const summary = cloudCleanup.summarizePurgeRun(result);
+        log('[cloud-ghosts] 删除后顺带清云端 ' + JSON.stringify(summary));
+      })
+      .catch((error) => {
+        log('[cloud-ghosts] 删除后顺带清云端失败: ' + String((error && error.message) || error));
+      });
+  }, 0);
+}
+
+/** 切号会让页面整页 reload，React 树随之重建 —— 等 daemon 客户端重新挂上再动手。 */
+async function waitCloudClientReady(timeoutMs) {
+  const deadline = Date.now() + Math.max(3000, Number(timeoutMs) || 30000);
+  while (Date.now() < deadline) {
+    const probe = await cloudAgentCall(cloudCleanup.CLOUD_LIST_METHOD, { page: 1, pageSize: 1 });
+    if (probe && probe.ok === true) return true;
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  }
+  return false;
+}
+
+/**
+ * 切号清理：云侧按「当前登录账号」鉴权，跨账号残留只能站到那个账号上去删。
+ * 流程：切到目标账号 → 等渲染层就绪 → 重算该账号的残留清单 → 逐条删 → 切回原账号。
+ * 任何一步失败都收敛成结果字段返回（绝不把用户留在别的账号上还不吭声）。
+ *
+ * @param {string} targetUid 目标账号
+ * @param {{restore?:boolean, readyTimeoutMs?:number}} options
+ */
+async function purgeCloudGhostsSwitching(targetUid, options) {
+  const opts = options && typeof options === 'object' ? options : {};
+  const uid = String(targetUid || '').trim();
+  if (!uid) return { ok: false, error: '缺少目标账号' };
+  const known = listAccounts(DATA_DIR).find((a) => String(a.uid || '') === uid);
+  if (!known) return { ok: false, error: '账号不存在' };
+  const before = currentAccount();
+  const originUid = String((before && before.uid) || '');
+  const outcome = { ok: true, uid, originUid, switched: false, ready: false, restored: false, deleted: 0, skipped: 0, failed: [] };
+  const switchBack = async () => {
+    if (opts.restore === false || !originUid || originUid === uid) return;
+    try {
+      await automationSwitchAccount({ uid: originUid });
+      outcome.restored = true;
+    } catch (error) {
+      outcome.restoreError = String((error && error.message) || error);
+      log('[cloud-ghosts] 清理后切回原账号失败: ' + outcome.restoreError);
+    }
+  };
+  try {
+    if (originUid !== uid) {
+      await automationSwitchAccount({ uid });
+      outcome.switched = true;
+    }
+    outcome.ready = await waitCloudClientReady(opts.readyTimeoutMs);
+    if (!outcome.ready) {
+      outcome.ok = false;
+      outcome.error = '切号后没能等到 WorkBuddy 页面就绪，未执行清理';
+      return outcome;
+    }
+    const report = await collectCloudGhosts({ uid, probe: true });
+    const items = report.plan.current;             // 此刻 currentUid 已是目标账号 → current 即本账号可删的
+    const run = await purgeCloudConversations(items);
+    outcome.deleted = run.deleted;
+    outcome.skipped = run.skipped;
+    outcome.failed = run.failed;
+    outcome.found = items.length;
+    outcome.summary = cloudCleanup.summarizePurgeRun(run);
+    log('[cloud-ghosts] 切号清理 ' + JSON.stringify({ uid: uid.slice(0, 8), found: items.length, ...outcome.summary }));
+  } catch (error) {
+    outcome.ok = false;
+    outcome.error = String((error && error.message) || error);
+  } finally {
+    await switchBack();
+  }
+  return outcome;
+}
+
 
 // 续跑是否已经"跑起来"：消息流里出现流式请求，或最后一条是 assistant。
 function limitReplyStartedExpression() {
@@ -10858,6 +11190,67 @@ function handleApi(req, res) {
   // 于是从非主账号删一次就把主账号的会话也删了 —— 正是本功能要修正的方向错误。
   // 只删「这一份物理副本」：**不级联、不写抑制、不动同 lineage 的其它账号副本**。
   // 为什么需要它：清理「切号复制产生的重复副本」时，重复的那份通常落在**主账号**上，
+  // 云端会话残留检测（只读）：GET /api/cloud/ghosts[?uid=<账号>&probe=0&probeLimit=40]
+  // 「本地已删、云端还留着」的会话 —— 手机端/其它电脑看到的就是这些。
+  // 候选来自本地 edge-sync 映射表（曾同步到云），排除本地仍存在的，再用云侧探测确认。
+  if (req.method === 'GET' && p === '/api/cloud/ghosts') {
+    return (async () => {
+      try {
+        const probeParam = url.searchParams.get('probe');
+        const limitParam = parseInt(url.searchParams.get('probeLimit') || '', 10);
+        const report = await collectCloudGhosts({
+          uid: url.searchParams.get('uid') || '',
+          probe: probeParam !== '0',
+          probeLimit: Number.isFinite(limitParam) ? limitParam : undefined,
+        });
+        return json(res, 200, report);
+      } catch (e) {
+        return json(res, 500, { ok: false, error: e.message });
+      }
+    })();
+  }
+
+  // 清理云端残留：POST /api/cloud/ghosts/purge { uid?, ids?, all?, switchAccount? }
+  // · all:true         → 后端重算清单（不信前端可能过期的 id 列表）
+  // · switchAccount:true → 跨账号残留：切到该账号清完再切回（云侧按当前登录账号鉴权）
+  if (req.method === 'POST' && p === '/api/cloud/ghosts/purge') {
+    return readBody(req).then(async (body) => {
+      try {
+        const uid = String((body && body.uid) || '').trim();
+        const wantSwitch = !!(body && body.switchAccount);
+        const current = currentAccount();
+        const currentUid = String((current && current.uid) || '');
+        // 跨账号 + 用户明确同意切号 → 走切号清理（清完自动切回）
+        if (uid && uid !== currentUid && wantSwitch) {
+          const outcome = await purgeCloudGhostsSwitching(uid, { restore: true });
+          return json(res, outcome.ok ? 200 : 500, outcome);
+        }
+        let items;
+        if (body && body.all) {
+          const report = await collectCloudGhosts({ uid, probe: true });
+          items = report.plan.current;
+          if (!items.length) {
+            const other = report.plan.other.length;
+            return json(res, 200, {
+              ok: true, deleted: 0, skipped: 0, failed: [], requested: 0,
+              note: other ? '有 ' + other + ' 条属于其它账号，需要切到那个账号才能清' : '没有需要清理的云端残留',
+            });
+          }
+        } else {
+          const selection = cloudCleanup.normalizePurgeSelection(body && body.ids);
+          if (!selection.ids.length) return json(res, 400, { ok: false, error: '未选择要清理的会话' });
+          items = selection.ids.map((id) => ({ id, uid }));
+        }
+        const run = await purgeCloudConversations(items);
+        const summary = cloudCleanup.summarizePurgeRun(run);
+        log('[cloud-ghosts] 清理云端残留 ' + JSON.stringify({ currentUid: currentUid.slice(0, 8), ...summary }));
+        return json(res, 200, { ok: true, ...run, summary, currentUid });
+      } catch (e) {
+        return json(res, 500, { ok: false, error: e.message });
+      }
+    });
+  }
+
   // 而普通删除对主账号是向下级联的 —— 会连源账号里那条正在用的会话一起删掉。
   // 用途：重复副本清理（见 §21）与内部的孤儿副本自愈。
   if (req.method === 'POST' && p === '/api/sessions/purge-copy') {
@@ -10884,6 +11277,8 @@ function handleApi(req, res) {
           log('[sessions-purge] 摘除成员登记失败 ' + id + ': ' + error.message);
         }
         log('[sessions-purge] 已删除单份副本 ' + JSON.stringify({ id, uid: ownerUid, filesRemoved }));
+        // 云端那份不会因为本地删除而消失（手机端看的就是它）——顺带清一次，火后不理。
+        purgeCloudCopiesAfterLocalDelete([id], { [id]: ownerUid });
         return json(res, 200, { ok: true, id, uid: ownerUid, filesRemoved });
       } catch (e) {
         return json(res, 400, { ok: false, error: e.message });
@@ -10961,6 +11356,11 @@ function handleApi(req, res) {
         }
         const cascaded = matchedIds.filter((id) => !requestedSet.has(String(id))).length;
         log(`[sessions-delete] mode=${plan.mode} reason=${plan.reason} 已真实删除 ${matchedIds.length} 个会话（DB + ${filesRemoved} 项文件，级联副本 ${cascaded}，抑制标记 ${suppressed}）`);
+        // 本地删了不代表手机端看不到：云端那份还在。顺带清一次（只对本账号的会话有效，
+        // 跨账号会以 other-account 记进日志，不算失败）—— 这是「幽灵会话」的根治点。
+        const uidByAccount = {};
+        for (const row of matchedRows) uidByAccount[String(row.id || '')] = String(row.user_id || '');
+        purgeCloudCopiesAfterLocalDelete(matchedIds, uidByAccount);
         return json(res, 200, {
           ok: true,
           mode: plan.mode,
