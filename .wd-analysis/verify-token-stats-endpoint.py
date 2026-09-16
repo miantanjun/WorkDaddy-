@@ -28,10 +28,8 @@ def nm(u):
 
 
 version = get('/api/status')
-log('daemon 版本: version=%s buildId=%s pid=%s' % (
-    (version.get('daemon') or {}).get('version'),
-    (version.get('daemon') or {}).get('buildId'),
-    (version.get('daemon') or {}).get('pid')))
+log('daemon 版本: version=%s buildId=%s pid=%s (顶层字段，不在 daemon 子对象里)' % (
+    version.get('version'), version.get('buildId'), version.get('pid')))
 
 
 def show_accounts(label, body):
