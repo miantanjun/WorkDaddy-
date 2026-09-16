@@ -19,9 +19,11 @@ t0 = time.time()
 status = None
 while time.time() - t0 < 420:
     st = call('/api/space/scan/status')
-    status = st.get('status')
+    # ⚠️ 进度在 resp.job 里（接口是 {ok, job, cached}），读顶层永远是 None —— 会白轮询到超时。
+    job = st.get('job') or {}
+    status = job.get('status')
     print('  %3.0fs status=%s processed=%s hasResult=%s' % (
-        time.time() - t0, status, st.get('processed'), st.get('hasResult')), flush=True)
+        time.time() - t0, status, job.get('processed'), job.get('hasResult')), flush=True)
     if status in ('done', 'cancelled', 'error'):
         break
     time.sleep(10)
