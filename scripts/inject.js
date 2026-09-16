@@ -835,6 +835,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '（未命名对话）': '(Untitled conversation)', '(未命名对话)': '(Untitled conversation)', '未命名对话': 'Untitled conversation',
     '正准备扫描…': 'Preparing…', '准备扫描…': 'Preparing…', '正在启动扫描…': 'Starting…', '正在扫描空间占用…': 'Scanning storage usage…',
     '扫描完成': 'Scan complete', '扫描已中断': 'Scan cancelled', '扫描失败': 'Scan failed', '无法启动扫描': 'Could not start the scan',
+    // 列头排序的两条 tooltip 必须**整句**入典：词典里已有 '实际占用' / '文件数' 这类短词条，
+    // 整句没登记就会被「最长匹配」扫描器撕成「点击按On disk排序」这种中英混合。
+    '点击按实际占用排序': 'Click to sort by on-disk size', '点击按文件数排序': 'Click to sort by file count',
     '读不到扫描进度': 'Cannot read scan progress', '还没有扫描结果。': 'No scan result yet.', '正在读取扫描结果…': 'Loading scan result…',
     '认不出账号的会话数据': 'Session data with no known account', '会话记录已被删或不属于任何已保存账号': 'Its session was deleted, or belongs to no saved account',
     '导出': 'Export', '导入': 'Import', '删除': 'Delete', '编辑': 'Edit', '保存': 'Save', '内置': 'Built-in', '取消': 'Cancel', '确定': 'Confirm', '确认': 'Confirm', '复制': 'Copy', '切换': 'Switch', '启用': 'Enable', '停用': 'Disable', '停止': 'Stop', '立即运行': 'Run now', '新建任务': 'New task', '刷新': 'Refresh', '步骤 JSON': 'Steps JSON', '任务说明': 'Task description', '任务名称': 'Task name', '调度': 'Schedule', '手动运行': 'Manual', '手动': 'Manual', '每小时': 'Hourly', '每天': 'Daily', '选择任务': 'Select tasks', '查看接口': 'View capabilities', '拾取元素': 'Pick element', '复制 XPath': 'Copy XPath', '运行中': 'Running', '已成功': 'Succeeded', '失败': 'Failed', '未运行': 'Not run', '页面加载完成': 'Page loaded', '账号切换完成': 'Account switched', '新自动化任务': 'New automation task', '任务已保存': 'Task saved', '任务已开始运行': 'Task started', '步骤 JSON 格式无效': 'Invalid steps JSON', '步骤 JSON 必须是数组': 'Steps JSON must be an array', '查看接口说明': 'View interface docs', '自动化接口协议': 'Automation interface protocol', '复制全部': 'Copy all', '接口协议已复制': 'Interface protocol copied', '暂无自动化任务，点击“新建任务”开始。': 'No automation tasks yet. Click “New task” to start.', '编辑任务': 'Edit task', '触发方式': 'Trigger', '插入点击步骤': 'Insert click step', 'XPath 已复制': 'XPath copied', '点击步骤已插入': 'Click step inserted', '请先拾取元素': 'Pick an element first', '加载自动化失败': 'Failed to load automations', '读取接口失败': 'Failed to read interfaces', '批量操作失败': 'Batch operation failed', '删除失败': 'Delete failed', '确认删除该任务？': 'Delete this task?', '执行': 'Apply', '已拾取': 'Picked', '运行失败': 'Run failed', '（副本）': ' (copy)', '查看提示词': 'View prompt', '交给 WorkBuddy 创建': 'Ask WorkBuddy to create', '正在打开新任务…': 'Opening a new task…', '已创建新会话，WorkBuddy 完成后任务会自动出现': 'New session created. The task will appear after WorkBuddy finishes.', 'WorkBuddy 创建失败': 'WorkBuddy creation failed', '加载示例失败': 'Failed to load examples', '暂无示例': 'No examples available', '运行日志': 'Run logs', '暂无运行日志': 'No run logs yet', '开始时间': 'Started', '结束时间': 'Finished', '捕获错误': 'Caught error', '暂无执行日志': 'No execution log entries', '执行日志': 'Execution log', '尚未结束': 'Still running',
@@ -12638,7 +12641,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // 按「文件」维度删会让同源副本变孤儿、或误删别的账号的原始会话。清理仍走「会话」页。
     // attempted：本次会话里点过「开始扫描」没有。用来决定空态下要不要露出工具栏的「重新扫描」——
     // 从没扫过就只给一个「开始扫描」，避免两个语义重复的按钮并排。
-    var spaceWatch = { timer: null, jobId: '', pollMs: 1200, misses: 0, attempted: false };
+    // sort：每个分组各一份 {key:'bytes'|'files', dir:'desc'|'asc'}；
+    // result/meta：最近一次扫描结果 —— 点列头排序时直接用它重渲染，不再打一次 daemon（数据没变，只是顺序变了）。
+    var spaceWatch = { timer: null, jobId: '', pollMs: 1200, misses: 0, attempted: false, sort: {}, result: null, meta: null };
 
     function spaceNum(n) {
       var v = Math.max(0, Math.round(Number(n) || 0));
@@ -12793,10 +12798,101 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       return parts.join(' · ');
     }
 
+    // ===== 列头点击排序（在渲染层做，不碰扫描器）=====
+    // 为什么不改 space-scan.js：扫描器已经把每个条目的 bytes / files 都算好了，换个顺序纯属展示问题。
+    // 改扫描器必须递增 SPACE_SCAN_VERSION，那会让所有旧缓存失效、逼用户重扫一次（本机冷跑约 110 秒）
+    // —— 为了一次排序不值当，而且「只是换个顺序」也不该改写扫描结果的语义。
+    // 状态按分组隔离（账号 / 空间 / 任务对话 / 其它占用 各一份），存在 spaceWatch 里：
+    // 结果每次重渲染都会重建 innerHTML，状态必须活在渲染之外才不会被抹掉。
+    var SPACE_SORT_KEYS = { bytes: 1, files: 1 };
+
+    function spaceSortOf(sec) {
+      if (!spaceWatch.sort) spaceWatch.sort = {};
+      var state = spaceWatch.sort[sec];
+      if (!state) { state = { key: '', dir: 'desc' }; spaceWatch.sort[sec] = state; }
+      return state;
+    }
+
+    // 第一下 = 从大到小 / 从多到少（用户要的默认），再点同一列才反过来；换一列 = 新列重新从大到小。
+    function spaceSortClick(sec, key) {
+      if (!SPACE_SORT_KEYS[key]) return false;
+      var state = spaceSortOf(sec);
+      if (state.key === key) state.dir = state.dir === 'desc' ? 'asc' : 'desc';
+      else { state.key = key; state.dir = 'desc'; }
+      return true;
+    }
+
+    function spaceSortName(item) {
+      var value = item && (item.title || item.nickname || item.name || item.cwd || item.slug || item.uid);
+      return String(value == null ? '' : value);
+    }
+
+    // 返回新数组，绝不原地重排：同一份 result 会被重复渲染（缓存命中、点排序），
+    // 原地排序会让「默认顺序」在第二次渲染时已经无从恢复。
+    function spaceSortList(list, sec) {
+      var rows = Array.isArray(list) ? list : [];
+      var state = spaceSortOf(sec);
+      if (!state.key || rows.length < 2) return rows;
+      var key = state.key;
+      var sign = state.dir === 'asc' ? 1 : -1;
+      return rows.slice().sort(function (a, b) {
+        var diff = ((Number(a[key]) || 0) - (Number(b[key]) || 0)) * sign;
+        if (diff) return diff;
+        // 同值时的次序必须确定，否则每次渲染都在抖：先比体积，再比名称。
+        var byBytes = (Number(b.bytes) || 0) - (Number(a.bytes) || 0);
+        if (byBytes) return byBytes;
+        var an = spaceSortName(a), bn = spaceSortName(b);
+        return an < bn ? -1 : (an > bn ? 1 : 0);
+      });
+    }
+
+    // 列头。用 <button> 而不是 <span>：键盘 Tab + 回车天然可用，不必自己补 keydown。
+    // 箭头用绝对定位挂在按钮右缘之外（落在列头 10px 内边距里），这样文字右缘与下方数值严格对齐、
+    // 箭头也不占宽度 —— 否则「实际占用 / 文件数」两列的数字会被顶偏几个像素。
+    // 文案保持中文原文，交给 i18n 扫描器整句替换（两条 tooltip 必须整句入词典，否则会被撕成中英混合）。
+    function spaceSortHeadHtml(sec, label) {
+      var state = spaceSortOf(sec);
+      var cell = function (key, text, tip) {
+        var on = state.key === key;
+        return '<button type="button" class="wbs-space-sort' + (on ? ' on' : '') + '"' +
+          ' data-space-sort="' + escAttr(sec) + '" data-space-key="' + escAttr(key) + '"' +
+          ' data-space-dir="' + (on ? state.dir : '') + '"' +
+          ' aria-pressed="' + (on ? 'true' : 'false') + '" title="' + escAttr(tip) + '">' +
+          '<span>' + esc(text) + '</span><i class="wbs-space-caret" aria-hidden="true">' +
+          (on && state.dir === 'asc' ? '\u25b2' : '\u25bc') + '</i></button>';
+      };
+      return '<div class="wbs-space-sec-head"><span>' + esc(label) + '</span>' +
+        cell('bytes', '实际占用', '点击按实际占用排序') +
+        cell('files', '文件数', '点击按文件数排序') +
+        '</div>';
+    }
+
+    // 用最近一次结果重渲染。数据没变、只是顺序变了 —— 不打 daemon、也不重新扫描。
+    function spaceSortRender() {
+      if (spaceWatch.result) { renderSpaceResult(spaceWatch.result, spaceWatch.meta); return; }
+      refreshSpaceScan();
+    }
+
+    // 事件委托挂在 #wbs-space-body 上（渲染只换它的 innerHTML，容器本身不换），
+    // 所以每次重渲染都不需要重新绑事件。
+    function onSpaceSortClick(event) {
+      var target = event && event.target;
+      var btn = target && target.closest ? target.closest('.wbs-space-sort') : null;
+      if (!btn) return;
+      var sec = btn.getAttribute('data-space-sort') || '';
+      var key = btn.getAttribute('data-space-key') || '';
+      if (!sec || !spaceSortClick(sec, key)) return;
+      event.preventDefault();
+      spaceSortRender();
+    }
+
     function renderSpaceResult(result, meta) {
       var els = spaceScanEls();
       if (!els || !els.body) return;
-      if (!result || !result.totals) { renderSpaceEmpty(); return; }
+      if (!result || !result.totals) { spaceWatch.result = null; renderSpaceEmpty(); return; }
+      // 记住最近一次结果：点列头排序时直接重渲染，不再打一次 daemon。
+      spaceWatch.result = result;
+      spaceWatch.meta = meta || null;
       if (els.rescan) { els.rescan.hidden = false; els.rescan.disabled = false; }
       var totals = result.totals || {};
       var accounts = result.accounts || [];
@@ -12829,68 +12925,72 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
       var i, j;
       if (accounts.length) {
-        html += '<div class="wbs-space-sec"><div class="wbs-space-sec-head"><span>账号</span><span>实际占用</span><span>文件</span></div>';
-        for (i = 0; i < accounts.length; i++) {
-          html += spaceRowHtml(accounts[i].nickname || accounts[i].uid,
-            (accounts[i].sessions || 0) + ' 个会话', accounts[i].bytes, accounts[i].files, totalBytes);
+        html += '<div class="wbs-space-sec">' + spaceSortHeadHtml('accounts', '账号');
+        var accRows = spaceSortList(accounts, 'accounts');
+        for (i = 0; i < accRows.length; i++) {
+          html += spaceRowHtml(accRows[i].nickname || accRows[i].uid,
+            (accRows[i].sessions || 0) + ' 个会话', accRows[i].bytes, accRows[i].files, totalBytes);
         }
         html += '</div>';
       }
 
       if (spaces.length) {
-        html += '<div class="wbs-space-sec"><div class="wbs-space-sec-head"><span>空间（工作目录）</span><span>实际占用</span><span>文件</span></div>';
-        var top = spaces.slice(0, 15);
+        html += '<div class="wbs-space-sec">' + spaceSortHeadHtml('spaces', '空间（工作目录）');
+        var spaceRows = spaceSortList(spaces, 'spaces');
+        var top = spaceRows.slice(0, 15);
         for (i = 0; i < top.length; i++) {
           var space = top[i];
           var spaceTitle = spaceConvLabel(space);
           html += spaceRowHtml(spaceTitle || spaceBaseName(space.cwd || space.slug),
             spaceSubText(space), space.bytes, space.files, totalBytes);
         }
-        if (spaces.length > top.length) {
+        if (spaceRows.length > top.length) {
           var sBytes = 0, sFiles = 0;
-          for (i = top.length; i < spaces.length; i++) { sBytes += Number(spaces[i].bytes) || 0; sFiles += Number(spaces[i].files) || 0; }
-          html += spaceRestRow('其余空间', spaces.length - top.length, sBytes, sFiles);
+          for (i = top.length; i < spaceRows.length; i++) { sBytes += Number(spaceRows[i].bytes) || 0; sFiles += Number(spaceRows[i].files) || 0; }
+          html += spaceRestRow('其余空间', spaceRows.length - top.length, sBytes, sFiles);
         }
         html += '</div>';
       }
 
       var conversations = result.conversations || [];
       if (conversations.length) {
-        html += '<div class="wbs-space-sec"><div class="wbs-space-sec-head"><span>任务对话（按占用排序）</span><span>实际占用</span><span>文件</span></div>';
-        var topConv = conversations.slice(0, 15);
+        html += '<div class="wbs-space-sec">' + spaceSortHeadHtml('conversations', '任务对话（按占用排序）');
+        var convRows = spaceSortList(conversations, 'conversations');
+        var topConv = convRows.slice(0, 15);
         for (i = 0; i < topConv.length; i++) {
           var conv = topConv[i];
           var convSub = (conv.sessions > 1 ? '跨账号副本 ×' + conv.sessions + ' · ' : '')
             + (spaceBaseName(conv.cwd || '') || '未知空间');
           html += spaceRowHtml(conv.title || '(未命名对话)', convSub, conv.bytes, conv.files, totalBytes);
         }
-        if (conversations.length > topConv.length) {
+        if (convRows.length > topConv.length) {
           var cBytes = 0, cFiles = 0;
-          for (i = topConv.length; i < conversations.length; i++) {
-            cBytes += Number(conversations[i].bytes) || 0;
-            cFiles += Number(conversations[i].files) || 0;
+          for (i = topConv.length; i < convRows.length; i++) {
+            cBytes += Number(convRows[i].bytes) || 0;
+            cFiles += Number(convRows[i].files) || 0;
           }
-          html += spaceRestRow('其余对话', conversations.length - topConv.length, cBytes, cFiles);
+          html += spaceRestRow('其余对话', convRows.length - topConv.length, cBytes, cFiles);
         }
         html += '</div>';
       }
 
       if (shared.length) {
-        html += '<div class="wbs-space-sec"><div class="wbs-space-sec-head"><span>其它占用（不属于任何账号或空间）</span><span>实际占用</span><span>文件</span></div>';
-        var topShared = shared.slice(0, 12);
+        html += '<div class="wbs-space-sec">' + spaceSortHeadHtml('shared', '其它占用（不属于任何账号或空间）');
+        var sharedRows = spaceSortList(shared, 'shared');
+        var topShared = sharedRows.slice(0, 12);
         for (i = 0; i < topShared.length; i++) {
           html += spaceRowHtml(topShared[i].name, sharedHint(topShared[i]), topShared[i].bytes, topShared[i].files, totalBytes);
         }
-        if (shared.length > topShared.length) {
+        if (sharedRows.length > topShared.length) {
           var hBytes = 0, hFiles = 0;
-          for (i = topShared.length; i < shared.length; i++) { hBytes += Number(shared[i].bytes) || 0; hFiles += Number(shared[i].files) || 0; }
-          html += spaceRestRow('其余共享项', shared.length - topShared.length, hBytes, hFiles);
+          for (i = topShared.length; i < sharedRows.length; i++) { hBytes += Number(sharedRows[i].bytes) || 0; hFiles += Number(sharedRows[i].files) || 0; }
+          html += spaceRestRow('其余共享项', sharedRows.length - topShared.length, hBytes, hFiles);
         }
         html += '</div>';
       }
 
       if (Number(unattr.files)) {
-        html += '<div class="wbs-space-sec"><div class="wbs-space-sec-head"><span>未归属</span><span>实际占用</span><span>文件</span></div>' +
+        html += '<div class="wbs-space-sec"><div class="wbs-space-sec-head"><span>未归属</span><span>实际占用</span><span>文件数</span></div>' +
           '<div class="wbs-space-row"><div class="wbs-space-name"><b>认不出账号的会话数据</b>' +
           '<i>会话记录已被删或不属于任何已保存账号</i></div>' +
           '<div class="wbs-space-size"><b>' + esc(fmtBytes(unattr.bytes)) + '</b></div>' +
@@ -13035,6 +13135,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (els && els.body) els.body.innerHTML = '<div class="wbs-space-empty">正在读取扫描结果…</div>';
       if (els && els.rescan) els.rescan.addEventListener('click', function () { startSpaceScan(); });
       if (els && els.btn) els.btn.addEventListener('click', function () { cancelSpaceScan(); });
+      // 列头排序走事件委托：渲染只换 innerHTML，容器不换，所以绑一次就够。
+      if (els && els.body) els.body.addEventListener('click', onSpaceSortClick);
     }
 
     // 观察当前活跃的复制任务。可在任何时刻重复调用（切号、打开面板、注入完成）。
@@ -14906,6 +15008,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-space-sec-head,.wbs-space-row{display:grid;grid-template-columns:minmax(0,1fr) auto 62px;align-items:center;gap:10px}',
     '.wbs-space-sec-head{padding:7px 10px;font-size:10.5px;font-weight:600;color:var(--wb-icon-tertiary,#999);background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 12%,transparent)}',
     '.wbs-space-sec-head span:nth-child(2),.wbs-space-sec-head span:nth-child(3){text-align:right}',
+    // 列头可点排序。按钮贴住列头右缘（justify-self:end），箭头绝对定位挂在右外侧的 10px 内边距里 ——
+    // 这样文字右缘与下面各行的数值严格对齐，箭头也不占宽度。未排序时箭头 opacity:0（保留宽度，切换不跳位）。
+    '.wbs-space-sort{position:relative;justify-self:end;display:inline-flex;align-items:center;border:0;padding:0;margin:0;background:none;font-family:inherit;font-size:inherit;font-weight:inherit;line-height:inherit;color:inherit;cursor:pointer;white-space:nowrap}',
+    '.wbs-space-sort:hover{color:var(--wb-accent-blue,#4f86ff)}',
+    '.wbs-space-sort.on{color:var(--wb-accent-blue,#4f86ff)}',
+    '.wbs-space-sort:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:1px;border-radius:4px}',
+    '.wbs-space-caret{position:absolute;left:100%;margin-left:2px;font-style:normal;font-size:9px;line-height:1;opacity:0}',
+    '.wbs-space-sort:hover .wbs-space-caret{opacity:.45}',
+    '.wbs-space-sort.on .wbs-space-caret{opacity:.9}',
     '.wbs-space-row{padding:8px 10px;border-top:1px solid var(--wb-border-subtle,#f0f0f0)}',
     '.wbs-space-row:first-of-type{border-top:none}',
     '.wbs-space-row-more{color:var(--wb-icon-tertiary,#999)}',
