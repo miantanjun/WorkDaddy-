@@ -117,7 +117,7 @@ const RESOLVE = {
     scan.spaceSlug('C:\\Users\\Lyon\\WorkBuddy\\2026-08-11-14-13-10'));
   ok(scan.spaceSlug('') === '' && scan.spaceSlug(null) === '' && scan.spaceSlug(undefined) === '',
     'A0c 空值安全（返回空串）');
-  ok(scan.SPACE_SCAN_VERSION === 2, 'A0d 版本号已随归属口径变更递增（旧缓存会失效重扫）', scan.SPACE_SCAN_VERSION);
+  ok(scan.SPACE_SCAN_VERSION === 3, 'A0d 版本号已随归属口径变更递增（旧缓存会失效重扫）', scan.SPACE_SCAN_VERSION);
 
   console.log('[A] 结构与断言基线');
   const progress = [];
@@ -243,6 +243,77 @@ const RESOLVE = {
     }
   } catch (e) {
     fail++; console.log('  FAIL K 真实根目录冒烟异常 → ' + (e && e.message));
+  }
+
+  // ---------------------------------------------------------------------------
+  // [L] 任务对话维度（v3 新增）
+  // 背景：WorkBuddy 给每个任务对话分配 <工作根目录>/<YYYY-MM-DD-HH-mm-ss> 形态的工作目录，
+  // 目录名和用户提的需求毫无关系 —— 只按目录汇报，界面上就是一串时间戳。标题只在会话库里，
+  // 所以这里锁死「调用方注入的 title 必须原样出现在 spaces[].conversations 上」。
+  console.log('\n[L] 任务对话维度（工作目录 → 哪个任务）');
+  {
+    const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'wd-space-conv-'));
+    const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const C = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'; // 无标题
+    const slug2 = scan.spaceSlug(CWD2);
+    write(path.join(root2, 'workspace', 'sessions', A, 'payload.bin'), 1000);
+    write(path.join(root2, 'workspace', 'sessions', C, 'payload.bin'), 500);
+    write(path.join(root2, 'workspace', 'sessions', D, 'payload.bin'), 30);
+    // B 与 A 是同一份物理文件（切号自动复制留下的硬链接）→ 同一段对话的第二份记录
+    write(path.join(root2, 'workspace', 'sessions', B, 'payload.bin'), 1000);
+    fs.unlinkSync(path.join(root2, 'workspace', 'sessions', B, 'payload.bin'));
+    fs.linkSync(path.join(root2, 'workspace', 'sessions', A, 'payload.bin'),
+      path.join(root2, 'workspace', 'sessions', B, 'payload.bin'));
+    write(path.join(root2, 'projects', slug2, A + '.jsonl'), 300);
+    write(path.join(root2, 'projects', slug2, B + '.jsonl'), 400);
+    write(path.join(root2, 'projects', slug2, C + '.jsonl'), 200);
+    write(path.join(root2, 'projects', slug2, D + '.jsonl'), 20);
+
+    const conv = await scan.scanSpace(root2, {
+      resolveSession: (key) => {
+        if (key === A) return { uid: UID1, cwd: CWD2, title: '代码助手改界面' };
+        if (key === B) return { uid: UID2, cwd: CWD2, title: '代码助手改界面' };
+        if (key === C) return { uid: UID1, cwd: CWD2, title: '导出对账单' };
+        if (key === D) return { uid: UID1, cwd: CWD2 }; // 没标题
+        return null;
+      },
+      resolveSpaceSlug: (slug) => (slug === slug2 ? CWD2 : null),
+    });
+
+    const space = conv.spaces.find((s) => s.cwd === CWD2);
+    const list = (space && space.conversations) || [];
+    const byTitle = {};
+    list.forEach((x) => { byTitle[x.title] = x; });
+
+    ok(conv.sessions.length === 4, 'L1 单条会话进 sessions[]（含跨账号副本）', conv.sessions.length);
+    ok(conv.conversations.length === 3, 'L2 同一标题的多份记录聚合成 1 个对话', conv.conversations.length);
+    ok(!!space && list.length === 3, 'L3 空间上挂了自己的对话列表', list.map((x) => x.title));
+    ok(byTitle['代码助手改界面'] && byTitle['代码助手改界面'].sessions === 2,
+      'L4 同一对话的两份记录被计为 ×2', byTitle['代码助手改界面'] && byTitle['代码助手改界面'].sessions);
+    // A 的 payload 1000（B 是硬链接，去重后为 0）+ A.jsonl 300 + B.jsonl 400 = 1700
+    ok(byTitle['代码助手改界面'] && byTitle['代码助手改界面'].bytes === 1700,
+      'L5 对话占用按物理字节去重（硬链接副本不重复计）',
+      byTitle['代码助手改界面'] && byTitle['代码助手改界面'].bytes);
+    ok(byTitle['代码助手改界面'] && byTitle['代码助手改界面'].rawBytes === 2700,
+      'L6 对话的 rawBytes 保留含重复口径（用于解释差值）',
+      byTitle['代码助手改界面'] && byTitle['代码助手改界面'].rawBytes);
+    ok(list[0] && list[0].title === '代码助手改界面' && list[0].bytes >= (list[1] ? list[1].bytes : 0),
+      'L7 对话按实际占用降序（不能按 rawBytes 排，否则「3 份小对话」会压过「1 份大对话」）',
+      list.map((x) => x.title + ':' + x.bytes));
+    ok(list.some((x) => x.title === '(未命名对话)'), 'L8 没标题的会话有兜底分组，不会丢数据',
+      list.map((x) => x.title));
+    const convSum = list.reduce((sum, x) => sum + x.bytes, 0);
+    ok(convSum === space.bytes, 'L9 对话之和 == 该空间实际占用（口径闭合，不会出现「加起来对不上」）',
+      { convSum, spaceBytes: space.bytes });
+    ok(Array.isArray(space.conversations) && conv.sessions.every((s) => typeof s.title === 'string'),
+      'L10 sessions[] 每条都带 title 字段（缺失时为空格串而非 undefined）');
+
+    const noTitle = await scan.scanSpace(root2, {});
+    ok(noTitle.conversations.every((x) => x.title === '(未命名对话)') || noTitle.conversations.length === 0,
+      'L11 调用方不注入 title 时不崩，统一落到「(未命名对话)」');
+    try { fs.rmSync(root2, { recursive: true, force: true }); } catch (_) {}
   }
 
   try { fs.rmSync(root, { recursive: true, force: true }); } catch (_) {}

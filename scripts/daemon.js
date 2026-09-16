@@ -6721,7 +6721,8 @@ function publicSpaceScanJob(job) {
 }
 
 async function buildSpaceScanResolvers() {
-  const rows = await sqliteQuery('SELECT id, user_id, cwd FROM sessions;').catch(() => []);
+  // title / custom_title 必须一起取：工作目录名是时间戳，只有标题能让用户认出「这是哪个任务」。
+  const rows = await sqliteQuery('SELECT id, user_id, cwd, title, custom_title FROM sessions;').catch(() => []);
   const byId = new Map();
   const cwdBySlug = new Map();
   for (const row of (rows || [])) {
@@ -6729,9 +6730,17 @@ async function buildSpaceScanResolvers() {
     if (!id) continue;
     const uid = String((row && row.user_id) || '');
     const cwd = row && row.cwd ? String(row.cwd) : '';
+    // 用户改过的名字优先（custom_title），否则用客户端自动生成的摘要标题。
+    const title = String((row && (row.custom_title || row.title)) || '').trim();
     // 同一个会话 id 在两处出现时保留有归属的那条（deleted_at 的行 uid 也可能为空）
     const prev = byId.get(id);
-    if (!prev || (!prev.uid && uid)) byId.set(id, { uid, cwd: cwd || (prev && prev.cwd) || '' });
+    if (!prev || (!prev.uid && uid)) {
+      byId.set(id, {
+        uid,
+        cwd: cwd || (prev && prev.cwd) || '',
+        title: title || (prev && prev.title) || '',
+      });
+    }
     if (cwd) cwdBySlug.set(spaceSlug(cwd), cwd);
   }
   const uids = listAccounts(DATA_DIR).map((a) => String(a.uid || '')).filter(Boolean);

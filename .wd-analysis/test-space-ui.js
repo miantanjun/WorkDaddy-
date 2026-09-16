@@ -57,6 +57,9 @@ const POLL = functionBody(SRC, 'function pollSpaceScan()');
 const START = functionBody(SRC, 'function startSpaceScan()');
 const CANCEL = functionBody(SRC, 'function cancelSpaceScan()');
 const REFRESH = functionBody(SRC, 'function refreshSpaceScan()');
+// 「工作目录 → 任务对话」的翻译层（v3）：标题取自会话库，目录名只作兜底与定位。
+const CONVLABEL = functionBody(SRC, 'function spaceConvLabel(space)');
+const CONVSUB = functionBody(SRC, 'function spaceSubText(space)');
 
 console.log('[A] Tab 与面板接线');
 ok(SRC.indexOf('data-tab="spaces"') >= 0, 'A1 有「空间」tab 按钮');
@@ -108,7 +111,9 @@ ok(SRC.indexOf("'.wbs-sess-progress{") >= 0 && PANE.indexOf('wbs-sess-progress-f
   'D5 复用会话页的进度条样式，不另造一套');
 
 console.log('\n[E] 口径说明（不做就会让人以为「各账号之和 ≠ 总数」是 bug）');
-ok(RESULT.indexOf('互相重叠') >= 0 && RESULT.indexOf('不能相加') >= 0, 'E1 说明账号/空间两种切法重叠、不能相加');
+ok(RESULT.indexOf('互相重叠') >= 0 && RESULT.indexOf('不能相加') >= 0, 'E1 说明各维度口径重叠、不能相加');
+ok(/三种切法/.test(RESULT) && /账号/.test(RESULT) && /空间/.test(RESULT) && /任务对话/.test(RESULT),
+  'E1b 明确点出「账号 / 空间 / 任务对话」三种切法（漏一个就会让人把差异当 bug）');
 ok(RESULT.indexOf('设备号, inode') >= 0, 'E2 说明去重口径与资源管理器一致');
 ok(/totals\.dedupedFiles[\s\S]{0,200}fmtBytes\(totals\.dedupedBytes\)/.test(RESULT), 'E3 展示本次去重了多少');
 ok(RESULT.indexOf('wbs-space-note warn') >= 0 && RESULT.indexOf('略小') >= 0, 'E4 有读不到的条目时提示实际占用会偏小');
@@ -120,7 +125,7 @@ ok(SUB.indexOf("job.current") >= 0, 'F1 副标题只取目录路径');
 ok(!/job\.current(File|Name)|currentPath|filePath|item\.name\b/.test(SUB), 'F2 副标题不引用任何文件名字段', SUB.slice(0, 200));
 ok(!/resp\w*\.name/.test(RESULT), 'F3 结果渲染里没有文件名字段');
 // shared[].name / spaces[].cwd 是 dataRoot 的直接子项或目录路径，属于设计内暴露
-ok(RESULT.indexOf('spaceBaseName(space.cwd') >= 0, 'F4 空间行只显示目录基名 + 完整目录路径');
+ok(RESULT.indexOf('spaceBaseName(space.cwd') >= 0, 'F4 空间行保留目录基名（作为无标题时的兜底与定位用）');
 
 console.log('\n[G] i18n 与样式落地');
 ok(SRC.indexOf("'空间': 'Workspace'") >= 0, 'G1 tab 有英文');
@@ -138,6 +143,28 @@ ok(cssHas('.wbs-space-sec-head,.wbs-space-row{display:grid;grid-template-columns
 // 「开始扫描」并排）。这条全局守卫规则不能删。
 ok(cssHas('.wbs-root [hidden]{display:none !important}'),
   'G13 [hidden] 守卫规则在（类里写了 display 的元素也能真正藏住）');
+
+console.log('\n[H] 工作目录 → 任务对话（目录名是时间戳，用户认不出来）');
+ok(RESULT.indexOf('spaceConvLabel(space)') >= 0, 'H1 空间行主标签优先用对话标题');
+ok(/spaceTitle \|\| spaceBaseName\(/.test(RESULT), 'H2 取不到标题时回退到目录基名，不留空行');
+ok(CONVLABEL.indexOf('conversations') >= 0 && CONVLABEL.indexOf('等 ') >= 0,
+  'H3 一个目录里有多个对话时标注「等 N 个对话」，不假装只有一个');
+ok(CONVSUB.indexOf('未匹配到会话记录') >= 0 && CONVSUB.indexOf('个对话') >= 0 && CONVSUB.indexOf('份记录') >= 0,
+  'H4 副标题区分「N 个对话」与「N 份记录」（自动复制会产生同标题副本，不能混为一谈）');
+ok(CONVSUB.indexOf('space.cwd') >= 0, 'H5 副标题仍带完整工作目录路径（要能找到磁盘位置）');
+ok(RESULT.indexOf('任务对话（按占用排序）') >= 0, 'H6 增加「任务对话」分组，直接回答「哪个任务占了多少」');
+ok(/跨账号副本 ×/.test(RESULT), 'H7 对话行标注跨账号副本份数（解释为什么「份记录」会多于「个对话」）');
+ok(RESULT.indexOf('(未命名对话)') >= 0, 'H8 没有标题的会话有兜底文案，不显示 undefined');
+ok(RESULT.indexOf('其余对话') >= 0, 'H9 对话超出展示条数时用汇总行收口，不静默截断');
+['任务对话（按占用排序）', '其余对话', '个对话', '份记录', '跨账号副本', '未知空间'].forEach(function (key, i) {
+  ok(SRC.indexOf("'" + key + "':") >= 0, 'H' + (10 + i) + ' i18n 词典含「' + key + '」');
+});
+// 目录名是时间戳这件事不能只靠前端：扫描器必须拿到标题才有得渲染。
+ok(/SPACE_SCAN_VERSION = 3/.test(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'space-scan.js'), 'utf8')),
+  'H16 扫描结果版本号已递增（旧缓存必须失效重扫，否则用户看不到标题）');
+ok(/SELECT id, user_id, cwd, title, custom_title FROM sessions/.test(
+  fs.readFileSync(path.join(__dirname, '..', 'scripts', 'daemon.js'), 'utf8')),
+  'H17 daemon 侧的 resolver 已把 title / custom_title 取出来透传给扫描器');
 
 console.log('\n==== ' + pass + ' passed, ' + fail + ' failed ====');
 process.exit(fail ? 1 : 0);

@@ -19,9 +19,14 @@
  *   其余（blobs / logs / binaries / traces / shell-snapshots / sessions/<数字>.json …）
  *   无法可靠归属到某个账号或空间 → 计入 shared，按顶层目录给出明细，绝不硬猜。
  *
- * **重叠口径（重要）**：`accounts` 与 `spaces` 是**同一批字节的两种切法**，不是互斥分区，
+ * **重叠口径（重要）**：`accounts` / `spaces` / `sessions` 是**同一批字节的三种切法**，不是互斥分区，
  * 所以不能相加当总体积（`overlapping: true` 就是给调用方的显式提醒）。
  * 总体积只看 `totals`：每个文件恰好累加一次。
+ *
+ * **为什么要有 sessions / conversations（v3 新增）**：WorkBuddy 给每个任务对话分配一个
+ * `<工作根目录>/<YYYY-MM-DD-HH-mm-ss>` 形态的工作目录，目录名和「用户提的那个需求」毫无关系。
+ * 只按目录汇报，用户看到的就是一串时间戳。标题只存在于会话库里，所以扫描器把标题透传上来，
+ * 由上层把「目录」翻译成「对话」。
  *
  * 本模块**不依赖 daemon.js**，可以单独 require 做测试（daemon 会起 HTTP 服务，不能 require）。
  * 会话/空间/账号的映射由调用方通过 resolve* 回调注入，扫描器自己不认识 SQLite。
@@ -33,8 +38,9 @@ const fs = require('fs');
 const path = require('path');
 
 // 结果结构的版本号。改动**归属口径 / 键规则**时必须递增：daemon 读缓存时对不上版本就丢弃重扫，
-// 否则旧的错结果会一直显示。v2 = spaceSlug 修正（盘符小写 + `:\` 合并）。
-const SPACE_SCAN_VERSION = 2;
+// 否则旧的错结果会一直显示。v2 = spaceSlug 修正（盘符小写 + `:\` 合并）。v3 = 增加「会话（任务对话）」
+// 维度：spaces[].conversations（按标题去重后的对话占用）+ 顶层 sessions[]（单条会话占用）。
+const SPACE_SCAN_VERSION = 3;
 
 // 相对 dataRoot 的顶层路径 → 子项键的解析方式。
 //   session-dir   子项是目录，目录名 = 会话 uuid
@@ -105,7 +111,9 @@ function accountFileUid(name) {
  *
  * @param {string} root  数据根目录（daemon 传 PROFILE.dataRoot）
  * @param {object} [options]
- *   resolveSession(key) -> {uid, cwd} | null     会话 uuid → 归属
+ *   resolveSession(key) -> {uid, cwd, title} | null   会话 uuid → 归属
+ *                            title 可选：会话/任务对话标题，用于把「工作目录」翻译成人看得懂的
+ *                            「哪个任务」。不传则 spaces[].conversations 里标题为「(未命名对话)」。
  *   resolveAccountName(name) -> uid | null       storage/ 下的目录名 / 文件名 → uid
  *   resolveSpaceSlug(slug) -> cwd | null         projects/ 下的 slug → cwd
  *   onProgress(info) -> void
@@ -134,6 +142,7 @@ async function scanSpace(root, options = {}) {
   const spaces = new Map();     // cwd | slug -> bucket（带 cwd/resolved 元信息）
   const shared = new Map();     // 顶层名 -> bucket
   const unattributed = makeBucket();
+  const sessions = new Map();         // session key -> bucket（带 id/uid/cwd/title 元信息）
   const accountSessions = new Map();  // uid -> Set(sessionKey)
   const spaceSessions = new Map();    // cwd -> Set(sessionKey)
   const seenLinks = new Set();        // 只登记 nlink>1 的 (dev,ino)
@@ -168,6 +177,14 @@ async function scanSpace(root, options = {}) {
       if (!spaceSessions.has(info.cwd)) spaceSessions.set(info.cwd, new Set());
       spaceSessions.get(info.cwd).add(key);
     }
+    // 会话自身也开一个桶：工作目录只是「哪次任务」，真正回答「谁占了多少」的是会话。
+    // 标题由调用方通过 resolveSession 注入（扫描器自己不认识 SQLite）。
+    list.push(bucketFor(sessions, key, {
+      id: key,
+      uid: info.uid,
+      cwd: info.cwd || '',
+      title: String(info.title == null ? '' : info.title).trim(),
+    }));
     return { buckets: list, resolved: true };
   };
 
@@ -372,12 +389,58 @@ async function scanSpace(root, options = {}) {
   const accountsOut = Array.from(accounts.entries())
     .map(([uid, bucket]) => Object.assign({ uid }, finalizeBucket(bucket)))
     .sort((a, b) => b.rawBytes - a.rawBytes);
+
+  // 单条会话（= 一份会话记录）。同一段对话被自动复制到多个账号时会各占一行，
+  // 标题相同、字节可能不同（复制时的产物/快照不全），因此上层还要按标题再聚合一次。
+  const sessionsOut = Array.from(sessions.entries())
+    .map(([id, bucket]) => {
+      const out = finalizeBucket(bucket);
+      delete out.sessions; // 会话桶没有「会话数」这个维度
+      out.id = id;
+      out.uid = bucket.uid || '';
+      out.cwd = bucket.cwd || '';
+      out.title = bucket.title || '';
+      return out;
+    })
+    .sort((a, b) => b.rawBytes - a.rawBytes);
+
+  // (cwd, 标题) -> 聚合；用于回答「这个工作目录里的哪个任务对话占了最多」。
+  const conversationKey = (cwd, title) => String(cwd) + '\u0000' + (title || '(未命名对话)');
+  const conversationMap = new Map();  // key -> {cwd, title, sessions, bytes, rawBytes, files}
+  const conversationsByCwd = new Map(); // cwd -> Map(key -> item)
+  for (const item of sessionsOut) {
+    const key = conversationKey(item.cwd, item.title);
+    let conv = conversationMap.get(key);
+    if (!conv) {
+      conv = { cwd: item.cwd, title: item.title || '(未命名对话)', sessions: 0, bytes: 0, rawBytes: 0, files: 0 };
+      conversationMap.set(key, conv);
+      if (item.cwd) {
+        if (!conversationsByCwd.has(item.cwd)) conversationsByCwd.set(item.cwd, new Map());
+        conversationsByCwd.get(item.cwd).set(key, conv);
+      }
+    }
+    conv.sessions += 1;
+    conv.bytes += item.bytes;
+    conv.rawBytes += item.rawBytes;
+    conv.files += item.files;
+  }
+  const conversationsOut = Array.from(conversationMap.values())
+    // 按「实际占用」排序而不是 rawBytes：同一段对话被复制到 3 个账号时 rawBytes ≈ 3×bytes，
+    // 用 rawBytes 排序会让「3 份小对话」压过「1 份大对话」，而界面显示的是去重后的数字。
+    .sort((a, b) => (b.bytes - a.bytes) || (b.rawBytes - a.rawBytes));
+
   const spacesOut = Array.from(spaces.entries())
     .map(([key, bucket]) => {
       const out = finalizeBucket(bucket);
       out.cwd = bucket.cwd || key;
       out.resolved = bucket.resolved !== false;
       if (bucket.slug) out.slug = bucket.slug;
+      // 该工作目录下的对话（按标题去重、按占用降序）。空数组 = 目录里没有能对应到会话的记录
+      // （通常是会话已被删除，只剩磁盘残留）。
+      const convs = conversationsByCwd.get(out.cwd);
+      out.conversations = convs
+        ? Array.from(convs.values()).sort((a, b) => (b.bytes - a.bytes) || (b.rawBytes - a.rawBytes))
+        : [];
       return out;
     })
     .sort((a, b) => b.rawBytes - a.rawBytes);
@@ -394,11 +457,13 @@ async function scanSpace(root, options = {}) {
     elapsedMs: finishedAt - startedAt,
     cancelled,
     processed,
-    // accounts / spaces 是同一批字节的两种切法，会互相重叠，不能相加
+    // accounts / spaces / sessions 是同一批字节的三种切法，会互相重叠，不能相加
     overlapping: true,
     totals: Object.assign({}, totals),
     accounts: accountsOut,
     spaces: spacesOut,
+    conversations: conversationsOut,
+    sessions: sessionsOut,
     shared: sharedOut,
     unattributed: finalizeBucket(unattributed),
   };

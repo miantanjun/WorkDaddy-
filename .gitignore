@@ -24,3 +24,8 @@ npm-debug.log*
 .workbuddy/
 .workbuddy-ai/
 /.private-docs/
+
+# .wd-analysis 只入库脚本：真机截图与真实扫描结果是本机证据，可随时重生成
+# （脚本：cdp-eval.py / probe-*.js / real-space-scan.js / rescan-and-report.py）
+.wd-analysis/*.png
+.wd-analysis/real-space-scan.json

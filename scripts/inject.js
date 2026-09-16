@@ -828,6 +828,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '实际占用（去重后）': 'On disk (deduped)', '文件数': 'Files', '目录数': 'Folders', '去重前（含重复）': 'Before dedupe',
     '实际占用': 'On disk', '空间（工作目录）': 'Workspaces (working folders)', '其它占用（不属于任何账号或空间）': 'Other data (no account or workspace)',
     '未归属': 'Unattributed', '其余空间': 'Other workspaces', '其余共享项': 'Other shared items',
+    '任务对话': 'Conversations', '任务对话（按占用排序）': 'Conversations (by size)', '其余对话': 'Other conversations',
+    '个对话': ' conversation(s)', '份记录': ' record(s)', '跨账号副本': 'Cross-account copies',
+    '空间（工作目录）': 'Workspaces (working folders)', '工作目录': 'Working folder', '未知空间': 'Unknown workspace',
+    '未匹配到会话记录（可能已被删除）': 'No matching session record (possibly deleted)', '目录已不存在，仅剩历史数据': 'Folder is gone; historical data only',
+    '（未命名对话）': '(Untitled conversation)', '(未命名对话)': '(Untitled conversation)', '未命名对话': 'Untitled conversation',
     '正准备扫描…': 'Preparing…', '准备扫描…': 'Preparing…', '正在启动扫描…': 'Starting…', '正在扫描空间占用…': 'Scanning storage usage…',
     '扫描完成': 'Scan complete', '扫描已中断': 'Scan cancelled', '扫描失败': 'Scan failed', '无法启动扫描': 'Could not start the scan',
     '读不到扫描进度': 'Cannot read scan progress', '还没有扫描结果。': 'No scan result yet.', '正在读取扫描结果…': 'Loading scan result…',
@@ -12715,6 +12720,28 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (start) start.addEventListener('click', function () { startSpaceScan(); });
     }
 
+    // 「空间」= WorkBuddy 给每个任务对话分配的自动工作目录，目录名形如 2026-09-14-10-51-52 ——
+    // 它只表示「什么时候开的」，和用户提的需求毫无关系，所以只显示目录名时用户根本认不出这是哪个任务。
+    // 标题只在会话库里，扫描器已透传到 space.conversations，这里把它提为主标签、路径降为副标签。
+    function spaceConvLabel(space) {
+      var convs = space && space.conversations;
+      if (!Array.isArray(convs) || !convs.length) return '';
+      var first = convs[0].title || '';
+      if (!first) return '';
+      return convs.length > 1 ? (first + ' 等 ' + convs.length + ' 个对话') : first;
+    }
+
+    function spaceSubText(space) {
+      var convs = Array.isArray(space.conversations) ? space.conversations : [];
+      var parts = [];
+      if (convs.length) parts.push(convs.length + ' 个对话');
+      if (space.sessions) parts.push(space.sessions + ' 份记录');
+      if (!convs.length) parts.push('未匹配到会话记录（可能已被删除）');
+      if (space.resolved === false) parts.push('目录已不存在，仅剩历史数据');
+      if (space.cwd || space.slug) parts.push(space.cwd || space.slug);
+      return parts.join(' · ');
+    }
+
     function renderSpaceResult(result, meta) {
       var els = spaceScanEls();
       if (!els || !els.body) return;
@@ -12743,7 +12770,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       // 口径说明必须写在最上面：不说清「账号之和 ≠ 总数」是口径重叠，用户会当成统计 bug。
       html += '<div class="wbs-space-note">「实际占用」按 (设备号, inode) 去重 —— 同一份产物被多个账号共用时只算一次，与资源管理器里的文件夹大小一致'
         + (Number(totals.dedupedFiles) ? '（本次去重 ' + esc(spaceNum(totals.dedupedFiles)) + ' 个 / ' + esc(fmtBytes(totals.dedupedBytes)) + '）' : '')
-        + '。下面的「账号」与「空间」是同一批文件的两种切法，互相重叠，因此不能相加；总数只看上面的实际占用。</div>';
+        + '。下面的「账号」「空间」「任务对话」是同一批文件的三种切法，互相重叠，因此不能相加；总数只看上面的实际占用。</div>';
 
       if (Number(totals.unreadable)) {
         html += '<div class="wbs-space-note warn">有 ' + esc(spaceNum(totals.unreadable)) + ' 个条目读不到（被其它进程占用或权限不足），实际占用会比真实值略小。</div>';
@@ -12764,14 +12791,35 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var top = spaces.slice(0, 15);
         for (i = 0; i < top.length; i++) {
           var space = top[i];
-          var sub = (space.resolved === false ? '目录已不存在，仅剩历史数据 · ' : '')
-            + (space.sessions ? space.sessions + ' 个会话 · ' : '') + (space.cwd || '');
-          html += spaceRowHtml(spaceBaseName(space.cwd || space.slug), sub, space.bytes, space.files, totalBytes);
+          var spaceTitle = spaceConvLabel(space);
+          html += spaceRowHtml(spaceTitle || spaceBaseName(space.cwd || space.slug),
+            spaceSubText(space), space.bytes, space.files, totalBytes);
         }
         if (spaces.length > top.length) {
           var sBytes = 0, sFiles = 0;
           for (i = top.length; i < spaces.length; i++) { sBytes += Number(spaces[i].bytes) || 0; sFiles += Number(spaces[i].files) || 0; }
           html += spaceRestRow('其余空间', spaces.length - top.length, sBytes, sFiles);
+        }
+        html += '</div>';
+      }
+
+      var conversations = result.conversations || [];
+      if (conversations.length) {
+        html += '<div class="wbs-space-sec"><div class="wbs-space-sec-head"><span>任务对话（按占用排序）</span><span>实际占用</span><span>文件</span></div>';
+        var topConv = conversations.slice(0, 15);
+        for (i = 0; i < topConv.length; i++) {
+          var conv = topConv[i];
+          var convSub = (conv.sessions > 1 ? '跨账号副本 ×' + conv.sessions + ' · ' : '')
+            + (spaceBaseName(conv.cwd || '') || '未知空间');
+          html += spaceRowHtml(conv.title || '(未命名对话)', convSub, conv.bytes, conv.files, totalBytes);
+        }
+        if (conversations.length > topConv.length) {
+          var cBytes = 0, cFiles = 0;
+          for (i = topConv.length; i < conversations.length; i++) {
+            cBytes += Number(conversations[i].bytes) || 0;
+            cFiles += Number(conversations[i].files) || 0;
+          }
+          html += spaceRestRow('其余对话', conversations.length - topConv.length, cBytes, cFiles);
         }
         html += '</div>';
       }
@@ -13049,6 +13097,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         // 版本标签：个人账号显示「个人版」；企业账号显示企业名称（enterpriseName），缺省回退「企业」。
         var editionBadge = a.type === 'personal' ? '个人版' : (a.enterpriseName ? a.enterpriseName : (a.type ? '企业' : ''));
         var badge = editionBadge ? '<span class="wbs-badge">' + esc(editionBadge) + '</span>' : '';
+        // 「当前使用中」角标紧贴昵称：这是用户最需要一眼看到的标识，优先于版本标签。
+        var currentBadge = isCur ? '<span class="wbs-badge wbs-cur-badge">当前使用中</span>' : '';
         var checkinBadge = checkinBadgeHtml(a);
         var invalidAuthBadge = a.authValid === false ? '<span class="wbs-badge wbs-auth-invalid">认证数据无效</span>' : '';
         // 当前登录账号隐藏操作；认证已过期的账号保留删除，但隐藏切换，避免进入登录页。
@@ -13068,7 +13118,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var idVal = state.mask ? maskAccountId(rawId) : rawId;
         card.innerHTML =
           '<div class="wbs-info">' +
-          '<div class="wbs-row1"><div class="wbs-name-group"><span class="wbs-name">' + esc(nameVal) + '</span>' + badge + checkinBadge + invalidAuthBadge + '</div>' + ops + '</div>' +
+          '<div class="wbs-row1"><div class="wbs-name-group"><span class="wbs-name">' + esc(nameVal) + '</span>' + currentBadge + badge + checkinBadge + invalidAuthBadge + '</div>' + ops + '</div>' +
           '<div class="wbs-meta wbs-secondary-row">' +
           '<div class="wbs-mi wbs-phone-cell' + (isUinMode ? ' wbs-uin-cell' : '') + '"><span class="wbs-lbl">' + idLbl + '</span><span class="wbs-val">' + esc(idVal) + '</span></div>' +
           '<div class="wbs-mi wbs-token-cell"><span class="wbs-lbl">有效期至</span><span class="wbs-val' + (ts.warn ? ' wbs-warn' : '') + '">' + esc(ts.label) + '</span></div>' +
@@ -13967,7 +14017,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     /* 账号卡片：头像 + 信息 + 右侧操作 */
     '.wbs-card{display:block;position:relative;padding:10px 12px;border-radius:12px;margin-bottom:4px;transition:background .12s}',
     '.wbs-card:hover{background:var(--wb-bg-hover,#f7f8fa)}',
-    '.wbs-card.cur{background:var(--wb-bg-hover,#f5f5f5)}',
+    // 当前账号卡片：必须「一眼可辨」。旧实现只给了一层 --wb-bg-hover 灰底，
+    // 与 hover 态同一个色值，等于没有标识。改为强调色浅底 + 1px 强调色描边 +
+    // 左侧 3px 强调色竖条（三条线索叠加，深浅主题都成立）。
+    '.wbs-card.cur{background:color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 10%,transparent);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 30%,transparent),inset 3px 0 0 0 var(--wb-accent-blue,#4f86ff)}',
+    '.wbs-card.cur:hover{background:color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 14%,transparent)}',
+    '.wbs-card.cur .wbs-name{font-weight:700}',
+    'html.cb-dark .wbs-card.cur,html[data-theme="dark"] .wbs-card.cur,body[data-vscode-theme-name*="dark" i] .wbs-card.cur{background:color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 20%,transparent);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 46%,transparent),inset 3px 0 0 0 var(--wb-accent-blue,#4f86ff)}',
+    'html.cb-dark .wbs-card.cur:hover,html[data-theme="dark"] .wbs-card.cur:hover,body[data-vscode-theme-name*="dark" i] .wbs-card.cur:hover{background:color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 26%,transparent)}',
     '.wbs-ava{width:34px;height:34px;border-radius:50%;background:var(--wb-bg-tertiary,#f0f0f0);color:var(--wb-icon-secondary,#555);display:flex;align-items:center;justify-content:center;font-weight:600;flex-shrink:0;font-size:14px}',
     '.wbs-info{min-width:0}',
     '.wbs-row1{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:7px;min-height:26px}',
@@ -14039,7 +14096,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     /* 版本标签（昵称旁：个人版 / 企业名称）：低饱和浅灰，信息次要不抢眼；深色主题单独适配 */
     '.wbs-badge{display:inline-flex;align-items:center;font-size:10px;line-height:1;padding:2px 7px;border-radius:999px;flex-shrink:1;min-width:0;max-width:112px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500;background:var(--wb-bg-tertiary,#eef0f3);color:var(--wb-color-text-secondary,#5f6368);border:1px solid transparent}',
     'html.cb-dark .wbs-badge,html[data-theme="dark"] .wbs-badge{background:rgba(255,255,255,.07);color:rgba(235,236,240,.68);border-color:rgba(255,255,255,.08)}',
-    /* 当前使用中角标：无底图形，颜色跟随昵称（text-primary），深色随变量自动适配 */
+    /* 当前使用中角标：实心强调色胶囊。不做半透明——浅底上的半透明蓝配蓝字对比度不足，
+       10px 小字必须靠实心深蓝 + 白字才读得清（≥4.5:1）。文案走既有 i18n 词典
+       （'当前使用中' → 'Currently active'），英文界面无需额外适配。 */
+    '.wbs-cur-badge{background:color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 76%,#0d2a6b);color:#fff;border-color:transparent;font-weight:600;padding:2px 8px}',
+    'html.cb-dark .wbs-cur-badge,html[data-theme="dark"] .wbs-cur-badge,body[data-vscode-theme-name*="dark" i] .wbs-cur-badge{background:color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 82%,#cfe0ff);color:#0b1424}',
     '.wbs-empty{text-align:center;color:var(--wb-icon-tertiary,#999);padding:28px 12px;font-size:13px;line-height:1.8}',
     /* 底部 */
     '.wbs-foot{padding:12px 14px;border-top:1px solid var(--wb-border-subtle,#f0f0f0);display:flex;flex-direction:column;gap:9px;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 30%,transparent)}',
