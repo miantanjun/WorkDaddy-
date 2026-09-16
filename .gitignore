@@ -29,3 +29,5 @@ npm-debug.log*
 # （脚本：cdp-eval.py / probe-*.js / real-space-scan.js / rescan-and-report.py）
 .wd-analysis/*.png
 .wd-analysis/real-space-scan.json
+# probe-*/test-*/verify-* 脚本的文本报告同为「本机证据」，不入库
+.wd-analysis/*.out.txt

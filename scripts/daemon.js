@@ -386,13 +386,16 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.24：账号轮换恢复真实积分段消耗检测，仅推荐缓存中到期时间最近的可用账号。
 // 1.2.25：首页弹窗任务补齐成长/活动入口，并按 renderer 页面身份修复重连后的 pageReady 触发。
 // 1.2.26：无效账号备份不再显示可点击的切换按钮，导入路径拒绝写入无效认证数据。
-const DAEMON_VERSION = '1.3.0';
+// 1.3.1：修 Token 用量归属——切号复制的副本会话会把整段用量错记到源账号（内嵌 sessionId
+//        仍是源会话），且已被删除会话的用量因归属映射查不到而被整条丢弃。归属改为按物理
+//        文件判定（内嵌源会话「在场」才算导入副本），sessions 映射同时覆盖已删除会话。
+const DAEMON_VERSION = '1.3.1';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
-// 本机 fork 用自己的修改版版本号（1.3.0 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.0-20260916-cloud-ghosts';
+// 本机 fork 用自己的修改版版本号（1.3.1 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
+const DAEMON_BUILD_ID = 'release-1.3.1-20260917-token-account-attribution';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -10205,7 +10208,10 @@ function handleApi(req, res) {
     if (url.searchParams.get('cacheStatus') === '1') return json(res, 200, { ok: true, cacheReady: tokenStatsCacheReady(PROFILE.dataRoot) });
     const days = Math.max(1, Math.min(90, Number(url.searchParams.get('days') || 7)));
     const accounts = listAccounts(DATA_DIR);
-    return sqliteQuery('SELECT id, user_id FROM sessions WHERE deleted_at IS NULL;')
+    // 会话可能已被清理（deleted_at 非空），但会话文件与其中已产生的用量依然存在，
+    // 且切号自动复制产生的副本本身也常被后续清理。归属映射必须覆盖全部会话，
+    // 否则这些用量会因为「查不到归属」而被静默丢弃、在账号维度统计里消失。
+    return sqliteQuery('SELECT id, user_id FROM sessions;')
       .then((rows) => {
         const sessionAccounts = Object.fromEntries(rows.map((row) => [String(row.id || ''), String(row.user_id || '')]).filter((item) => item[0] && item[1]));
         const stats = scanTokenStatsCached(PROFILE.dataRoot, {

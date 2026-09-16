@@ -185,37 +185,52 @@ function sessionAccount(options, id) {
   return String((accounts instanceof Map ? accounts.get(id) : accounts && accounts[id]) || '').trim();
 }
 
+function fileSessionId(file) {
+  return path.posix.basename(String(file || ''), '.jsonl');
+}
+
 function distinctRecords(records, options = {}) {
   const accountIds = new Set((options.accountOptions || [])
     .map(item => String(item && (item.uid || item.account) || '').trim()).filter(Boolean));
   const distinct = new Map();
   for (const record of records) {
-    // Resolve owners on every scan, including cache hits. An imported row's
-    // session ID still refers to its source, whereas newly appended rows refer
-    // to the destination. Missing/ambiguous provenance must not invent usage
-    // for whichever account happens to own the first copy in directory order.
-    let account = record.account;
-    if (!account && record.sourceSession) account = sessionAccount(options, record.sourceSession);
-    if (!account && !record.sourceSession) {
-      account = sessionAccount(options, path.posix.basename(record.file, '.jsonl'));
-      if (!account) account = record.file.split('/').map(part => part.replace(/\.jsonl$/i, ''))
-        .find(part => accountIds.has(part)) || '';
-    }
     let item = distinct.get(record.key);
     if (!item) {
-      item = { record, accounts: new Set() };
+      item = { record, files: new Set(), copies: [] };
       distinct.set(record.key, item);
     }
     // Undated legacy rows use scan time as a fallback. Prefer the earliest
     // cached observation so importing them later does not move usage to today.
     if (record.timestamp < item.record.timestamp) item.record = record;
-    if (account) item.accounts.add(account);
+    item.files.add(fileSessionId(record.file));
+    item.copies.push(record);
   }
   // Occurrence indices preserve multiple equal rows in one original file;
   // matching occurrences in other files are copies, not extra model calls.
-  return Array.from(distinct.values(), ({ record, accounts }) => ({
-    ...record, account: accounts.size === 1 ? accounts.values().next().value : '',
-  }));
+  return Array.from(distinct.values(), ({ record, files, copies }) => {
+    const owners = new Set();
+    for (const copy of copies) {
+      // Resolve owners on every scan, including cache hits.
+      // 归属按「物理文件」判定，而不是盲信记录里内嵌的 sessionId：
+      // 切号自动复制（autoCopy）是把 projects/<pj>/<源会话>.jsonl 整份 cp 成
+      // <目标会话>.jsonl，目标会话此后继续往副本里追加，但追加出来的新行内嵌的
+      // sessionId 仍然是「源会话」——于是内嵌字段既可能是导入来源，也可能是这
+      // 个文件自己新产生的。可靠的判据只有一条：内嵌的源会话是不是也持有一条
+      // 同样内容的记录（digest 相同）。持有 → 这行原产于源会话（导入副本）；
+      // 不持有 → 源会话文件里没有这行，说明它是在本文件里新生成的。
+      const fileSession = fileSessionId(copy.file);
+      const embedded = copy.sourceSession;
+      const origin = embedded && embedded !== fileSession && files.has(embedded) ? embedded : fileSession;
+      let account = copy.account;
+      if (!account) account = sessionAccount(options, origin);
+      // 兜底：会话表里查不到（已删除/未登记）时，允许路径段直接命中账号 uid。
+      if (!account) account = copy.file.split('/').map(part => part.replace(/\.jsonl$/i, ''))
+        .find(part => accountIds.has(part)) || '';
+      if (account) owners.add(account);
+    }
+    // 多份副本给出不同账号，才是真正的歧义；此时宁可不归属，也不要凭空记给一方。
+    return { ...record, account: owners.size === 1 ? owners.values().next().value : '' };
+  });
 }
 
 function cacheFile(root, options = {}) {
