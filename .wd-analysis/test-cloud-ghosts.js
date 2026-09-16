@@ -243,7 +243,8 @@ ok(/\.wbs-cloud-btn-armed\{border-color:#e24b4a/.test(injectSrc), 'C16 确认态
   } else {
     const live = String((probe.body && probe.body.buildId) || '');
     console.log('  info  daemon buildId = ' + live);
-    ok(/^(selfhost|release)-1\.3\.0-\d{8}-/.test(live), 'D0 跑的是自建构建（别在旧 daemon 上测新代码）', live);
+    // 2026-09-17: 原来写死 1\.3\.0，daemon 升到 1.3.1 后每个阶段都误报。放宽到 1.3.x。
+    ok(/^(selfhost|release)-1\.3\.[0-9]+-\d{8}-/.test(live), 'D0 跑的是自建构建（别在旧 daemon 上测新代码）', live);
 
     const g = await apiCall('GET', '/api/cloud/ghosts?probe=0');
     ok(g.status === 200 && g.body && g.body.ok === true, 'D1 ghost 检测返回 200/ok', g.status);

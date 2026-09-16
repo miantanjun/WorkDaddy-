@@ -45,7 +45,7 @@ const CAPABILITIES = [
   { id: 'account.checkin', zh: '账号静默签到', en: 'Check in as account', descriptionZh: '使用循环账号的 token 签到，不切换客户端。当天已确认签到时跳过所有请求；返回 ok、skipped、code 等状态。', descriptionEn: 'Check in using the context account token without switching accounts. Confirmed daily records skip all requests. Returns ok, skipped and code.', example: { op: 'account.checkin', saveAs: 'checkin' } },
   { id: 'limit.probe', zh: '探测模型限流', en: 'Probe model rate limit', descriptionZh: '读取输入框上方的限流横幅（.rate-limit-info-banner / .cb-input-banner--error 等），返回 { hit, count, hits }。只读。注意：限流提示不在消息流里，不要在 .cr-message-list 上找。', descriptionEn: 'Read the rate-limit banner above the composer and return { hit, count, hits }. Read-only. The banner is NOT inside the message list.', example: { op: 'limit.probe', saveAs: 'limit' } },
   { id: 'model.get', zh: '读取当前模型', en: 'Read current model', descriptionZh: '读取当前会话正在使用的模型 id。', descriptionEn: 'Read the model id currently used by the active conversation.', example: { op: 'model.get', saveAs: 'model' } },
-  { id: 'model.set', zh: '设置当前模型', en: 'Set current model', descriptionZh: '把当前（新建的）会话切到指定模型。用于换号后保持同一个模型继续跑。', descriptionEn: 'Switch the active (new) conversation to a given model so failover keeps the same model.', example: { op: 'model.set', modelId: 'deepseek-v4.1-flash' } },
+  { id: 'model.set', zh: '设置当前模型', en: 'Set current model', descriptionZh: '把当前选中的会话（含新建任务页草稿）切到指定模型。作用对象是「当前选中的会话控制器」，所以要换会话时请先用 session.open 选中目标会话，再执行本步。用于换号后保持同一个模型继续跑。', descriptionEn: 'Switch the currently selected conversation (including a New Task draft) to a given model. It acts on the selected conversation controller, so call session.open first when targeting another conversation.', example: { op: 'model.set', modelId: 'deepseek-v4.1-flash' } },
   { id: 'account.failoverContinue', zh: '限流切号续跑', en: 'Failover and continue', descriptionZh: '检测到限流后：标记当前账号限流 → 选一个还有余量的其他账号 → 切过去 → 保持同一个模型 → 把同一条任务原样续跑 → 复核是否仍被限流，不行继续换号；全都不行则回退原账号。不使用 dom./session. 步骤，因此不会抢占独占渲染器租约。', descriptionEn: 'On rate limit: mark the current account, pick another account with headroom, switch, keep the same model, replay the same task text, then verify.', example: { op: 'account.failoverContinue', saveAs: 'failover' } },
   { id: 'http.request', zh: 'HTTP 请求', en: 'HTTP request', descriptionZh: '调用 HTTP/HTTPS 接口并保存响应。', descriptionEn: 'Call an HTTP/HTTPS endpoint and retain its response.', example: { op: 'http.request', method: 'GET', url: 'https://example.com/api', saveAs: 'response' } },
   { id: 'http.requestAsAccount', zh: '使用账号请求', en: 'HTTP request as account', descriptionZh: '使用当前循环账号的登录态请求，任务中不会出现 Token。', descriptionEn: 'Call an endpoint with the current account session without exposing a token in the task.', example: { op: 'http.requestAsAccount', method: 'GET', url: 'https://example.com/api' } },
@@ -75,7 +75,8 @@ for (const [id, zh, en, example, descriptionZh, descriptionEn] of [
   ['logic.forEach', '循环列表', 'Iterate list', {op:'logic.forEach',items:'{{vars.items}}',steps:[]}, '遍历最多 1000 项，使用 vars.item 和 vars.index，退出后恢复上下文。', 'Iterate up to 1000 entries via vars.item and vars.index; restore context on exit.'],
   ['logic.break', '退出循环', 'Break loop', {op:'logic.break'}, '退出最近一层列表、重复或账号循环。', 'Exit the nearest list, repeat or account loop.'],
   ['logic.waitUntil', '等待条件', 'Wait for condition', {op:'logic.waitUntil',timeoutMs:10000,intervalMs:250,steps:[],condition:{left:'{{vars.ready}}',operator:'truthy'}}, '立即执行查询步骤并检查条件；超时失败，可取消。', 'Immediately run polling steps and check a condition; cancellable with timeout.'],
-  ['session.create', '新建会话并发送', 'Create and send', {op:'session.create',message:'你好',saveAs:'receipt'}, '保存现有新建页草稿后发送第一条消息，返回绑定账号、会话和请求的回执。', 'Preserve a New Task draft, send the first message and return an account/conversation/request receipt.'],
+  ['session.open', '打开指定会话', 'Open a conversation', {op:'session.open',conversationId:'<会话 id>'}, '在会话列表里点开指定会话并等控制器真正切过去（可滚动查找、按需展开分组）。切号换页后侧栏需要滚动才能命中目标行，该步会自己处理。成功后当前会话即为目标会话，可直接接 model.set / session.send。', 'Open a given conversation in the sidebar and wait until its controller is actually active (scrolls and expands groups as needed). After it succeeds the target conversation is selected, so model.set / session.send can follow directly.'],
+  ['session.create', '新建会话并发送', 'Create and send', {op:'session.create',message:'你好',saveAs:'receipt'}, '保存现有新建页草稿后发送第一条消息，返回绑定账号、会话和请求的回执。可选 modelId：会在发送第一条消息之前把新会话切到该模型（不填则沿用默认模型）。', 'Preserve a New Task draft, send the first message and return an account/conversation/request receipt. Optional modelId switches the new conversation to that model before the first message is sent; omit it to keep the default model.'],
   ['session.send', '向指定可见会话发送', 'Send to visible session', {op:'session.send',conversationId:'{{vars.receipt.conversationId}}',message:'继续',saveAs:'receipt'}, '仅发送到已挂载且选中的指定会话；草稿非空时拒绝，未确认发送不会自动重发。', 'Only send to the selected mounted conversation; reject occupied drafts and never automatically resend unconfirmed sends.'],
   ['session.wait', '等待指定回复完成', 'Wait for bound reply', {op:'session.wait',receipt:'{{vars.receipt}}',timeoutMs:180000}, '按回执绑定账号、会话和请求等待完成；失败、取消或身份变化时退出。', 'Wait by account/conversation/request receipt; fail on errors, cancellation or identity changes.'],
   ['state.checkpoint', '保存检查点', 'Save checkpoint', {op:'state.checkpoint',key:'progress',value:{done:'{{vars.done}}'}}, '显式保存进度，使用 state.get 恢复；不会自动重放发送或其他副作用。', 'Explicitly save progress; restore with state.get. Never automatically replay sends or other side effects.'],
@@ -912,9 +913,12 @@ async function executeTask(taskInput, options = {}) {
       if (step.saveAs) ctx.vars[String(step.saveAs)] = result;
       return result;
     }
-    if (op === 'session.create' || op === 'session.send') {
+    if (op === 'session.create' || op === 'session.send' || op === 'session.open') {
       if (typeof options.sessionAction !== 'function') throw new Error('会话能力不可用');
-      const receipt = await options.sessionAction(op, resolveValue(step,ctx)); ctx.vars.session = receipt; return receipt;
+      const outcome = await options.sessionAction(op, resolveValue(step, ctx));
+      // session.open 只是把目标会话选中，不是发送回执，不写 vars.session。
+      if (op === 'session.open') return outcome;
+      ctx.vars.session = outcome; return outcome;
     }
     if (op === 'session.wait') { if (typeof options.sessionAction !== 'function') throw new Error('会话能力不可用'); return options.sessionAction(op, {...resolveValue(step,ctx),receipt:resolveValue(step.receipt,ctx)||ctx.vars.session}); }
     if (op === 'session.sendCurrent') {

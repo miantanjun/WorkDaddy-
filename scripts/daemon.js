@@ -209,6 +209,7 @@ const {
   installBuiltinTask,
   adoptBuiltinTask,
 } = require('./automation.js');
+const scheduledSend = require('./scheduled-send.js');
 
 const { assertAccountRequestUrl, createTaskState, cancellableWait, createRendererGate, probeSessionReceipt, receiptComplete } = require('./automation-runtime.js');
 const acquireAutomationRenderer = createRendererGate();
@@ -395,7 +396,7 @@ const DAEMON_VERSION = '1.3.1';
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.1 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.1-20260917-token-account-attribution';
+const DAEMON_BUILD_ID = 'release-1.3.1-20260917-scheduled-send';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -4506,6 +4507,20 @@ function startAutomationRun(task, event = null) {
   };
   const sessionAction = async (op, detail) => {
     if (isCancelled()) throw new Error('任务已停止');
+    // 打开指定会话：把目标会话真正选中（侧栏可滚动查找、按需展开分组），
+    // 之后 model.set / session.send 才作用在它身上 —— session.send 会校验
+    // 「发送前的当前会话 id」，所以这一步必须先跑。
+    if (op === 'session.open') {
+      const target = String(detail && detail.conversationId || '').trim();
+      if (!target) throw new Error('session.open 缺少 conversationId');
+      const openedUid = (currentAccount() || {}).uid;
+      if (!openedUid) throw new Error('没有可用账号');
+      if (!cdp.connected) throw new Error('WorkBuddy 未连接，无法打开会话');
+      const opened = await withInput(() => openConversationById(target, Number(detail && detail.timeoutMs) || 15000));
+      if (isCancelled() || (currentAccount() || {}).uid !== openedUid) throw new Error('打开会话后账号或运行状态已变化');
+      if (!opened) throw new Error('未能在会话列表里找到并打开目标会话，请确认它属于当前账号');
+      return { ok: true, conversationId: target };
+    }
     if (op === 'session.wait') {
       const receipt = detail.receipt || lastReceipt;
       if (!receipt || !receipt.userMessageId || !receipt.conversationId || !receipt.accountUid) throw new Error('需要本轮发送返回的会话回执');
@@ -4526,9 +4541,19 @@ function startAutomationRun(task, event = null) {
     }
     const accountUid = (currentAccount() || {}).uid;
     if (!accountUid) throw new Error('没有可用账号');
-    if (op === 'session.create') await withInput(() => ensureAutomationNewTask({ guard: () => {
-      if (isCancelled() || (currentAccount() || {}).uid !== accountUid) throw new Error('发送前账号或运行状态已变化');
-    } }));
+    if (op === 'session.create') {
+      await withInput(() => ensureAutomationNewTask({ guard: () => {
+        if (isCancelled() || (currentAccount() || {}).uid !== accountUid) throw new Error('发送前账号或运行状态已变化');
+      } }));
+      // 新建会话必须在发送**第一条**消息之前就切到指定模型，否则首条会以默认模型发出，
+      // 用户选的型号只对后续消息生效。顺序与限流续跑一致：
+      // runLimitFailoverCore → ensureNewTask → setModel → sendPhrase。
+      const wantedModel = String(detail.modelId || '').trim();
+      if (wantedModel) {
+        const setResult = await withInput(() => setLiveModel(wantedModel));
+        if (!setResult || setResult.ok !== true) appendRunLog('session.create:setModel 失败，已按当前模型继续 ' + String(setResult && setResult.error || wantedModel));
+      }
+    }
     const before = await readSession();
     if (op === 'session.send') {
       if (!detail.conversationId || !before || before.conversationId !== detail.conversationId) throw new Error('只能发送到已选中的指定会话');
@@ -9695,6 +9720,32 @@ function handleApi(req, res) {
           selected.forEach((task) => { if (!Array.from(automationRuns.values()).some((run) => run.taskId === task.id && run.status === 'running')) startAutomationRun(task); });
         } else return json(res, 400, { ok: false, error: '不支持的批量操作' });
         return json(res, 200, { ok: true, action, count: selected.length, tasks: readAutomations(DATA_DIR) });
+      } catch (error) { return json(res, 400, { ok: false, error: error.message }); }
+    });
+  }
+
+  // ── 定时发送预输入命令 ────────────────────────────────────────────────
+  // 向导只提交原始输入；任务形态（步骤组合、正文走 variables 防插值）由
+  // scheduled-send.js 统一编译 —— 前后端只有一份权威定义，且能被单测直接覆盖。
+  if (req.method === 'POST' && p === '/api/scheduled-send') {
+    return readBody(req).then((body) => {
+      try {
+        const raw = body && body.request != null ? body.request : body;
+        const incoming = scheduledSend.normalizeRequest(raw);
+        const tasks = readAutomations(DATA_DIR);
+        const index = incoming.id ? tasks.findIndex((item) => item.id === incoming.id) : -1;
+        if (index < 0 && tasks.length >= 200) throw new Error('自动化任务数量已达到上限');
+        if (index >= 0 && !isSupportedTaskSchema(tasks[index])) throw new Error('任务使用更新的协议，请升级 WorkDaddy 后再编辑');
+        if (index >= 0) incoming.id = tasks[index].id;
+        const task = validateTask(scheduledSend.buildTask(incoming));
+        if (index >= 0) tasks[index] = task; else tasks.unshift(task);
+        writeAutomations(DATA_DIR, tasks);
+        log('[scheduled-send] ' + (index >= 0 ? 'updated' : 'created') + ' task=' + task.id
+          + ' account=' + incoming.accountUid
+          + ' conversation=' + incoming.conversationId
+          + ' schedule=' + incoming.schedule.type
+          + ' model=' + (incoming.modelId || '(keep)'));
+        return json(res, 200, { ok: true, task, request: incoming });
       } catch (error) { return json(res, 400, { ok: false, error: error.message }); }
     });
   }

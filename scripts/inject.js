@@ -841,6 +841,30 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '读不到扫描进度': 'Cannot read scan progress', '还没有扫描结果。': 'No scan result yet.', '正在读取扫描结果…': 'Loading scan result…',
     '认不出账号的会话数据': 'Session data with no known account', '会话记录已被删或不属于任何已保存账号': 'Its session was deleted, or belongs to no saved account',
     '导出': 'Export', '导入': 'Import', '删除': 'Delete', '编辑': 'Edit', '保存': 'Save', '内置': 'Built-in', '取消': 'Cancel', '确定': 'Confirm', '确认': 'Confirm', '复制': 'Copy', '切换': 'Switch', '启用': 'Enable', '停用': 'Disable', '停止': 'Stop', '立即运行': 'Run now', '新建任务': 'New task', '刷新': 'Refresh', '步骤 JSON': 'Steps JSON', '任务说明': 'Task description', '任务名称': 'Task name', '调度': 'Schedule', '手动运行': 'Manual', '手动': 'Manual', '每小时': 'Hourly', '每天': 'Daily', '选择任务': 'Select tasks', '查看接口': 'View capabilities', '拾取元素': 'Pick element', '复制 XPath': 'Copy XPath', '运行中': 'Running', '已成功': 'Succeeded', '失败': 'Failed', '未运行': 'Not run', '页面加载完成': 'Page loaded', '账号切换完成': 'Account switched', '新自动化任务': 'New automation task', '任务已保存': 'Task saved', '任务已开始运行': 'Task started', '步骤 JSON 格式无效': 'Invalid steps JSON', '步骤 JSON 必须是数组': 'Steps JSON must be an array', '查看接口说明': 'View interface docs', '自动化接口协议': 'Automation interface protocol', '复制全部': 'Copy all', '接口协议已复制': 'Interface protocol copied', '暂无自动化任务，点击“新建任务”开始。': 'No automation tasks yet. Click “New task” to start.', '编辑任务': 'Edit task', '触发方式': 'Trigger', '插入点击步骤': 'Insert click step', 'XPath 已复制': 'XPath copied', '点击步骤已插入': 'Click step inserted', '请先拾取元素': 'Pick an element first', '加载自动化失败': 'Failed to load automations', '读取接口失败': 'Failed to read interfaces', '批量操作失败': 'Batch operation failed', '删除失败': 'Delete failed', '确认删除该任务？': 'Delete this task?', '执行': 'Apply', '已拾取': 'Picked', '运行失败': 'Run failed', '（副本）': ' (copy)', '查看提示词': 'View prompt', '交给 WorkBuddy 创建': 'Ask WorkBuddy to create', '正在打开新任务…': 'Opening a new task…', '已创建新会话，WorkBuddy 完成后任务会自动出现': 'New session created. The task will appear after WorkBuddy finishes.', 'WorkBuddy 创建失败': 'WorkBuddy creation failed', '加载示例失败': 'Failed to load examples', '暂无示例': 'No examples available', '运行日志': 'Run logs', '暂无运行日志': 'No run logs yet', '开始时间': 'Started', '结束时间': 'Finished', '捕获错误': 'Caught error', '暂无执行日志': 'No execution log entries', '执行日志': 'Execution log', '尚未结束': 'Still running',
+    // 定时发送向导：**每条都必须整句入典**。词典里已有 '时间' / '执行' / '关闭' / '周X' / '模型' 等
+    // 短词条，整句没登记就会被「按位置最长匹配」的扫描器撕成中英混合（§26.4 的教训）。
+    '定时发送': 'Scheduled send',
+    '命令内容': 'Command text',
+    '到点后原样发送这条命令': 'This command is sent verbatim at the scheduled time',
+    '发送账号': 'Send as account', '使用模型': 'Model', '发送到': 'Send to',
+    '已有对话': 'Existing conversation', '新建对话': 'New conversation',
+    '选择对话': 'Choose a conversation', '输入关键词筛选对话标题': 'Filter conversations by title',
+    // 注意：词典后半段（双引号那一块）已经有 "指定时间一次"/"每周"/"每月"/"执行时间"/"日期"，
+    // 同名键**后者胜**，所以这里只补真正缺的词条；'每月日期' 是刻意造的长键，
+    // 用来避开已有的裸 '日期' 词条把标签撕成中英混合。
+    '触发时间': 'Trigger time', '每月日期': 'Day of month',
+    '留空则按命令首行自动命名': 'Leave blank to name it after the first line of the command',
+    '保存并排定': 'Save and schedule', '保持当前模型': 'Keep current model',
+    '（无可用账号）': '(No account available)',
+    '到点后插件会自动切到该账号、打开目标对话、切到所选模型并发送。WorkBuddy 未运行或输入框已有草稿时当次跳过，绝不覆盖草稿、不重复发送。': 'At the scheduled time WorkDaddy switches to that account, opens the target conversation, switches to the chosen model and sends. If WorkBuddy is not running, or the composer already holds a draft, this run is skipped: drafts are never overwritten and messages are never sent twice.',
+    '请先选择账号': 'Choose an account first',
+    '该账号下暂无可选对话，改用「新建对话」即可': 'No conversations for this account yet — choose “New conversation” instead',
+    '对话加载失败，可改用「新建对话」': 'Could not load conversations — choose “New conversation” instead',
+    '对话加载失败：': 'Could not load conversations: ',
+    '已排定定时发送': 'Scheduled send saved',
+    '排定失败': 'Could not schedule the send',
+    '加载账号或模型失败': 'Could not load accounts or models',
+    '这条任务不是由「定时发送」创建的，请用任务编辑修改': 'This task was not created by Scheduled send — edit it with the task editor instead',
     '暂存提示词': 'Stash prompt', '暂存': 'Stashed', '引用文本': 'Quote text', '快捷短语': 'Quick phrases', '点击后发送': 'Send on click', '编辑 →': 'Edit →', '新增': 'Add', '批量操作': 'Batch actions', '批量管理': 'Batch manage', '全选': 'Select all', '取消全选': 'Deselect all', '已选 0': 'Selected 0',
     '账号汇总': 'Account summary', '账号数': 'Accounts', '总积分': 'Total credits', '手机': 'Phone', '有效期至': 'Expires', '当前使用中': 'Currently active', '隐藏敏感信息': 'Mask sensitive info', '显示明文': 'Show plaintext', '登录新账号': 'Log in a new account', '没有可导出的账号备份': 'No account backups to export', '还没有备份账号。打开/登录一次 WorkBuddy 后会自动备份，稍后再来查看。': 'No account backups yet. Open or log in to WorkBuddy once and check again later.',
     '语言': 'Language', '中文': 'Chinese', '英语': 'English', 'English': 'English', '跟随系统': 'Follow system', '设置语言': 'Language', '首次打开时自动跟随系统语言；未匹配时使用英语。': 'The first launch follows your system language. English is used when no match is found.', '语言设置已更新': 'Language updated',
@@ -5979,6 +6003,274 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         task.id = automationState.editingId || task.id; task.name = wbsAutomationEditedText(existing, 'name', editor.querySelector('[data-auto-field="name"]').value) || '未命名任务'; task.description = wbsAutomationEditedText(existing, 'description', editor.querySelector('[data-auto-field="description"]').value); task.enabled = existing ? existing.enabled !== false : true; task.trigger = Object.assign({}, task.trigger || {}, { type: selectedTriggers[0] || 'manual', types: selectedTriggers, oncePerNavigation: true }); task.steps = steps;
         api('/api/automations', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task: task }) }).then(function () { hideEditor(); toast('任务已保存', false, root); return load(); }).catch(function (e) { toast(e.message || '保存失败', true, root); });
       }
+
+      /* ===== 定时发送：预输入命令 · 到点由插件自动切号 / 进会话 / 设模型 / 发送 =====
+       * 向导只收集输入，任务形态交给后端 scheduled-send.js 编译成一条标准自动化任务，
+       * 因此到点执行完全复用现成的调度器与执行器（去重、错过不补跑、输入框闸门、面板收起）。 */
+      var SCHED_MARKER = 'workdaddyScheduledSend';
+      var SCHED_NEW = 'new';
+      var SCHED_WEEK_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
+      function isScheduledSendTaskUI(task) {
+        return !!(task && task.meta && Number(task.meta[SCHED_MARKER]) === 1);
+      }
+      function schedPad2(n) { return String(n).padStart(2, '0'); }
+      function schedLocalSlot(date) {
+        return date.getFullYear() + '-' + schedPad2(date.getMonth() + 1) + '-' + schedPad2(date.getDate()) + 'T' + schedPad2(date.getHours()) + ':' + schedPad2(date.getMinutes());
+      }
+      function schedDefaultOnceAt() {
+        // 默认下一个整点：用户打开面板时默认值不会一上来就是过去时间。
+        var date = new Date(Date.now() + 3600000);
+        date.setMinutes(0, 0, 0);
+        return schedLocalSlot(date);
+      }
+      function schedWhenLabel(schedule) {
+        var s = schedule || {};
+        if (s.type === 'daily') return '每天 ' + s.time;
+        if (s.type === 'weekly') {
+          var days = (s.days || []).map(function (d) { return SCHED_WEEK_LABELS[Number(d)] || ''; }).filter(Boolean).join('、');
+          return (days ? days + ' ' : '') + s.time;
+        }
+        if (s.type === 'monthly') return '每月 ' + s.day + ' 日 ' + s.time;
+        if (s.type === 'interval') return '每 ' + s.minutes + ' 分钟';
+        return '单次 ' + String(s.at || '').replace('T', ' ');
+      }
+      function schedConversationLabel(item) {
+        var title = String(item.custom_title || item.title || '').trim() || '(未命名对话)';
+        var at = Number(item.last_activity_at || item.updated_at || item.created_at || 0);
+        if (!at) return title;
+        var when = new Date(at);
+        if (isNaN(when.getTime())) return title;
+        return title + ' · ' + when.getFullYear() + '-' + schedPad2(when.getMonth() + 1) + '-' + schedPad2(when.getDate());
+      }
+
+      /** 已保存的定时发送任务 → 向导表单状态。顶层 id/name/schedule 才是权威：
+       *  任务被复制或改名后，meta.request 里的旧值不能回写到原任务。 */
+      function schedRequestFromTask(task) {
+        var meta = (task && task.meta) || {};
+        if (!meta.request || typeof meta.request !== 'object') return null;
+        var saved = JSON.parse(JSON.stringify(meta.request));
+        saved.id = String(task.id || '');
+        saved.name = String(task.name || saved.name || '');
+        if (task.schedule && task.schedule.type) saved.schedule = JSON.parse(JSON.stringify(task.schedule));
+        return saved;
+      }
+
+      function hideScheduledSend() { closePanelModal((panel || root).querySelector('#wbs-sched-mask')); }
+
+      function showScheduledSend(task) {
+        hideScheduledSend();
+        var draft = task ? schedRequestFromTask(task) : null;
+        if (task && !draft) { toast('这条任务不是由「定时发送」创建的，请用任务编辑修改', true, root); return; }
+        var schedule = (draft && draft.schedule) || { type: 'once', at: schedDefaultOnceAt() };
+
+        var mask = document.createElement('div');
+        mask.id = 'wbs-sched-mask';
+        mask.className = 'wbs-modal-mask wbs-modal-mask-panel wbs-auto-dialog-mask';
+        mask.innerHTML = '<div class="wbs-modal wbs-sched-modal" role="dialog" aria-modal="true" aria-labelledby="wbs-sched-title">'
+          + '<div class="wbs-auto-modal-head"><div class="wbs-modal-title" id="wbs-sched-title">定时发送</div><button class="wbs-auto-modal-close" type="button" title="关闭" aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3 3 13"/></svg></button></div>'
+          + '<div class="wbs-sched-body">'
+          + '<label class="wbs-auto-field"><span>命令内容</span><textarea data-sched-field="message" rows="7" placeholder="到点后原样发送这条命令"></textarea></label>'
+          + '<div class="wbs-sched-row">'
+          + '<label class="wbs-auto-field"><span>发送账号</span><select data-sched-field="account" aria-label="发送账号"></select></label>'
+          + '<label class="wbs-auto-field"><span>使用模型</span><select data-sched-field="model" aria-label="使用模型"></select></label>'
+          + '</div>'
+          + '<div class="wbs-auto-field"><span>发送到</span><div class="wbs-sched-seg" role="group" aria-label="发送到"><button type="button" class="wbs-sched-seg-btn" data-sched-target="existing">已有对话</button><button type="button" class="wbs-sched-seg-btn" data-sched-target="new">新建对话</button></div></div>'
+          + '<div class="wbs-auto-field" data-sched-for="existing"><span>选择对话</span><input type="search" data-sched-field="convSearch" placeholder="输入关键词筛选对话标题"><select data-sched-field="conversation" size="6" aria-label="选择对话"></select><span class="wbs-sched-hint" data-sched-field="convHint" data-wbs-i18n-skip="1"></span></div>'
+          + '<div class="wbs-auto-field"><span>触发时间</span><div class="wbs-auto-schedule">'
+          + '<label>触发方式 <select data-sched-field="scheduleType" aria-label="触发方式"><option value="once">指定时间一次</option><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option></select></label>'
+          + '<label data-sched-when="once">执行时间 <input type="datetime-local" data-sched-field="onceAt" aria-label="执行时间"></label>'
+          + '<label data-sched-when="daily weekly monthly">时间 <input type="time" data-sched-field="time" step="60" aria-label="执行时间"></label>'
+          + '<label data-sched-when="monthly">日期 <input type="number" data-sched-field="monthDay" min="1" max="31" aria-label="每月日期"></label>'
+          + '<div class="wbs-auto-weekdays" data-sched-when="weekly" role="group" aria-label="每周"></div>'
+          + '<span class="wbs-auto-schedule-hint">到点后插件会自动切到该账号、打开目标对话、切到所选模型并发送。WorkBuddy 未运行或输入框已有草稿时当次跳过，绝不覆盖草稿、不重复发送。</span>'
+          + '</div></div>'
+          + '<label class="wbs-auto-field"><span>任务名称</span><input type="text" data-sched-field="name" maxlength="120" placeholder="留空则按命令首行自动命名"></label>'
+          + '<div class="wbs-sched-summary" data-sched-field="summary" data-wbs-i18n-skip="1"></div>'
+          + '</div>'
+          + '<div class="wbs-modal-actions"><button class="wbs-modal-btn" type="button" data-sched-cancel>取消</button><button class="wbs-modal-btn wbs-modal-ok" type="button" data-sched-save>保存并排定</button></div>'
+          + '</div>';
+        (panel || root).appendChild(mask);
+
+        var messageEl = mask.querySelector('[data-sched-field="message"]');
+        var accountEl = mask.querySelector('[data-sched-field="account"]');
+        var modelEl = mask.querySelector('[data-sched-field="model"]');
+        var convEl = mask.querySelector('[data-sched-field="conversation"]');
+        var convSearchEl = mask.querySelector('[data-sched-field="convSearch"]');
+        var convHintEl = mask.querySelector('[data-sched-field="convHint"]');
+        var nameEl = mask.querySelector('[data-sched-field="name"]');
+        var scheduleTypeEl = mask.querySelector('[data-sched-field="scheduleType"]');
+        var onceAtEl = mask.querySelector('[data-sched-field="onceAt"]');
+        var timeEl = mask.querySelector('[data-sched-field="time"]');
+        var monthDayEl = mask.querySelector('[data-sched-field="monthDay"]');
+        var weekEl = mask.querySelector('.wbs-auto-weekdays');
+        var summaryEl = mask.querySelector('[data-sched-field="summary"]');
+        var saveButton = mask.querySelector('[data-sched-save]');
+        var target = draft && draft.conversationId === SCHED_NEW ? 'new' : 'existing';
+        var accounts = [];
+        var models = [];
+        var conversations = [];
+        var convFailed = false;
+
+        weekEl.innerHTML = SCHED_WEEK_LABELS.map(function (label, index) {
+          return '<label><input type="checkbox" data-sched-weekday="' + index + '"><span>' + esc(label) + '</span></label>';
+        }).join('');
+
+        function whenValue() {
+          var out = { type: scheduleTypeEl.value };
+          if (out.type === 'once') out.at = onceAtEl.value;
+          if (['daily', 'weekly', 'monthly'].indexOf(out.type) >= 0) out.time = timeEl.value;
+          if (out.type === 'weekly') out.days = Array.prototype.slice.call(mask.querySelectorAll('[data-sched-weekday]:checked')).map(function (input) { return Number(input.getAttribute('data-sched-weekday')); });
+          if (out.type === 'monthly') out.day = Number(monthDayEl.value);
+          return out;
+        }
+        function currentRequest() {
+          var account = accounts.filter(function (item) { return item.uid === accountEl.value; })[0] || null;
+          var conv = target === SCHED_NEW ? null : (conversations.filter(function (item) { return String(item.id) === String(convEl.value); })[0] || null);
+          return {
+            id: draft ? String(draft.id || '') : '',
+            name: nameEl.value,
+            message: messageEl.value,
+            accountUid: accountEl.value,
+            accountNickname: account ? String(account.nickname || '') : '',
+            conversationId: target === SCHED_NEW ? SCHED_NEW : String(convEl.value || ''),
+            conversationTitle: conv ? String(conv.custom_title || conv.title || '') : '',
+            modelId: modelEl.value,
+            schedule: whenValue()
+          };
+        }
+        function syncSummary() {
+          var req = currentRequest();
+          var where = req.conversationId === SCHED_NEW ? '新建对话' : (req.conversationTitle ? '对话「' + req.conversationTitle + '」' : '未选择对话');
+          var who = req.accountNickname || req.accountUid || '未选择账号';
+          summaryEl.textContent = schedWhenLabel(req.schedule) + ' · ' + where + ' · 账号 ' + who + ' · ' + (req.modelId ? '模型 ' + req.modelId : '模型保持当前');
+        }
+        function syncWhen() {
+          var type = scheduleTypeEl.value;
+          mask.querySelectorAll('[data-sched-when]').forEach(function (field) {
+            field.hidden = field.getAttribute('data-sched-when').split(' ').indexOf(type) < 0;
+          });
+          syncSummary();
+        }
+        function setTarget(next) {
+          target = next;
+          mask.querySelectorAll('[data-sched-target]').forEach(function (btn) {
+            btn.classList.toggle('active', btn.getAttribute('data-sched-target') === target);
+          });
+          mask.querySelectorAll('[data-sched-for]').forEach(function (field) {
+            field.hidden = field.getAttribute('data-sched-for') !== target;
+          });
+          syncSummary();
+        }
+        function renderConversations() {
+          var keyword = String(convSearchEl.value || '').trim().toLowerCase();
+          var keep = String(convEl.value || '');
+          var list = keyword ? conversations.filter(function (item) { return String(item.custom_title || item.title || '').toLowerCase().indexOf(keyword) >= 0; }) : conversations;
+          convEl.innerHTML = list.map(function (item) {
+            return '<option value="' + escAttr(String(item.id)) + '" data-wbs-i18n-skip="1">' + esc(schedConversationLabel(item)) + '</option>';
+          }).join('');
+          if (keep && list.some(function (item) { return String(item.id) === keep; })) convEl.value = keep;
+          if (convFailed) convHintEl.textContent = '对话加载失败，可改用「新建对话」';
+          else if (!conversations.length) convHintEl.textContent = '该账号下暂无可选对话，改用「新建对话」即可';
+          else if (keyword) convHintEl.textContent = '共 ' + conversations.length + ' 条，匹配 ' + list.length + ' 条';
+          else convHintEl.textContent = '共 ' + conversations.length + ' 条对话';
+        }
+        function loadConversations(uid, preferId) {
+          conversations = [];
+          convFailed = false;
+          convEl.innerHTML = '';
+          convHintEl.textContent = uid ? '加载中…' : '请先选择账号';
+          if (!uid) { syncSummary(); return Promise.resolve(); }
+          return api('/api/sessions?range=all&uid=' + encodeURIComponent(uid)).then(function (data) {
+            conversations = ((data && data.sessions) || []).slice().sort(function (a, b) {
+              return Number(b.last_activity_at || b.updated_at || b.created_at || 0) - Number(a.last_activity_at || a.updated_at || a.created_at || 0);
+            });
+            renderConversations();
+            if (preferId && conversations.some(function (item) { return String(item.id) === String(preferId); })) convEl.value = String(preferId);
+            syncSummary();
+          }).catch(function (e) {
+            convFailed = true;
+            renderConversations();
+            convHintEl.textContent = '对话加载失败：' + String(e.message || e);
+            syncSummary();
+          });
+        }
+        function saveScheduledSend() {
+          if (saveButton.disabled) return;
+          var req = currentRequest();
+          saveButton.disabled = true;
+          api('/api/scheduled-send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ request: req }) })
+            .then(function () { hideScheduledSend(); toast('已排定定时发送', false, root); return load(); })
+            .catch(function (e) { toast(e.message || '排定失败', true, root); })
+            .finally(function () { saveButton.disabled = false; });
+        }
+
+        messageEl.value = draft ? String(draft.message || '') : '';
+        nameEl.value = draft ? String(draft.name || '') : '';
+        scheduleTypeEl.value = schedule.type || 'once';
+        onceAtEl.value = schedule.type === 'once' ? String(schedule.at || schedDefaultOnceAt()) : schedDefaultOnceAt();
+        timeEl.value = ['daily', 'weekly', 'monthly'].indexOf(schedule.type) >= 0 ? String(schedule.time || '02:00') : '02:00';
+        monthDayEl.value = String(schedule.day || 1);
+        var defaultDays = Array.isArray(schedule.days) && schedule.days.length ? schedule.days.map(Number) : [1, 2, 3, 4, 5];
+        mask.querySelectorAll('[data-sched-weekday]').forEach(function (input) {
+          input.checked = defaultDays.indexOf(Number(input.getAttribute('data-sched-weekday'))) >= 0;
+        });
+        setTarget(target);
+        syncWhen();
+
+        mask.querySelectorAll('[data-sched-target]').forEach(function (btn) {
+          btn.addEventListener('click', function () { setTarget(btn.getAttribute('data-sched-target')); });
+        });
+        scheduleTypeEl.addEventListener('change', syncWhen);
+        convSearchEl.addEventListener('input', renderConversations);
+        weekEl.addEventListener('change', syncSummary);
+        convEl.addEventListener('change', syncSummary);
+        modelEl.addEventListener('change', syncSummary);
+        [messageEl, nameEl, onceAtEl, timeEl, monthDayEl].forEach(function (el) { el.addEventListener('input', syncSummary); });
+        accountEl.addEventListener('change', function () { loadConversations(accountEl.value, ''); });
+        saveButton.addEventListener('click', saveScheduledSend);
+        mask.querySelector('[data-sched-cancel]').addEventListener('click', hideScheduledSend);
+        mask.querySelector('.wbs-auto-modal-close').addEventListener('click', hideScheduledSend);
+        mask.addEventListener('click', function (event) { if (event.target === mask) hideScheduledSend(); });
+        mask.__wbsKeyHandler = function (event) { if (event.key === 'Escape') hideScheduledSend(); };
+        document.addEventListener('keydown', mask.__wbsKeyHandler, true);
+
+        Promise.all([api('/api/accounts'), api('/api/models')]).then(function (results) {
+          var accountData = results[0] || {};
+          accounts = Array.isArray(accountData.accounts) ? accountData.accounts.slice() : [];
+          var order = Array.isArray(accountData.accountOrder) ? accountData.accountOrder : [];
+          if (order.length) {
+            accounts.sort(function (a, b) {
+              var pa = order.indexOf(a.uid); var pb = order.indexOf(b.uid);
+              return (pa < 0 ? 9999 : pa) - (pb < 0 ? 9999 : pb);
+            });
+          }
+          accountEl.innerHTML = accounts.length
+            ? accounts.map(function (item) {
+                return '<option value="' + escAttr(String(item.uid)) + '" data-wbs-i18n-skip="1">' + esc(String(item.nickname || item.uid) + (item.isPrimary ? '（主账号）' : '')) + '</option>';
+              }).join('')
+            : '<option value="">（无可用账号）</option>';
+          var currentUid = String((accountData.current && accountData.current.uid) || '');
+          var preferred = draft && draft.accountUid ? String(draft.accountUid) : currentUid;
+          if (preferred && accounts.some(function (item) { return String(item.uid) === preferred; })) accountEl.value = preferred;
+          else if (accounts.length) accountEl.value = String(accounts[0].uid);
+
+          models = ((results[1] && results[1].official) || []).filter(function (item) { return item && item.id; });
+          modelEl.innerHTML = '<option value="">保持当前模型</option>' + models.map(function (item) {
+            return '<option value="' + escAttr(String(item.id)) + '" data-wbs-i18n-skip="1">' + esc(String(item.name || item.id)) + '</option>';
+          }).join('');
+          if (draft && draft.modelId && models.some(function (item) { return String(item.id) === String(draft.modelId); })) modelEl.value = String(draft.modelId);
+
+          applyI18n(mask);
+          return loadConversations(accountEl.value, draft ? draft.conversationId : '');
+        }).then(function () {
+          messageEl.focus();
+        }).catch(function (e) {
+          applyI18n(mask);
+          toast(e.message || '加载账号或模型失败', true, root);
+        });
+      }
+
       function mountAutomationModal(mask) {
         (panel || root).appendChild(mask);
         var close = function () { closePanelModal(mask); };
@@ -6094,11 +6386,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         if (typeof window.__wbsStartAutomationPicker === 'function') window.__wbsStartAutomationPicker();
         else toast('元素拾取器尚未加载', true, root);
       }
-      automationPane.innerHTML = '<div class="wbs-pcard wbs-auto-card"><div class="wbs-auto-toolbar"><div class="wbs-pcard-title">自动化<span class="wbs-pcard-sub" id="wbs-auto-count"></span></div><button type="button" class="wbs-auto-textbtn" id="wbs-auto-cap">查看接口说明</button><div class="wbs-auto-toolbar-actions"><div class="wbs-auto-normal-actions" id="wbs-auto-normal-actions"><button class="wbs-sess-bbtn wbs-auto-pick-btn" type="button" id="wbs-auto-pick">' + AUTO_PICK_SVG + '<span>拾取元素</span></button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-create">让 WorkBuddy 帮我创建</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-new">新建任务</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-import" title="选择 JSON 或 ZIP 任务文件">' + IMPORT_ICON + '<span>导入</span></button><input type="file" id="wbs-auto-import-file" accept=".json,.zip,application/json,application/zip" hidden><button class="wbs-sess-bbtn" type="button" id="wbs-auto-batch">批量操作</button></div><div class="wbs-auto-batch-actions" id="wbs-auto-batch-actions" style="display:none"><span class="wbs-auto-batch-count" id="wbs-auto-batch-count">已选 0</span><button class="wbs-sess-bbtn" type="button" id="wbs-auto-select-all">全选</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-export" disabled>' + EXPORT_ICON + '<span>导出</span></button><button class="wbs-sess-bbtn wbs-sess-delbtn" type="button" id="wbs-auto-batch-apply">' + TRASH_SVG + '<span>删除选中</span></button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-batch-cancel">取消</button></div></div></div><div class="wbs-auto-list" id="wbs-auto-list"></div></div>';
+      automationPane.innerHTML = '<div class="wbs-pcard wbs-auto-card"><div class="wbs-auto-toolbar"><div class="wbs-pcard-title">自动化<span class="wbs-pcard-sub" id="wbs-auto-count"></span></div><button type="button" class="wbs-auto-textbtn" id="wbs-auto-cap">查看接口说明</button><div class="wbs-auto-toolbar-actions"><div class="wbs-auto-normal-actions" id="wbs-auto-normal-actions"><button class="wbs-sess-bbtn wbs-auto-pick-btn" type="button" id="wbs-auto-pick">' + AUTO_PICK_SVG + '<span>拾取元素</span></button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-create">让 WorkBuddy 帮我创建</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-new">新建任务</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-sched">定时发送</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-import" title="选择 JSON 或 ZIP 任务文件">' + IMPORT_ICON + '<span>导入</span></button><input type="file" id="wbs-auto-import-file" accept=".json,.zip,application/json,application/zip" hidden><button class="wbs-sess-bbtn" type="button" id="wbs-auto-batch">批量操作</button></div><div class="wbs-auto-batch-actions" id="wbs-auto-batch-actions" style="display:none"><span class="wbs-auto-batch-count" id="wbs-auto-batch-count">已选 0</span><button class="wbs-sess-bbtn" type="button" id="wbs-auto-select-all">全选</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-export" disabled>' + EXPORT_ICON + '<span>导出</span></button><button class="wbs-sess-bbtn wbs-sess-delbtn" type="button" id="wbs-auto-batch-apply">' + TRASH_SVG + '<span>删除选中</span></button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-batch-cancel">取消</button></div></div></div><div class="wbs-auto-list" id="wbs-auto-list"></div></div>';
       automationPane.querySelector('#wbs-auto-import').addEventListener('click', function () { automationPane.querySelector('#wbs-auto-import-file').click(); });
       automationPane.querySelector('#wbs-auto-import-file').addEventListener('change', readAutomationImport);
       automationPane.querySelector('#wbs-auto-export').addEventListener('click', exportAutomationTasks);
       automationPane.querySelector('#wbs-auto-new').addEventListener('click', function () { showEditor(defaultTask()); });
+      automationPane.querySelector('#wbs-auto-sched').addEventListener('click', function () { showScheduledSend(null); });
       automationPane.querySelector('#wbs-auto-pick').addEventListener('click', startPicker);
       automationPane.querySelector('#wbs-auto-cap').addEventListener('click', showCapabilities);
       automationPane.querySelector('#wbs-auto-create').addEventListener('click', showExamples);
@@ -6152,9 +6445,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             .then(function (result) { if (result && result.run) automationState.runs.unshift(result.run); toast('任务已开始运行', false, root); render(); return load(); })
             .catch(function (err) { toast(err.message || '运行失败', true, root); })
             .finally(function () { delete button.dataset.autoActionPending; });
-        } else if (button.hasAttribute('data-auto-logs')) showAutomationLogs(task);
-        else if (button.hasAttribute('data-auto-edit')) showEditor(task);
-        else if (button.hasAttribute('data-auto-copy')) { var copy = JSON.parse(JSON.stringify(task)); copy.id = 'task_' + Date.now().toString(36); copy.name = task.name + '（副本）'; showEditor(copy); }
+        }         else if (button.hasAttribute('data-auto-logs')) showAutomationLogs(task);
+        else if (button.hasAttribute('data-auto-edit')) { if (isScheduledSendTaskUI(task)) showScheduledSend(task); else showEditor(task); }
+        else if (button.hasAttribute('data-auto-copy')) {
+          var copy = JSON.parse(JSON.stringify(task));
+          copy.id = 'task_' + Date.now().toString(36);
+          copy.name = task.name + '（副本）';
+          // 副本按普通任务给出：清掉定时发送标记，避免副本仍被引导到向导、甚至回写原任务。
+          if (copy.meta && typeof copy.meta === 'object') { delete copy.meta[SCHED_MARKER]; delete copy.meta.request; }
+          showEditor(copy);
+        }
         else if (button.hasAttribute('data-auto-delete')) showAutomationConfirm('删除该自动化任务？', '删除后无法恢复。', function () { api('/api/automations/bulk', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [id], action: 'delete' }) }).then(load).catch(function (err) { toast(err.message || '删除失败', true, root); }); });
       });
       registerDisposer(function () { if (automationState.pollTimer) clearInterval(automationState.pollTimer); hideEditor(); (panel || root).querySelectorAll('.wbs-auto-dialog-mask').forEach(closePanelModal); });
@@ -14422,6 +14722,22 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     'html.cb-dark .wbs-auto-row,html[data-theme="dark"] .wbs-auto-row,body[data-vscode-theme-name*="dark" i] .wbs-auto-row{background:color-mix(in srgb,var(--wb-bg-secondary,#202126) 50%,transparent)}html.cb-dark .wbs-auto-status.off,html[data-theme="dark"] .wbs-auto-status.off,body[data-vscode-theme-name*="dark" i] .wbs-auto-status.off{background:rgba(255,255,255,.08)}html.cb-dark .wbs-auto-protocol,html[data-theme="dark"] .wbs-auto-protocol,body[data-vscode-theme-name*="dark" i] .wbs-auto-protocol,html.cb-dark .wbs-auto-log-output,html[data-theme="dark"] .wbs-auto-log-output,body[data-vscode-theme-name*="dark" i] .wbs-auto-log-output{background:rgba(255,255,255,.06)}html.cb-dark .wbs-auto-log-run,html[data-theme="dark"] .wbs-auto-log-run,body[data-vscode-theme-name*="dark" i] .wbs-auto-log-run{background:color-mix(in srgb,var(--wb-bg-secondary,#202126) 50%,transparent)}html.cb-dark .wbs-auto-field input,html.cb-dark .wbs-auto-field select,html.cb-dark .wbs-auto-field textarea,html[data-theme="dark"] .wbs-auto-field input,html[data-theme="dark"] .wbs-auto-field select,html[data-theme="dark"] .wbs-auto-field textarea,body[data-vscode-theme-name*="dark" i] .wbs-auto-field input,body[data-vscode-theme-name*="dark" i] .wbs-auto-field select,body[data-vscode-theme-name*="dark" i] .wbs-auto-field textarea{background:var(--wb-bg-popover,#202126);border-color:var(--wb-border-subtle,rgba(255,255,255,.18));color:var(--wb-color-text-primary,#f2f3f5)}',
     '.wbs-auto-schedule{margin-top:5px}.wbs-auto-schedule [hidden]{display:none!important}.wbs-auto-weekdays{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;flex-basis:100%}.wbs-auto-schedule select{width:auto;max-width:100%;height:28px;padding:3px 7px;border:1px solid var(--wb-border-default,#ddd);border-radius:7px;background:var(--wb-bg-popover,#fff);color:var(--wb-color-text-primary,#1f1f1f);font:inherit}.wbs-auto-schedule input[type="time"]{width:106px;height:28px;padding:3px 6px}.wbs-auto-schedule input[type="datetime-local"]{width:205px;max-width:100%;height:28px;padding:3px 6px}.wbs-auto-schedule label{max-width:100%}.wbs-auto-schedule-hint{flex-basis:100%;font-size:10px;color:var(--wb-color-text-secondary,#666);line-height:1.45}.wbs-auto-schedule select:focus-visible{outline:2px solid var(--wb-button-primary-bg,#1f1f1f);outline-offset:1px}',
     '.wbs-auto-check input,.wbs-auto-trigger-options input[type="checkbox"],.wbs-auto-schedule input[type="checkbox"]{appearance:none;-webkit-appearance:none;display:inline-grid;place-content:center;flex:0 0 14px;width:14px;height:14px;margin:0;padding:0;border:1px solid var(--wb-border-default,#bbb);border-radius:4px;background:var(--wb-bg-popover,#fff);cursor:pointer}.wbs-auto-check input:checked,.wbs-auto-trigger-options input[type="checkbox"]:checked,.wbs-auto-schedule input[type="checkbox"]:checked{background:var(--wb-button-primary-bg,#1f1f1f);border-color:var(--wb-button-primary-bg,#1f1f1f)}.wbs-auto-check input:checked:after,.wbs-auto-trigger-options input[type="checkbox"]:checked:after,.wbs-auto-schedule input[type="checkbox"]:checked:after{content:"";width:6px;height:3px;border-left:1.5px solid var(--wb-button-primary-fg,#fff);border-bottom:1.5px solid var(--wb-button-primary-fg,#fff);transform:translateY(-1px) rotate(-45deg)}.wbs-auto-check input:focus-visible,.wbs-auto-trigger-options input[type="checkbox"]:focus-visible,.wbs-auto-schedule input[type="checkbox"]:focus-visible{outline:2px solid var(--wb-button-primary-bg,#1f1f1f);outline-offset:2px}',
+    /* ===== 定时发送向导 ===== */
+    '.wbs-modal.wbs-sched-modal{display:grid;grid-template-rows:auto minmax(0,1fr) auto;width:calc(100% - 32px);max-width:640px;height:min(680px,calc(100% - 32px));box-sizing:border-box;overflow:hidden}',
+    '.wbs-sched-body{display:flex;flex-direction:column;min-height:0;overflow:auto;padding:2px;scrollbar-width:thin;scrollbar-color:var(--wb-border-default,#bbb) transparent}',
+    '.wbs-sched-body [hidden]{display:none!important}',
+    '.wbs-sched-row{display:flex;gap:8px}.wbs-sched-row>.wbs-auto-field{flex:1 1 0;min-width:0}',
+    '.wbs-auto-field select{box-sizing:border-box;width:100%;height:30px;padding:5px 8px;border:1px solid var(--wb-border-default,#dedede);border-radius:7px;background:var(--wb-bg-popover,#fff);color:var(--wb-color-text-primary,#1f1f1f);font:inherit;font-size:12px;outline:none}',
+    '.wbs-auto-field select:focus{border-color:var(--wb-button-primary-bg,#1f1f1f);box-shadow:0 0 0 2px color-mix(in srgb,var(--wb-button-primary-bg,#1f1f1f) 20%,transparent)}',
+    '.wbs-auto-field select[size]{height:auto;padding:4px 5px;line-height:1.6}',
+    '.wbs-auto-field select[size] option{padding:3px 5px;border-radius:5px}',
+    '.wbs-sched-seg{display:flex;gap:3px;padding:3px;border-radius:9px;background:var(--wb-bg-tertiary,#f0f0f0)}',
+    '.wbs-sched-seg-btn{flex:1;min-height:26px;padding:0 8px;border:0;border-radius:7px;background:transparent;color:var(--wb-icon-secondary,#666);font:inherit;font-size:11px;cursor:pointer}',
+    '.wbs-sched-seg-btn.active{background:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff);box-shadow:0 1px 4px rgba(0,0,0,.16)}',
+    '.wbs-sched-seg-btn:focus-visible{outline:2px solid var(--wb-button-primary-bg,#1f1f1f);outline-offset:1px}',
+    '.wbs-sched-hint{font-size:10px;color:var(--wb-icon-tertiary,#888);line-height:1.45;overflow-wrap:anywhere}',
+    '.wbs-sched-summary{margin:2px 0 4px;padding:7px 9px;border-radius:8px;background:var(--wb-bg-tertiary,#f5f5f5);color:var(--wb-color-text-secondary,#666);font-size:11px;line-height:1.5;overflow-wrap:anywhere}',
+    '.wbs-sched-modal .wbs-modal-actions{flex-shrink:0;margin-top:10px}',
     /* 免打扰：标题行右置批量开关 + 三列 grid 对齐（标题/小标题/开关，所有小标题左对齐） */
     '.wbs-nd-head{display:flex;align-items:center;gap:6px}',
     '.wbs-nd-head #wbs-nd-count{margin-left:2px}',

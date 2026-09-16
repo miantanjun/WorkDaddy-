@@ -387,7 +387,9 @@ function waitSettled(jobs, ms) {
     // 把新 buildId 追加进来即可，否则测试会在新阶段误报 D0 失败。
     // 别再往名单里堆具体版本了（堆了三次，每次都要回来改）：只要跑的是「本阶段或更晚的
     // 自建构建」就算通过 —— 前缀 + 日期形态 + 不是引入本功能之前的那个即可。
-    const BUILD_RE = /^(selfhost|release)-1\.3\.0-\d{8}-/;
+    // 2026-09-17: 原来的 /^…-1\.3\.0-/ 在 daemon 升到 1.3.1 后就一直误报 D0（存量问题）。
+    // 放宽到 1.3.x：只要前缀/日期形态对、且不是「引入本功能之前」的那个构建就算通过。
+    const BUILD_RE = /^(selfhost|release)-1\.3\.[0-9]+-\d{8}-/;
     ok(BUILD_RE.test(live) && live !== 'release-1.3.0-20260914-failover-continue',
       'D0 daemon 已加载本阶段（或更晚）的构建', live);
 
