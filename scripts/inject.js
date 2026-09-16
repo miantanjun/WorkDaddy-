@@ -1092,6 +1092,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '含其他账号副本 {n} 个': ' including {n} other-account copies',
     '以「不让当前账号登录身份过期」的方式切到登录页，可以登录新账号，也可以切回已登录账号': 'Goes to the login page without letting the current account expire; log in a new account or switch back to an existing one.',
     '不退出 WorkBuddy，在浏览器完成授权后新账号自动加入列表': 'Keeps WorkBuddy running; after authorizing in the browser, the new account is added to the list automatically.',
+    // —— 登录方式悬停提示（优劣对比，鼠标悬停/键盘聚焦任一方式时显示）——
+    '把鼠标移到任一方式上，可查看它的优缺点': 'Hover either method to see its pros and cons.',
+    '优点': 'Pros', '缺点': 'Cons',
+    '无须浏览器授权，旧账号登录身份不过期，之后能随时切回': 'No browser authorization needed; the old account stays signed in and can be switched back to anytime.',
+    '要关掉并重开 WorkBuddy，当前会话与正在跑的任务会中断': 'Closes and reopens WorkBuddy, interrupting the current session and any running task.',
+    '不用退出或重开应用，授权成功后新账号自动加入列表并切换': 'WorkBuddy keeps running; once authorized, the new account is added to the list and switched to automatically.',
+    '必须在浏览器扫码完成授权，依赖官方接口与网络可用': 'Requires scanning a code in the browser to authorize; depends on the official API and network being available.',
     '正在发起授权…': 'Starting authorization…', '再想想': 'Not now',
     // ===== 云端残留（会话删除只删本机，其它设备看的是云端那份）=====
     '云端残留': 'Cloud leftovers',
@@ -9104,16 +9111,33 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<div class="wbs-login-modal" role="dialog" aria-modal="true" aria-labelledby="wbs-login-modal-title">' +
         '<div class="wbs-login-modal-title" id="wbs-login-modal-title">选择登录方式</div>' +
         '<div class="wbs-login-body" id="wbs-login-body" role="radiogroup" aria-label="登录方式">' +
-        '<label class="wbs-login-option selected" data-way="logout">' +
+        '<label class="wbs-login-option selected" data-way="logout" aria-describedby="wbs-login-tip-logout">' +
         '<input type="radio" name="wbs-login-way" value="logout" checked>' +
         '<span class="wbs-login-option-copy"><span class="wbs-login-option-title">假退出</span>' +
         '<span class="wbs-login-option-desc">以「不让当前账号登录身份过期」的方式切到登录页，可以登录新账号，也可以切回已登录账号</span></span>' +
         '</label>' +
-        '<label class="wbs-login-option" data-way="seamless">' +
+        '<label class="wbs-login-option" data-way="seamless" aria-describedby="wbs-login-tip-seamless">' +
         '<input type="radio" name="wbs-login-way" value="seamless">' +
         '<span class="wbs-login-option-copy"><span class="wbs-login-option-title">无感登录</span>' +
         '<span class="wbs-login-option-desc">不退出 WorkBuddy，在浏览器完成授权后新账号自动加入列表</span></span>' +
         '</label>' +
+        '</div>' +
+        // 悬停提示：鼠标移到（或键盘聚焦到）任一登录方式上，就在这块固定高度的槽位里显示该方式的优缺点。
+        // 槽位高度写死、卡片绝对定位淡入 —— 既不撑高弹窗（避免遮罩居中溢出被面板裁剪），也不会让选项在悬停时位移。
+        '<div class="wbs-login-tip" id="wbs-login-tip">' +
+        '<div class="wbs-login-tip-hint">把鼠标移到任一方式上，可查看它的优缺点</div>' +
+        '<div class="wbs-login-tip-card" id="wbs-login-tip-logout" data-tip-for="logout" role="tooltip" aria-hidden="true">' +
+        '<div class="wbs-login-tip-row"><span class="wbs-login-tip-tag pro">优点</span>' +
+        '<span class="wbs-login-tip-text">无须浏览器授权，旧账号登录身份不过期，之后能随时切回</span></div>' +
+        '<div class="wbs-login-tip-row"><span class="wbs-login-tip-tag con">缺点</span>' +
+        '<span class="wbs-login-tip-text">要关掉并重开 WorkBuddy，当前会话与正在跑的任务会中断</span></div>' +
+        '</div>' +
+        '<div class="wbs-login-tip-card" id="wbs-login-tip-seamless" data-tip-for="seamless" role="tooltip" aria-hidden="true">' +
+        '<div class="wbs-login-tip-row"><span class="wbs-login-tip-tag pro">优点</span>' +
+        '<span class="wbs-login-tip-text">不用退出或重开应用，授权成功后新账号自动加入列表并切换</span></div>' +
+        '<div class="wbs-login-tip-row"><span class="wbs-login-tip-tag con">缺点</span>' +
+        '<span class="wbs-login-tip-text">必须在浏览器扫码完成授权，依赖官方接口与网络可用</span></div>' +
+        '</div>' +
         '</div>' +
         '<div class="wbs-modal-actions"><button class="wbs-modal-btn" type="button" id="wbs-login-cancel">取消</button>' +
         '<button class="wbs-modal-btn wbs-modal-ok" type="button" id="wbs-login-confirm">确定</button></div>' +
@@ -9134,6 +9158,30 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         options[oi].querySelector('input').addEventListener('change', syncSelected);
         options[oi].addEventListener('click', function () { syncSelected(); });
       }
+
+      // 优缺点提示：hover / 键盘聚焦切换槽位内的卡片，移出选项组即回到初始提示语。
+      var tipSlot = mask.querySelector('#wbs-login-tip');
+      var tipCards = tipSlot ? tipSlot.querySelectorAll('.wbs-login-tip-card') : [];
+      var tipHint = tipSlot ? tipSlot.querySelector('.wbs-login-tip-hint') : null;
+      var showTip = function (way) {
+        if (tipHint) tipHint.classList.toggle('is-off', !!way);
+        for (var ti = 0; ti < tipCards.length; ti++) {
+          var on = !!way && tipCards[ti].getAttribute('data-tip-for') === way;
+          tipCards[ti].classList.toggle('is-on', on);
+          tipCards[ti].setAttribute('aria-hidden', on ? 'false' : 'true');
+        }
+      };
+      for (var pi = 0; pi < options.length; pi++) {
+        (function (opt) {
+          var way = opt.getAttribute('data-way');
+          opt.addEventListener('mouseenter', function () { showTip(way); });
+          opt.addEventListener('focusin', function () { showTip(way); });
+        })(options[pi]);
+      }
+      body.addEventListener('mouseleave', function () { showTip(null); });
+      body.addEventListener('focusout', function (ev) {
+        if (!ev.relatedTarget || !body.contains(ev.relatedTarget)) showTip(null);
+      });
 
       mask.querySelector('#wbs-login-confirm').addEventListener('click', function () {
         var confirmBtn = this;
@@ -9167,6 +9215,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       };
       body.innerHTML =
         '<div class="wbs-login-status" id="wbs-login-status">正在发起授权…</div>';
+      // 进入授权流程后不再需要「优缺点」槽位，撤掉把空间让给进度状态。
+      var tipSlot = mask.querySelector('#wbs-login-tip');
+      if (tipSlot && tipSlot.parentNode) tipSlot.parentNode.removeChild(tipSlot);
       mask.querySelector('.wbs-modal-actions').innerHTML =
         '<button class="wbs-modal-btn" type="button" id="wbs-login-cancel2">取消</button>';
       mask.querySelector('#wbs-login-cancel2').addEventListener('click', function () {
@@ -14783,7 +14834,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-pane{position:relative}',
     '@keyframes wbs-modal-in{from{opacity:0}to{opacity:1}}',
     '.wbs-panel-modal-mask{position:absolute;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;padding:14px;background:transparent;pointer-events:auto;animation:wbs-modal-in .16s ease}',
-    '.wbs-login-modal{width:min(360px,calc(100% - 28px));box-sizing:border-box;padding:16px;border:1px solid var(--wb-border-default,rgba(0,0,0,.12));border-radius:14px;background:var(--wb-bg-popover,#fff);box-shadow:0 10px 40px rgba(0,0,0,.25)}.wbs-import-choice-modal{width:min(460px,calc(100% - 28px))}.wbs-import-json-hint{margin:-3px 0 12px;padding:9px 10px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.14));border-radius:9px;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 55%,transparent);color:var(--wb-icon-secondary,#667085);font-size:11px;line-height:1.55}.wbs-import-json-hint[hidden]{display:none!important}',
+    '.wbs-login-modal{width:min(360px,calc(100% - 28px));box-sizing:border-box;padding:16px;border:1px solid var(--wb-border-default,rgba(0,0,0,.12));border-radius:14px;background:var(--wb-bg-popover,#fff);box-shadow:0 10px 40px rgba(0,0,0,.25);max-height:calc(100% - 28px);overflow-y:auto}.wbs-import-choice-modal{width:min(460px,calc(100% - 28px))}.wbs-import-json-hint{margin:-3px 0 12px;padding:9px 10px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.14));border-radius:9px;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 55%,transparent);color:var(--wb-icon-secondary,#667085);font-size:11px;line-height:1.55}.wbs-import-json-hint[hidden]{display:none!important}',
     '.wbs-login-modal-title{font-size:15px;font-weight:700;line-height:1.35;color:var(--wb-color-text-primary,#1f1f1f);margin:0 0 14px}',
     '.wbs-password-modal{width:min(360px,calc(100% - 28px));box-sizing:border-box;padding:16px;border:1px solid var(--wb-border-default,rgba(0,0,0,.12));border-radius:14px;background:var(--wb-bg-popover,#fff);box-shadow:0 10px 40px rgba(0,0,0,.25)}',
     '.wbs-password-field{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--wb-icon-secondary,#666)}',
@@ -14813,6 +14864,23 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-login-option-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:4px}',
     '.wbs-login-option-title{font-size:13px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f);line-height:1.4}',
     '.wbs-login-option-desc{font-size:11.5px;color:var(--wb-icon-secondary,#666);line-height:1.55;font-weight:400}',
+    // 登录方式优缺点提示：槽位高度写死、卡片绝对定位 —— 悬停时弹窗高度不变、选项不位移，
+    // 也就不会出现「居中弹窗变高后被面板 overflow 裁掉」的问题。
+    // 两块内容用 display 原子切换（而不是交叉淡入淡出）：任何一帧里只会存在「提示语」或「卡片」
+    // 其中之一，不会出现两段文字半透明叠在一起；卡片自身保留一次淡入做手感。
+    '.wbs-login-tip{position:relative;height:104px;box-sizing:border-box;margin:0 0 14px;border:1px solid var(--wb-border-subtle,#eee);border-radius:10px;background:color-mix(in srgb,var(--wb-bg-tertiary,#f5f6f8) 55%,transparent);overflow:hidden}',
+    '.wbs-login-tip-hint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:0 18px;text-align:center;font-size:11px;line-height:1.6;color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-login-tip-hint.is-off{display:none}',
+    '.wbs-login-tip-card{position:absolute;inset:0;display:none;flex-direction:column;justify-content:center;gap:7px;box-sizing:border-box;padding:10px 12px;overflow-y:auto;scrollbar-width:thin;pointer-events:none}',
+    '.wbs-login-tip-card.is-on{display:flex;animation:wbs-login-tip-in .16s ease}',
+    '@keyframes wbs-login-tip-in{from{opacity:0;transform:translateY(2px)}to{opacity:1;transform:none}}',
+    '.wbs-login-tip-row{display:flex;align-items:flex-start;gap:7px;font-size:11px;line-height:1.55;color:var(--wb-icon-secondary,#666)}',
+    '.wbs-login-tip-tag{flex:0 0 auto;font-weight:700}',
+    '.wbs-login-tip-tag.pro{color:#1a9c56}',
+    '.wbs-login-tip-tag.con{color:#b26a00}',
+    '.wbs-login-tip-text{flex:1;min-width:0;word-break:break-word}',
+    'html.cb-dark .wbs-login-tip-tag.pro,html[data-theme="dark"] .wbs-login-tip-tag.pro,body[data-vscode-theme-name*="dark" i] .wbs-login-tip-tag.pro{color:#4ec97f}',
+    'html.cb-dark .wbs-login-tip-tag.con,html[data-theme="dark"] .wbs-login-tip-tag.con,body[data-vscode-theme-name*="dark" i] .wbs-login-tip-tag.con{color:#e0a95c}',
     '.wbs-login-status{font-size:12px;color:var(--wb-icon-secondary,#666);line-height:1.7;word-break:break-all;padding:2px 0 10px}',
     '.wbs-login-link{color:var(--wb-accent-blue,#4f86ff);text-decoration:none;font-weight:600}',
     '.wbs-login-link:hover{text-decoration:underline}',
