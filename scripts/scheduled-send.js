@@ -9,7 +9,7 @@
  *
  * ── 任务形态（已有对话）────────────────────────────────────────────
  *   account.forEach { accounts:[uid], switch:true, steps:[
- *     session.open   { conversationId },          // 先把目标会话选中
+ *     session.open   { conversationId, timeoutMs }, // 先把目标会话选中（timeoutMs=90000：等加载）
  *     logic.delay    { ms:600 },                  // 等控制器就绪
  *     model.set      { modelId },                 // 可选；必须晚于 open
  *     session.send   { conversationId, message }  // 必须有匹配的 conversationId
@@ -44,6 +44,9 @@ const MAX_NAME = 120;
 const MAX_TOKEN = 128;
 const MAX_TITLE = 200;
 const OPEN_SETTLE_MS = 600;
+// session.open 的预算：WorkBuddy 侧「目标会话正在加载」时点击会被静默吞掉，
+// 而加载慢时（源码注释：daemon 忙时可达 90s+）15 秒远远不够 —— 取 90 秒。
+const OPEN_TIMEOUT_MS = 90000;
 const WEEK_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
 function isPlainObject(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
@@ -176,7 +179,7 @@ function buildTask(request, options) {
   const inner = r.conversationId === NEW_CONVERSATION
     ? [Object.assign({ op: 'session.create' }, messageStep, r.modelId ? { modelId: r.modelId } : {})]
     : []
-      .concat([{ op: 'session.open', conversationId: r.conversationId }])
+      .concat([{ op: 'session.open', conversationId: r.conversationId, timeoutMs: OPEN_TIMEOUT_MS }])
       .concat([{ op: 'logic.delay', ms: OPEN_SETTLE_MS }])
       .concat(r.modelId ? [{ op: 'model.set', modelId: r.modelId }] : [])
       .concat([Object.assign({ op: 'session.send', conversationId: r.conversationId }, messageStep)]);

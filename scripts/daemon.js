@@ -409,13 +409,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
 //        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
 //        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
-const DAEMON_VERSION = '1.3.8';
+const DAEMON_VERSION = '1.3.9';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.8-20260917-archive-isolation';
+const DAEMON_BUILD_ID = 'release-1.3.9-20260917-session-open-wait';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -7054,11 +7054,25 @@ function limitFailoverSyncWaitMs(requested) {
  * ② 点完只等 1.6s 判效——有会话被打开就留在首选候选上重试，一点动静都没有就换下一个候选；
  * ③ 进循环先查 controller，目标已打开直接返回（省一次点击与一轮等待）。
  * 失败时在 daemon.log 留一行 `[session-open] … reason=…`（no-list / found-but-inert 可区分）。
+ *
+ * ⚠️ 2026-09-17 二次修复（20:05 定时发送又没打开会话，且这次**没有切号**）：
+ * **行找到了、点了，也可能什么都不发生** —— WorkBuddy 侧存在「静默 no-op」分支，
+ * 见 renderer 源码（ui-docs-viewer 的 handleConversationClick）：
+ *   ① `loadingSessionIdRef.current === id` → 该会话正在加载，点击被去重；源码注释原文：
+ *      「loadSession 在飞时（daemon 忙时可达 90s+）… 期间每一次点击都是静默 no-op」（issue #89336）
+ *   ② `isRedundantConversationClick(...)` → 已选中且路由一致，点了等于没点；
+ *   ③ `isCreatingConversation` → 正在新建会话，点击被吞掉。
+ * 症状完全一致：`found=true`、每轮都在点、`reason=unknown`、预算烧光。
+ * 因此这里：**观测到「已选中但没挂上控制器」就不再空转点击**，改为等加载落地
+ * （20 秒仍无进展才退回点击，避免真卡住时彻底不动作）；带 8 秒心跳与失败诊断；
+ * 预算可由 step 的 `timeoutMs` 放大（定时发送取 90 秒，覆盖「加载慢」的窗口）。
  */
 async function openConversationById(sessionId, timeoutMs) {
   const id = String(sessionId || '').trim();
   if (!id || !cdp.connected) return false;
-  const deadline = Date.now() + (Number(timeoutMs) || 15000);
+  const budgetMs = Math.min(300000, Math.max(3000, Number(timeoutMs) || 15000));
+  const deadline = Date.now() + budgetMs;
+  const startedAt = Date.now();
   // 候选按「实测有效度」排序：_card_ 是唯一在半就绪状态下被证明有效的那个。
   const picks = [
     'hit.querySelector(\'[class*="_card_"]\')',
@@ -7069,35 +7083,70 @@ async function openConversationById(sessionId, timeoutMs) {
   let scrollTop = 0;
   let pickIndex = 0;
   let reason = 'unknown';
+  let clicks = 0;          // 真正发出去的点击数（「等加载」的轮次不计）
+  let tries = 0;           // 循环轮次
+  let lastBeatAt = 0;      // 心跳节流
+  let diag = null;         // 最后一次观测到的现场，失败时一次性写进日志
+  let waitOnly = false;    // 本轮只观测、不点击（目标会话正在加载时点了也会被吞）
+  const LOAD_WAIT_MS = 20000; // 判定「加载中」后先等这么久，仍无进展才退回点击
   while (Date.now() < deadline) {
+    tries += 1;
     const expr =
       '(function(){try{' +
       'var id=' + JSON.stringify(id) + ';' +
       'var compat=window.__wbsWorkBuddyCompat;' +
-      'var opened=false;' +
+      'var opened=false;var cids="";' +
       'try{var cs=(compat&&compat.findConversationControllers(document))||[];' +
-      'for(var q=0;q<cs.length;q++){if(String(cs[q].conversationId||"")===id){opened=true;break}}}catch(e){}' +
-      'if(opened)return {ok:true,found:true,opened:true};' +
+      'for(var q=0;q<cs.length;q++){var cid=String(cs[q].conversationId||"");' +
+      'if(cid){cids+=(cids?",":"")+cid.slice(0,8)}' +
+      'if(cid===id){opened=true;break}}}catch(e){}' +
+      'var selected="";try{selected=(compat&&compat.getSelectedConversationId)?String(compat.getSelectedConversationId(document)||""):""}catch(e){}' +
+      'var rows=document.querySelectorAll("[data-conversation-id]").length;' +
+      'if(opened)return {ok:true,found:true,opened:true,selected:selected,controllers:cids,rows:rows};' +
       'var list=document.querySelector(".conversation-list");' +
-      'if(!list)return {ok:false,reason:"no-list"};' +
+      'if(!list)return {ok:false,reason:"no-list",selected:selected,controllers:cids,rows:rows};' +
       'var hit=document.querySelector("[data-conversation-id=\\""+id+"\\"]");' +
       'if(!hit){' +
       '  var headers=list.querySelectorAll(".collapsible-section-header");' +
       '  for(var k=0;k<headers.length;k++){if((headers[k].className||"").indexOf("expanded")===-1)headers[k].click();}' +
       '  var c=document.querySelector(".conversation-list-content");' +
       '  if(c)c.scrollTop=' + String(scrollTop) + ';' +
-      '  return {ok:true,found:false};' +
+      // 行不在 ≠ CDP 没回：reason 必须能分开，否则回看日志时两种故障长得一样。
+      '  return {ok:true,found:false,reason:"no-row",selected:selected,controllers:cids,rows:rows};' +
       '}' +
+      'if(' + (waitOnly ? 'true' : 'false') + '){return {ok:true,found:true,waited:true,selected:selected,controllers:cids,rows:rows};}' +
       'var card=' + picks[pickIndex] + '||hit;' +
       'card.click();' +
-      'return {ok:true,found:true,clicked:String(card.className||card.tagName||"")};' +
+      'return {ok:true,found:true,selected:selected,controllers:cids,rows:rows,clicked:String(card.className||card.tagName||"").slice(0,60)};' +
       '}catch(e){return {ok:false,reason:String(e&&e.message||e)}}})()';
     const res = await runCdpExpression(expr, { awaitPromise: false }).catch(() => null);
-    if (res && res.opened) return true;
+    if (res) diag = res;
+    if (res && res.opened) {
+      log('[session-open] 已打开 id=' + id + ' 用时 ' + (Date.now() - startedAt) + 'ms 点击=' + clicks + ' 轮次=' + tries);
+      return true;
+    }
     if (res && res.found) {
-      // 点完只等一小段就判效：控制器挂上了说明这个候选点得动（留在它上面继续试），
-      // 一点动静都没有就换下一个候选元素。旧代码「死等 8 秒」正是预算被烧光的原因。
-      const until = Date.now() + 1600;
+      // ① 已选中但没挂上控制器 = 该会话正在加载中，WorkBuddy 会把点击**去重**（静默 no-op）。
+      //    ⚠️ 关键：**这一轮连点都不能点** —— 点击是在求值表达式里执行的，所以下一轮
+      //    带 waitOnly 只观测；否则「不判效」压不住点击，仍是空转。
+      //    实测：15 秒里点了十几轮、一次都不生效。等 20 秒仍无进展才退回点击，
+      //    避免「加载其实早就失败」时彻底不动作。
+      const loadingLike = res.waited || res.selected === id;
+      if (loadingLike && Date.now() - startedAt < LOAD_WAIT_MS) {
+        waitOnly = true;
+        if (Date.now() - lastBeatAt >= 8000) {
+          lastBeatAt = Date.now();
+          log('[session-open] 等待中 id=' + id + ' 已 ' + Math.round((Date.now() - startedAt) / 1000) +
+            's（目标会话正在加载，点击会被吞）控制器=[' + String(res.controllers || '') + '] 行数=' + String(res.rows));
+        }
+        await sleep(600);
+        continue;
+      }
+      waitOnly = false;
+      clicks += 1;
+      // 判效窗口递进：连续几轮毫无反应时把窗口拉长，别把预算烧在「狂点」上。
+      const win = clicks >= 5 ? 4000 : (clicks >= 3 ? 2500 : 1600);
+      const until = Date.now() + win;
       let reacted = false;
       while (Date.now() < until) {
         await sleep(300);
@@ -7120,10 +7169,19 @@ async function openConversationById(sessionId, timeoutMs) {
     if (scrollTop > 40000) break;
     await sleep(400);
   }
-  log('[session-open] 打开会话失败 id=' + id + ' reason=' + reason + ' pick=' + pickIndex);
+  // 失败现场一次性写全：光看 reason 分不清「行不在」「点了被吞」「CDP 没回」。
+  log('[session-open] 打开会话失败 id=' + id +
+    ' reason=' + reason +
+    ' pick=' + pickIndex +
+    ' 点击=' + clicks +
+    ' 轮次=' + tries +
+    ' 用时=' + (Date.now() - startedAt) + 'ms' +
+    ' selected=' + String((diag && diag.selected) || '?').slice(0, 8) +
+    ' controllers=[' + String((diag && diag.controllers) || '') + ']' +
+    ' 行数=' + String((diag && diag.rows) != null ? diag.rows : '?') +
+    ' 点到=' + String((diag && diag.clicked) || '-'));
   return false;
 }
-
 /**
  * 限流切号后的续跑准备：等副本出现 → 打开它。
  * 返回 { mode:'existing', conversationId, waitedMs } 或 { mode:'new', reason }（降级）。

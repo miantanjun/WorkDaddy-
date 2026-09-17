@@ -152,8 +152,24 @@ console.log('\n[B] 源码接线');
     const body = daemonSrc.slice(start, daemonSrc.indexOf('\n}\n', start));
     return !/setAutoCopySuppression|resolveSessionDeletePlan/.test(body);
   })());
-  check('B18 版本号 1.3.8', /DAEMON_VERSION = '1\.3\.8';/.test(daemonSrc));
-  check('B19 buildId 已更新且属本阶段', /DAEMON_BUILD_ID = 'release-1\.3\.8-\d{8}-archive-isolation';/.test(daemonSrc));
+  // ⚠️ 不要写死 1.3.8：本套件验的是「归档隔离这套语义还在」，不是「版本号恒等于 1.3.8」。
+  // 后续任何一次改动都会把 DAEMON_VERSION 往前推，写死就等于每次都被误报成回归。
+  // 改成版本下限 + buildId 与版本号自洽，仍然能抓住「忘了升版本」和「buildId 没同步」。
+  check('B18 版本号不低于 1.3.8（归档隔离落地版）', (() => {
+    const m = daemonSrc.match(/DAEMON_VERSION = '(\d+)\.(\d+)\.(\d+)';/);
+    if (!m) return false;
+    const cur = [Number(m[1]), Number(m[2]), Number(m[3])];
+    const floor = [1, 3, 8];
+    for (let i = 0; i < 3; i++) { if (cur[i] !== floor[i]) return cur[i] > floor[i]; }
+    return true;
+  })());
+  check('B19 buildId 与 DAEMON_VERSION 自洽（格式 release-<版本>-<日期>-<slug>）', (() => {
+    const v = (daemonSrc.match(/DAEMON_VERSION = '([^']+)';/) || [])[1];
+    const b = (daemonSrc.match(/DAEMON_BUILD_ID = '([^']+)';/) || [])[1];
+    if (!v || !b) return false;
+    if (b.indexOf('release-' + v + '-') !== 0) return false;
+    return /^release-\d+\.\d+\.\d+-\d{8}-[a-z0-9-]+$/.test(b);
+  })());
   const dcrlf = fs.readFileSync(DAEMON, 'utf8');
   const lcrlf = fs.readFileSync(LIB, 'utf8');
   check('B20 daemon.js 仍是纯 CRLF（无裸 LF）',
