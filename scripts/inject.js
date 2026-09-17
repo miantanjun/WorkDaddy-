@@ -6010,6 +6010,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var SCHED_MARKER = 'workdaddyScheduledSend';
       var SCHED_NEW = 'new';
       var SCHED_WEEK_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+      // 对话列表框可见行数（<=6 行，够看又不占满向导）；行高兜底值 = option 上下 padding 3+3 + 行盒 16
+      var SCHED_CONV_MIN_ROWS = 2;
+      var SCHED_CONV_MAX_ROWS = 6;
+      var SCHED_CONV_ROW_H_FALLBACK = 22;
 
       function isScheduledSendTaskUI(task) {
         return !!(task && task.meta && Number(task.meta[SCHED_MARKER]) === 1);
@@ -6162,6 +6166,24 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           });
           syncSummary();
         }
+        /** 列表框高度必须显式给：它是滚动容器，`height:auto` 在本 flex 列里实测算成 0
+         *  （32 条对话只露出 0.36 行）。行高从第一行**实测**取，主题/字号变了也跟得上；
+         *  行数按选项数取 2~6，选项少时不留一堆空行。 */
+        function fitConversationList(rowCount) {
+          var rows = Math.max(SCHED_CONV_MIN_ROWS, Math.min(SCHED_CONV_MAX_ROWS, Number(rowCount) || 0));
+          try { convEl.size = rows; } catch (_) {}
+          var first = convEl.options.length ? convEl.options[0] : null;
+          var rowH = 0;
+          if (first) {
+            var rect = first.getBoundingClientRect();
+            rowH = (rect && rect.height) || first.offsetHeight || 0;
+          }
+          if (!rowH) rowH = SCHED_CONV_ROW_H_FALLBACK;   // 空列表（加载中/筛不到）时按既有行高兜底
+          var cs = getComputedStyle(convEl);
+          var extra = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
+            + (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+          convEl.style.height = Math.ceil(rows * rowH + extra) + 'px';
+        }
         function renderConversations() {
           var keyword = String(convSearchEl.value || '').trim().toLowerCase();
           var keep = String(convEl.value || '');
@@ -6169,6 +6191,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           convEl.innerHTML = list.map(function (item) {
             return '<option value="' + escAttr(String(item.id)) + '" data-wbs-i18n-skip="1">' + esc(schedConversationLabel(item)) + '</option>';
           }).join('');
+          fitConversationList(list.length);
           if (keep && list.some(function (item) { return String(item.id) === keep; })) convEl.value = keep;
           if (convFailed) convHintEl.textContent = '对话加载失败，可改用「新建对话」';
           else if (!conversations.length) convHintEl.textContent = '该账号下暂无可选对话，改用「新建对话」即可';
@@ -6179,6 +6202,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           conversations = [];
           convFailed = false;
           convEl.innerHTML = '';
+          fitConversationList(0);   // 加载中也保持一个 2 行的框，别塌成一条缝
           convHintEl.textContent = uid ? '加载中…' : '请先选择账号';
           if (!uid) { syncSummary(); return Promise.resolve(); }
           return api('/api/sessions?range=all&uid=' + encodeURIComponent(uid)).then(function (data) {
@@ -14726,10 +14750,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-modal.wbs-sched-modal{display:grid;grid-template-rows:auto minmax(0,1fr) auto;width:calc(100% - 32px);max-width:640px;height:min(680px,calc(100% - 32px));box-sizing:border-box;overflow:hidden}',
     '.wbs-sched-body{display:flex;flex-direction:column;min-height:0;overflow:auto;padding:2px;scrollbar-width:thin;scrollbar-color:var(--wb-border-default,#bbb) transparent}',
     '.wbs-sched-body [hidden]{display:none!important}',
+    // ⚠️ body 是 flex 列 + overflow:auto：子项默认 flex-shrink:1，内容超高时浏览器会「压子项」
+    // 而不是让 body 滚动；其中列表框（select[size]）属滚动容器、最小内容高为 0，会被压到 0 高
+    // （实测整个盒子只剩 10px 边框+内边距，32 条对话只露出 0.36 行 —— 就是「显示不全」）。固定不可收缩。
+    '.wbs-sched-body>*{flex:0 0 auto}',
     '.wbs-sched-row{display:flex;gap:8px}.wbs-sched-row>.wbs-auto-field{flex:1 1 0;min-width:0}',
     '.wbs-auto-field select{box-sizing:border-box;width:100%;height:30px;padding:5px 8px;border:1px solid var(--wb-border-default,#dedede);border-radius:7px;background:var(--wb-bg-popover,#fff);color:var(--wb-color-text-primary,#1f1f1f);font:inherit;font-size:12px;outline:none}',
     '.wbs-auto-field select:focus{border-color:var(--wb-button-primary-bg,#1f1f1f);box-shadow:0 0 0 2px color-mix(in srgb,var(--wb-button-primary-bg,#1f1f1f) 20%,transparent)}',
-    '.wbs-auto-field select[size]{height:auto;padding:4px 5px;line-height:1.6}',
+    // 列表框（size>1）：**不要指望 height:auto** —— 在本 flex 列里被算成 0 内容高。
+    // 真实高度由 JS 显式给（fitConversationList：按第一行实测行高 × 行数 + 上下内边距/边框）。
+    // 上下内边距刻意留 0：padding 也算进 clientHeight，留着就会在底部露出下一行的一条边（半行）。
+    // 兜底高度 = 2 行 × 22px + 2px 边框，同样凑成整行。
+    '.wbs-auto-field select[size]{height:auto;min-height:46px;flex:0 0 auto;padding:0 5px;line-height:1.6}',
     '.wbs-auto-field select[size] option{padding:3px 5px;border-radius:5px}',
     '.wbs-sched-seg{display:flex;gap:3px;padding:3px;border-radius:9px;background:var(--wb-bg-tertiary,#f0f0f0)}',
     '.wbs-sched-seg-btn{flex:1;min-height:26px;padding:0 8px;border:0;border-radius:7px;background:transparent;color:var(--wb-icon-secondary,#666);font:inherit;font-size:11px;cursor:pointer}',

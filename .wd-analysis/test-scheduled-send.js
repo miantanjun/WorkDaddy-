@@ -255,6 +255,64 @@ const opLog = (events) => events.filter((e) => /^(session\.|model\.set)/.test(e)
   check('账号/对话/模型选项标了 i18n-skip（用户数据不翻译）', (INJECT_SRC.match(/data-wbs-i18n-skip="1">' \+ esc\(/g) || []).length >= 3);
   check('向导 CSS 已注册', /\.wbs-modal\.wbs-sched-modal\{/.test(INJECT_SRC));
 
+  /* ===== B4 对话列表框高度：修「滚动时显示不全」的回归 =====
+   * 真机实测：列表框是滚动容器，`height:auto` 在 .wbs-sched-body 这个 flex 列里被算成 0，
+   * 整个盒子只剩 10px（边框+内边距），32 条对话只露出 0.36 行。修法是 JS 显式给高度。
+   * 这里把 fitConversationList 抽出来真跑，断言高度永远是「整行」。 */
+  lines.push('== B4 对话列表框高度（显示不全的回归）==');
+  check('body 子项固定不可收缩（不再压塌列表框）', /\.wbs-sched-body>\*\{flex:0 0 auto\}/.test(INJECT_SRC));
+  check('列表框上下内边距为 0（否则底部露出下一行的一条边）', /\.wbs-auto-field select\[size\]\{[^}]*padding:0 5px/.test(INJECT_SRC));
+  check('列表框有兜底最小高度 46px（2 行 + 边框）', /\.wbs-auto-field select\[size\]\{[^}]*min-height:46px/.test(INJECT_SRC));
+  check('列表框自身也标了不可收缩', /\.wbs-auto-field select\[size\]\{[^}]*flex:0 0 auto/.test(INJECT_SRC));
+  check('向导里渲染对话列表时调用了 fitConversationList', /convEl\.innerHTML = list\.map[\s\S]{0,400}?fitConversationList\(list\.length\)/.test(INJECT_SRC));
+  check('清空列表（加载中）也会给高度，别塌成一条缝', /convEl\.innerHTML = '';\s*\n\s*fitConversationList\(0\);/.test(INJECT_SRC));
+
+  const sliceFn = (src, header) => {
+    const start = src.indexOf(header);
+    if (start < 0) return '';
+    let depth = 0;
+    for (let j = src.indexOf('{', start); j < src.length; j++) {
+      if (src[j] === '{') depth++;
+      else if (src[j] === '}') { depth--; if (depth === 0) return src.slice(start, j + 1); }
+    }
+    return '';
+  };
+  const fitSrc = sliceFn(INJECT_SRC, 'function fitConversationList(rowCount) {');
+  check('能抽出 fitConversationList 源码', fitSrc.length > 100 && /\}/.test(fitSrc), fitSrc.length + ' 字符');
+  const constOf = (name) => Number((INJECT_SRC.match(new RegExp('var ' + name + ' = (\\d+);')) || [])[1]);
+  const MINR = constOf('SCHED_CONV_MIN_ROWS'), MAXR = constOf('SCHED_CONV_MAX_ROWS'), FALLBACK = constOf('SCHED_CONV_ROW_H_FALLBACK');
+  eq('可见行数下限常量', MINR, 2);
+  eq('可见行数上限常量', MAXR, 6);
+  eq('行高兜底常量', FALLBACK, 22);
+
+  const CS0 = { paddingTop: '0px', paddingBottom: '0px', borderTopWidth: '1px', borderBottomWidth: '1px' };
+  const runFit = (n, rowH, cs) => {
+    const el = {
+      options: new Array(Math.max(0, n)).fill(0).map(() => ({ getBoundingClientRect: () => ({ height: rowH }), offsetHeight: rowH })),
+      size: 0,
+      style: {}
+    };
+    const fn = new Function(
+      'convEl', 'getComputedStyle', 'SCHED_CONV_MIN_ROWS', 'SCHED_CONV_MAX_ROWS', 'SCHED_CONV_ROW_H_FALLBACK',
+      fitSrc + '\nreturn fitConversationList;'
+    )(el, () => cs || CS0, MINR, MAXR, FALLBACK);
+    fn(n);
+    return { size: el.size, height: parseFloat(el.style.height) };
+  };
+  // 行高 22 = option 上下 padding 3+3 + 行盒 16；额外 2px = 上下边框
+  const cases = [[0, 2, 46], [1, 2, 46], [2, 2, 46], [3, 3, 68], [5, 5, 112], [6, 6, 134], [32, 6, 134], [200, 6, 134]];
+  cases.forEach(([n, rows, height]) => {
+    const got = runFit(n, 22);
+    eq('选项 ' + n + ' 条 → size=' + rows + ' 高度=' + height + 'px', got.size + '/' + got.height, rows + '/' + height);
+  });
+  check('所有情况下高度都是整行（内容高 = 行数的整数倍）', cases.every(([n]) => {
+    const got = runFit(n, 22);
+    return (got.height % 22) === 0 || (got.height - 2) % 22 === 0;
+  }));
+  eq('行高变了也跟着变（30px 行高 × 6 行 + 2px 边框）', runFit(6, 30).height, 182);
+  eq('内边距变了也跟着算（上下各 4px ⇒ 6 行 + 10px）', runFit(6, 22, { paddingTop: '4px', paddingBottom: '4px', borderTopWidth: '1px', borderBottomWidth: '1px' }).height, 142);
+  eq('空列表用兜底行高（不会算出 0 高）', runFit(0, 0).height, 46);
+
   /* ===================== C 组：i18n ===================== */
   lines.push('== C1 词典与翻译器 ==');
   const srcLines = fs.readFileSync(path.join(SCRIPTS, 'inject.js'), 'utf8').split(/\r?\n/);
