@@ -1,12 +1,13 @@
 {
   "schemaVersion": 1,
-  "revision": 2,
+  "revision": 3,
   "upgradeFromContentHashes": [
-    "1a26c407e6660969ee6004b47374266c848098b5be3747c4d89409835456abe3"
+    "1a26c407e6660969ee6004b47374266c848098b5be3747c4d89409835456abe3",
+    "13a27efb54055fdd97ac6e26cc8d80d1e2c7ca0e0424d8767392a8e677800f26"
   ],
   "id": "mu0mg334-rate-limit-auto-switch",
   "name": "模型限流自动切号续跑",
-  "description": "当前账号被限流时，自动切到另一个账号、保持同一个模型、把同一条任务续跑下去。注意：这与 WorkBuddy 官方内置的「切模型 + 续跑」不是一回事 —— 官方换的是模型，这里换的是账号，模型保持不变。限流提示只出现在输入框上方的横幅里（.rate-limit-info-banner / .cb-input-banner--error 等），不在消息流中，所以探测落在横幅上。快路由 renderer 侧 MutationObserver 侦测到横幅后直接 POST /api/limit-failover/trigger 触发本任务；本任务的 1 分钟定时只作兜底。续跑内容优先取变量 prompt，为空则取当前会话里最后一条用户消息原样重发。被判定限流的账号 10 分钟内不再被选为接管方，交接成功后记录自动清除；所有账号都接管不了则回退原账号并提示。续跑跑完后会自动把账号切回主账号（阈值/开关见面板「账号」页），并在桌面留一份大白话日志。",
+  "description": "当前账号被限流时，自动切到另一个账号、保持同一个模型、把同一条任务续跑下去。注意：这与 WorkBuddy 官方内置的「切模型 + 续跑」不是一回事 —— 官方换的是模型，这里换的是账号，模型保持不变。限流提示只出现在输入框上方的横幅里（.rate-limit-info-banner / .cb-input-banner--error 等），不在消息流中，所以探测落在横幅上。快路由 renderer 侧 MutationObserver 侦测到横幅后直接 POST /api/limit-failover/trigger 触发本任务；本任务的 1 分钟定时只作兜底。续跑优先等会话同步完成、在原会话的副本里继续：先核对内容确实同步完整，再只发一句「继续」顺着已有上下文接着做，不会把已完成的部分重干一遍、白烧 token；副本没就绪或内容没验过则降级新建任务、重发全文（变量 prompt 优先，为空则取最后一条用户消息）。被判定限流的账号 10 分钟内不再被选为接管方；所有账号都接管不了则回退原账号并提示。续跑跑完后自动切回主账号（阈值/开关见面板「账号」页），并在桌面留一份大白话日志。",
   "enabled": true,
   "trigger": {
     "type": "pageReady",
@@ -40,7 +41,9 @@
           "prompt": "{{vars.prompt}}",
           "modelId": "{{vars.model.model}}",
           "verifyMs": 20000,
-          "saveAs": "failover"
+          "saveAs": "failover",
+          "continueText": "继续（接着上面未完成的部分做，已完成的内容不要重做）",
+          "requireSyncedContent": true
         }
       ],
       "else": []

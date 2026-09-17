@@ -391,8 +391,17 @@ ok(inject.indexOf('"mu0mg334-rate-limit-auto-switch": {') >= 0, 'K5b 内置任�
 ok(inject.indexOf("'模型限流自动切号续跑': 'Auto switch account on rate limit'") >= 0, 'K5c 内置任务名有英文');
 const builtinJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts', 'builtin', 'automations', 'rate-limit-auto-switch.json'), 'utf8'));
 ok(builtinJson.id === 'mu0mg334-rate-limit-auto-switch', 'K6a 内置定义沿用同样的 id（不会出现两份重复任务）');
-ok(builtinJson.revision === 2 && Array.isArray(builtinJson.upgradeFromContentHashes) && builtinJson.upgradeFromContentHashes.length === 1,
-  'K6b 内置定义带 revision 与历史内容哈希（能认领在装的那份并升级）');
+// ⚠️ 别把「当前是第几版」写死：改内置定义必然要提 revision，写死就等于每提一次都误报
+// （同 §28.6 的教训）。这里只守「格式 + 下限」：revision 是不小于 2 的整数、哈希表非空。
+ok(Number.isInteger(builtinJson.revision) && builtinJson.revision >= 2 &&
+  Array.isArray(builtinJson.upgradeFromContentHashes) && builtinJson.upgradeFromContentHashes.length >= 1,
+  'K6b 内置定义带 revision 与历史内容哈希（能认领在装的那份并升级）',
+  { revision: builtinJson.revision, hashes: (builtinJson.upgradeFromContentHashes || []).length });
+// §15.6 的坑：描述进了内置文案表就必须同时在 WBS_I18N_EN 里有英文，否则英文模式下取到 undefined。
+ok(inject.indexOf(JSON.stringify(builtinJson.description)) >= 0,
+  'K6g 内置描述进了 inject.js 的默认文案表');
+ok(inject.indexOf("'" + builtinJson.description + "':") >= 0,
+  'K6h 内置描述在 WBS_I18N_EN 里有对应英文');
 ok(builtinJson.enabled === true && builtinJson.schedule && builtinJson.schedule.minutes === 1, 'K6c 内置定义保留原触发方式（1 分钟兜底定时）');
 ok(JSON.stringify(builtinJson.steps).indexOf('account.failoverContinue') >= 0, 'K6d 内置定义里仍是 failoverContinue 那套步骤');
 ok(builtinJson.description.length <= 500, 'K6e 描述不超过 500 字（超了会被 normalizeTask 截断、哈希对不上）', builtinJson.description.length);

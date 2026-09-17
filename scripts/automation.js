@@ -896,14 +896,25 @@ async function executeTask(taskInput, options = {}) {
       return result;
     }
     // 语义：切到另一个账号 → 保持同一个模型 → 把同一条任务续跑下去。
-    // 全过程（TTL 守卫、跳过已被限流的账号、失败回退原账号）都在 daemon 侧实现；
+    // 落点优先「等会话同步过去、在原会话的副本里继续」；此时**只发一句「继续」**
+    // （continueText），让模型顺着副本里已有的上下文从中断处接着做，而不是把原任务
+    // 全文重发一遍（那样会把已完成的部分重干一遍、白烧 token）。副本没就绪 / 内容没验过
+    // → 降级为新建任务并把全文重发（旧行为）。
+    // 全过程（TTL 守卫、跳过已被限流的账号、失败回退原账号、内容完整性校验）都在 daemon 侧实现；
     // 这里只是一个不碰 dom.*/session.* 的入口，所以本任务不会抢占独占渲染器租约。
     if (op === 'account.failoverContinue') {
       if (typeof options.limitFailover !== 'function') throw new Error('限流切号能力不可用');
+      const continueTextRaw = resolveValue(step.continueText, ctx);
       const detail = {
         prompt: resolveValue(step.prompt, ctx),
         modelId: resolveValue(step.modelId, ctx),
         verifyMs: step.verifyMs,
+        // 落在原会话副本里时只发这一句，而不是把原任务全文重发一遍。
+        // 不传就用 limit-failover.js 的 DEFAULT_CONTINUE_TEXT。
+        continueText: continueTextRaw === undefined || continueTextRaw === null ? undefined : String(continueTextRaw),
+        // 是否要求「副本内容已同步完整」才允许发「继续」。默认 true；
+        // 设 false 回到改动前的行为（不校验同步，一律重发全文）。
+        requireSyncedContent: step.requireSyncedContent,
         // 等副本同步的上限（秒）。默认 120、下限 60 —— 用户要求至少等一分钟，超时才降级为新建任务
         syncWaitMs: resolveValue(step.syncWaitSeconds, ctx) !== undefined && resolveValue(step.syncWaitSeconds, ctx) !== null
           ? Number(resolveValue(step.syncWaitSeconds, ctx)) * 1000

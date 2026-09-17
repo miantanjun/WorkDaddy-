@@ -400,13 +400,16 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        60 秒阈值 ⇒ 永远不落盘，台账文件根本不生成）；② 冷启动先落一次盘锚住 createdAt，
 //        否则离线补扫在首次安装下直接失效（场景 B「到点时没开机」永远报不出来）。
 //        另把 logWriteCount 提前声明：修「模块初始化阶段调 log() 被 TDZ 静默吞掉」。
-const DAEMON_VERSION = '1.3.4';
+// 1.3.5：限流切号续跑不再重跑已完成的活——落在原会话副本里时**只发一句「继续」**，
+//        发之前先用消息级指纹核对副本内容确实同步完整（四道闸，见 prepareFailoverContinuation）；
+//        副本没就绪/内容没验过/源里没有已完成的回复 → 一律降级重发全文（旧行为）。
+const DAEMON_VERSION = '1.3.5';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.4-20260917-schedule-ledger-fix';
+const DAEMON_BUILD_ID = 'release-1.3.5-20260917-failover-continue';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -3521,6 +3524,16 @@ function readLastUserTaskText() {
   return runCdpExpression(limitFailover.lastUserTaskTextExpression(20000), { awaitPromise: false });
 }
 
+/**
+ * 抓「当前会话」的消息级指纹（切号前抓源、切号后抓副本，判据只有一份）。
+ * 读不到返回 null —— 调用方据此走「不冒险」的降级路径（重发全文），绝不硬猜。
+ */
+async function readFailoverSnapshot() {
+  if (!cdp.connected) return null;
+  const raw = await runCdpExpression(limitFailover.sessionSnapshotExpression(), { awaitPromise: false }).catch(() => null);
+  return limitFailover.normalizeSnapshot(raw);
+}
+
 /* ================= CLOUD_GHOSTS_MARK：云端会话残留（幽灵会话）================= */
 // 桌面删除只删本地；手机端/其它电脑看到的那一份来自云端，而删除**不会**通知云端。
 // 见 scripts/cloud-cleanup.js 顶部：云侧按「当前登录账号」鉴权，跨账号只能 access denied。
@@ -3927,6 +3940,10 @@ async function runLimitFailoverCore(detail, ports) {
     const modelId = String(d.modelId || '').trim() || String((modelInfo && modelInfo.model) || '').trim();
     // 被限流的那个会话：副本续跑要以它为源（同步过去之后在它的副本里继续）
     const sourceSessionId = String((modelInfo && modelInfo.conversationId) || '').trim();
+    // 续跑指令：落在原会话副本里时只发这一句（由 prepareContinuation 验过同步才走这条路）。
+    // 步骤参数可覆盖；`requireSyncedContent=false` 可整体回到「一律重发全文」的旧行为。
+    const continueText = String(d.continueText || '').trim() || limitFailover.DEFAULT_CONTINUE_TEXT;
+    const requireSyncedContent = d.requireSyncedContent !== false;
     let taskText = String(d.prompt || '').trim();
     let taskSource = 'prompt';
     if (!taskText) {
@@ -3938,13 +3955,18 @@ async function runLimitFailoverCore(detail, ports) {
       await ports.notify('warning', '检测到模型限流，但当前会话里没有可续跑的用户消息');
       return { ok: false, reason: 'no-task-text', modelId, fromUid: current.uid };
     }
-    // 把续跑内容交给调用方（桌面日志要写「重发了什么」的摘要）。
+    // ⚠️ 源快照必须在**切号之前**抓 —— 切号会 Page.reload，之后就读不到源会话了。
+    //    它要跟同步后的副本比对，用来证明「限流前已完成的内容」真的同步过去了。
+    const sourceSnapshot = typeof ports.readSnapshot === 'function'
+      ? await ports.readSnapshot().catch(() => null)
+      : null;
+    // 把「这次准备发什么」交给调用方（桌面日志写的就是它）。
     // 走回调而不是塞进返回值：返回值会进自动化运行记录、被 API 透出，不适合带正文。
     if (typeof ports.captureTaskText === 'function') {
-      try { ports.captureTaskText(taskText); } catch (_) {}
+      try { ports.captureTaskText({ text: taskText, mode: 'pending', taskSource }); } catch (_) {}
     }
 
-    ports.log('limit-failover:start ' + JSON.stringify({ fromUid: current.uid, modelId, taskSource, textLength: taskText.length, at: new Date(now).toISOString() }));
+    ports.log('limit-failover:start ' + JSON.stringify({ fromUid: current.uid, modelId, taskSource, textLength: taskText.length, requireSyncedContent, hasSourceAnchor: !!(sourceSnapshot && sourceSnapshot.anchor), sourceCount: (sourceSnapshot && sourceSnapshot.count) || 0, at: new Date(now).toISOString() }));
     const tried = [];
     let lastError = '';
     // 「刚刚离开的账号」每轮都会变：第 1 轮离开的是最初那个限流账号，第 2 轮离开的是上一轮的候选。
@@ -3979,6 +4001,8 @@ async function runLimitFailoverCore(detail, ports) {
               toUid: target.uid,        // 接管账号：副本要在它那边出现
               copyJob,
               sourceSessionId,
+              sourceSnapshot,           // 切号前抓的消息级指纹：用来验「副本内容是否已同步完整」
+              requireSyncedContent,
               syncWaitMs: d.syncWaitMs,
             })) || surface;
             if (!surface || (surface.mode !== 'existing' && surface.mode !== 'new')) {
@@ -4001,7 +4025,31 @@ async function runLimitFailoverCore(detail, ports) {
           }
         }
         await ports.guard();
-        await ports.sendPhrase(taskText);
+        // 续跑内容分流 —— 这是本次改动的核心。
+        //   · 落在原会话副本里（existing）**且**副本内容已被验证完整 → 只发一句「继续」，
+        //     模型基于副本里已有的上下文从中断处接着做，不必把已完成的活重干一遍；
+        //   · 其余情况（降级新建任务 / 没验过 / 源里没有已完成的回复 / 用户关掉校验）
+        //     一律重发原任务全文 —— 也就是改动前的行为。
+        let sentMode = 'resend';
+        let sentText = taskText;
+        if (requireSyncedContent && continueText
+            && surface.mode === 'existing' && surface.contentVerified === true) {
+          // ⚠️ 硬校验落点：acSendPhrase **不校验目标会话**。发全文时发错了还能从内容看出来，
+          //    发「继续」这种通用短句发错了会静默落进别的会话（接着别人的活干），必须挡在这里。
+          const live = await ports.readModel().catch(() => null);
+          const landed = String((live && live.conversationId) || '');
+          if (surface.conversationId && landed === String(surface.conversationId)) {
+            sentMode = 'continue';
+            sentText = continueText;
+          } else {
+            ports.log('limit-failover:落点不合，改为重发全文 ' + JSON.stringify({ want: surface.conversationId || '', got: landed }));
+          }
+        }
+        ports.log('limit-failover:send ' + JSON.stringify({ mode: sentMode, textLength: sentText.length, surface: surface.mode, contentVerified: surface.contentVerified === true, sourceCount: surface.sourceCount || 0, copyCount: surface.copyCount || 0 }));
+        await ports.sendPhrase(sentText);
+        if (typeof ports.captureTaskText === 'function') {
+          try { ports.captureTaskText({ text: sentText, mode: sentMode, taskSource, surfaceReason: String(surface.reason || '') }); } catch (_) {}
+        }
         const verdict = await waitLimitVerdict(ports, LIMIT_FAILOVER_VERIFY_MS);
         if (verdict.hit) {
           state = limitFailover.markAccountBlocked(readLimitFailoverState(), target.uid, Date.now(), 'still-limited');
@@ -4011,11 +4059,14 @@ async function runLimitFailoverCore(detail, ports) {
         }
         state = limitFailover.clearAccountBlocked(readLimitFailoverState(), target.uid);
         writeLimitFailoverState(state);
+        // 提示里保留「落在哪」（原会话副本 / 新建任务），再补一句这次是「继续」还是重发全文
         await ports.notify('success', (surface.mode === 'existing'
           ? '已在账号 ' + (target.nickname || target.uid) + ' 的原会话里继续任务'
-          : '已在账号 ' + (target.nickname || target.uid) + ' 上继续执行任务') + (modelId ? '（模型 ' + modelId + '）' : ''));
-        ports.log('limit-failover:done ' + JSON.stringify({ toUid: target.uid, modelId, surface: surface.mode, conversationId: surface.conversationId || '' }));
-        return { ok: true, fromUid: current.uid, toUid: target.uid, toNickname: target.nickname || '', modelId, modelSource: modelInfo && modelInfo.model ? 'live' : 'none', taskSource, tried, verdict, surface };
+          : '已在账号 ' + (target.nickname || target.uid) + ' 上继续执行任务')
+          + (sentMode === 'continue' ? '（只发了一句「继续」，没有重跑）' : '')
+          + (modelId ? '（模型 ' + modelId + '）' : ''));
+        ports.log('limit-failover:done ' + JSON.stringify({ toUid: target.uid, modelId, surface: surface.mode, sendMode: sentMode, conversationId: surface.conversationId || '' }));
+        return { ok: true, fromUid: current.uid, toUid: target.uid, toNickname: target.nickname || '', modelId, modelSource: modelInfo && modelInfo.model ? 'live' : 'none', taskSource, sendMode: sentMode, tried, verdict, surface };
       } catch (error) {
         lastError = String((error && error.message) || error);
         ports.log('limit-failover:target-failed ' + JSON.stringify({ uid: target.uid, error: lastError }));
@@ -4354,7 +4405,8 @@ function handleLimitFailoverOutcome(result, context) {
       toUid: result.toUid,
       toNickname: result.toNickname,
       modelId: result.modelId,
-      taskSource: result.taskSource,
+      taskSource: String(ctx.taskSource || result.taskSource || ''),
+      sendMode: String(ctx.sendMode || result.sendMode || ''),
       taskText: String(ctx.taskText || ''),
       triedCount: Array.isArray(result.tried) ? result.tried.length : 1,
       surface: result.surface || null,
@@ -4806,10 +4858,13 @@ function startAutomationRun(task, event = null) {
     const wasPanelOpen = await automationPanelIsOpen().catch(() => false);
     // 切号前的账号必须在这里抓：core 成功返回时 currentAccount() 已经是新账号了
     const accountBeforeFailover = currentAccount();
-    let capturedTaskText = '';
+    let capturedTask = { text: '', mode: '', taskSource: '' };
     const result = await runLimitFailoverCore(detail, {
       readBanner: readLimitBanner,
-      captureTaskText: (text) => { capturedTaskText = String(text || ''); },
+      // 收「这次到底发了什么」：core 会回调两次（先登记候选全文，落定后再报最终发出内容与方式）
+      captureTaskText: (payload) => { capturedTask = Object.assign({}, capturedTask, payload || {}); },
+      // 切号前抓源会话指纹、切号后抓副本指纹，判据（compareSnapshot）在 limit-failover.js 里只有一份
+      readSnapshot: () => readFailoverSnapshot(),
       replyStarted: limitReplyStarted,
       readModel: readLiveModel,
       setModel: setLiveModel,
@@ -4829,7 +4884,9 @@ function startAutomationRun(task, event = null) {
     // 放在 withInput 里只是为了拿到刚才那次运行的结果；真正的等待/切号在后台跑，不占租约。
     try {
       handleLimitFailoverOutcome(result, {
-        taskText: capturedTaskText || String(detail && detail.prompt || ''),
+        taskText: capturedTask.text || String(detail && detail.prompt || ''),
+        sendMode: String(capturedTask.mode || result.sendMode || ''),
+        taskSource: String(capturedTask.taskSource || result.taskSource || ''),
         fromNickname: String(accountBeforeFailover && accountBeforeFailover.nickname || ''),
       });
     } catch (error) {
@@ -6621,10 +6678,63 @@ async function prepareFailoverContinuation(ctx) {
       return degrade(jobSettled ? 'copy-settled-without-copy' : 'sync-timeout');
     }
 
-    // ② 打开副本会话（切号刚 reload 过页面，侧栏需要滚动才能找到目标行）
-    const opened = await openConversationById(targetSessionId, 15000);
-    if (!opened) return degrade('open-failed');
-    return { mode: 'existing', conversationId: targetSessionId, waitedMs: Date.now() - startedAt, lineageId };
+    // ② 打开副本 → ③④ 验「限流前已完成的内容」是否已同步完整、且已经落定。
+    //    整段与步骤①共用同一个 syncWaitMs 预算；任何一步不满足都只降级、不失败。
+    //
+    //    ⚠️ 为什么不能只看「副本出现了」：sessionContentMtime > 0 只说明**有内容**，
+    //    说明不了**同步完了**（jsonl 写一半也是 > 0）。所以判据换成消息级指纹比对：
+    //    副本条数不能少于源，且源快照里那条「最后一条已完成的回复」必须能在副本里找到。
+    const requireSynced = c.requireSyncedContent !== false;
+    let opened = false;
+    let openAttempts = 0;
+    let verifyReason = '';
+    let copyCount = 0;
+    let stableKey = '';
+    let stableRounds = 0;
+    while (Date.now() - startedAt < capMs) {
+      if (!opened) {
+        openAttempts += 1;
+        opened = await openConversationById(targetSessionId, 15000);
+        if (!opened) {
+          verifyReason = 'open-failed';
+          if (openAttempts >= 3) break;
+          await sleep(1000);
+          continue;
+        }
+      }
+      if (!requireSynced) {
+        // 用户把校验关了：回到改动前的行为（打开副本即续跑，但内容仍按全文重发）
+        return { mode: 'existing', conversationId: targetSessionId, waitedMs: Date.now() - startedAt, lineageId,
+                 contentVerified: false, verifyReason: 'verify-disabled', sourceCount: 0, copyCount: 0 };
+      }
+      const copySnapshot = await readFailoverSnapshot().catch(() => null);
+      copyCount = copySnapshot ? Number(copySnapshot.count) || 0 : 0;
+      const verdict = limitFailover.compareSnapshot(c.sourceSnapshot, copySnapshot);
+      verifyReason = verdict.reason;
+      if (!verdict.complete) {
+        stableKey = '';
+        stableRounds = 0;
+        // 源里压根没有「已完成的回复」⇒ 副本再等也不会有可续的上下文，立刻降级，别白等预算
+        if (verdict.reason === 'no-source' || verdict.reason === 'no-anchor') break;
+      } else {
+        // ④ 稳定性：连续两拍指纹一致才算落定（同步是流式落盘，条数追平不等于写完）
+        const key = String(copyCount) + '|' + String((copySnapshot.anchor && copySnapshot.anchor.digest) || '');
+        if (key === stableKey) stableRounds += 1; else { stableKey = key; stableRounds = 1; }
+        if (stableRounds >= 2) {
+          return { mode: 'existing', conversationId: targetSessionId, waitedMs: Date.now() - startedAt, lineageId,
+                   contentVerified: true, verifyReason: 'ok',
+                   sourceCount: Number(c.sourceSnapshot && c.sourceSnapshot.count) || 0, copyCount };
+        }
+      }
+      await sleep(1000);
+    }
+    log('[limit-failover] 副本内容未通过同步校验: ' + JSON.stringify({
+      reason: verifyReason || 'sync-timeout',
+      sourceCount: Number(c.sourceSnapshot && c.sourceSnapshot.count) || 0,
+      copyCount,
+      waitedMs: Date.now() - startedAt,
+    }));
+    return degrade(verifyReason || 'sync-timeout');
   } catch (error) {
     log('[limit-failover] 副本续跑准备失败: ' + String((error && error.message) || error));
     return degrade('prepare-error');
@@ -9883,7 +9993,11 @@ function handleApi(req, res) {
             toNickname: (current && current.nickname) || '',
             modelId: '示例模型',
             taskSource: 'lastUserMessage',
-            taskText: '示例：把上一条任务原样重发一遍',
+            // 示例按「主路径」渲染：副本续跑 + 内容校验通过 → 只发一句「继续」。
+            // （降级为重发全文那一路的文案由 buildTriggerReport 的另一分支生成，不在示例里重复）
+            sendMode: 'continue',
+            taskText: limitFailover.DEFAULT_CONTINUE_TEXT,
+            surface: { mode: 'existing', conversationId: '', waitedMs: 12000, contentVerified: true, sourceCount: 42, copyCount: 42, reason: '' },
             triedCount: 1,
           }),
           switchBack: accountSwitchLog.buildSwitchBackReport({

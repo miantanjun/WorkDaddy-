@@ -152,7 +152,14 @@ const SURFACE_REASONS = {
   'cdp-offline': '界面暂时连不上',
   'prepare-error': '准备过程中出错',
   'bad-surface': '准备过程中出错',
+  // 2026-09-17 新增：副本内容校验不通过（见 daemon.js prepareFailoverContinuation 的 ③④ 两道闸）
+  'no-anchor': '原会话里没有「已完成的回复」（大概是刚发出去就被限流打断了），副本里没有可接着做的上下文',
+  'no-source': '没能在切号前读到原会话的状态，无法核对内容是否同步完整',
+  'no-copy': '没能读到会话副本里的内容',
+  'copy-shorter': '副本里的消息比原会话少 —— 还没同步全',
+  'anchor-mismatch': '副本里找不到原会话最后那条已完成的回复',
   'unavailable': '副本还没就绪',
+  'verify-disabled': '内容校验被关掉了',
 };
 
 /** 触发段（交接成功）。surface = 副本续跑的结果（existing=在原会话里继续 / new=降级新建任务） */
@@ -165,11 +172,20 @@ function buildTriggerReport(t) {
   out.push(line('怎么处理', '自动切到账号「' + accountLabel(d.toUid, d.toNickname) + '」' +
     (d.modelId ? '，模型保持不变（' + d.modelId + '）' : '（模型沿用切换前的）') + '。'));
   const brief = snippet(d.taskText, SNIPPET_CHARS);
-  if (brief) {
+  // sendMode='continue' 表示这次**没有重发原任务**，只在原会话副本里补了一句「继续」；
+  // 其余（含降级新建任务、内容没验过）都是把原任务全文重发了一遍。
+  if (String(d.sendMode || '') === 'continue') {
+    out.push(line('任务内容', '没有重发原任务 —— 只发了一句「' + (brief || '继续') +
+      '」，让它顺着原会话里已有的上下文接着做（这样不会把已经做完的部分重干一遍）。'));
+  } else if (brief) {
     out.push(line('任务内容', (d.taskSource === 'prompt' ? '任务变量里指定的内容 —— ' : '上一条消息 —— ') + '“' + brief + '”'));
   }
   if (existing) {
-    out.push(line('续跑方式', '先等会话同步过去，再在原会话的副本里继续（等了 ' +
+    const verified = surface.contentVerified === true;
+    const counts = verified && Number(surface.sourceCount)
+      ? '，并核对过内容确实同步完整了（原会话 ' + Number(surface.sourceCount) + ' 条消息 → 副本 ' + Number(surface.copyCount) + ' 条）'
+      : '';
+    out.push(line('续跑方式', '先等会话同步过去' + counts + '，再在原会话的副本里继续（等了 ' +
       formatDuration(Number(surface.waitedMs) || 0) + '）—— 上下文都在，没有开新任务。'));
   } else {
     const reason = String(surface && surface.reason || '');

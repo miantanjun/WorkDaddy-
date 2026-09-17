@@ -105,6 +105,115 @@ function lastUserTaskTextExpression(maxChars) {
   '}catch(e){return {ok:false,error:String(e&&e.message||e)}}})()';
 }
 
+// 续跑指令：落在原会话副本里时只发这一句，而不是把原任务全文重发一遍。
+// 「已完成的内容不要重做」这个语义**写死在文案里**，不靠模型猜；要改就改这个常量
+// （或给步骤传 continueText）。
+const DEFAULT_CONTINUE_TEXT = '继续（接着上面未完成的部分做，已完成的内容不要重做）';
+
+// 快照里回看的消息条数。判据只需要「源的最后一条已完成回复还在副本里」，
+// 它在快照时刻就在会话尾部，所以回看一小段足够，不必把整段历史拉回来（长会话太贵）。
+const SNAPSHOT_TAIL = 20;
+
+/** 正文前 N 字（digest 与判据都只看这一小段，避免跨 CDP 传大字符串） */
+const DIGEST_TEXT_CHARS = 200;
+
+/** FNV-1a 32 位：只用来区分「是不是同一条消息」，不做安全用途 */
+function hashText(text) {
+  let h = 0x811c9dc5;
+  const s = String(text || '');
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
+/** 一条消息的稳定摘要：优先 id（最可靠），没有就退化成「正文摘要 + 长度」 */
+function digestOfParts(parts) {
+  const p = parts && typeof parts === 'object' ? parts : {};
+  const id = String(p.id || '').trim();
+  if (id) return 'id:' + id;
+  const text = String(p.text || '');
+  const len = Number(p.len);
+  return 'tx:' + hashText(text) + ':' + (Number.isFinite(len) ? len : text.length);
+}
+
+/**
+ * 读「当前会话」的消息级指纹。切号前抓源、切号后抓副本，两边用同一份口径。
+ *
+ * 锚点取**最后一条已完成的 assistant 消息**，而不是最后一条消息 ——
+ * 限流经常**打断正在流式输出的那条回复**，最后一条往往是半截的；
+ * 要核验的是「限流前**已完成**的内容」有没有同步过去。
+ */
+function sessionSnapshotExpression() {
+  return '(function(){try{' +
+    'var compat=window.__wbsWorkBuddyCompat;if(!compat)return {ok:false,error:"compat 未加载"};' +
+    'var list;try{list=compat.findConversationControllers(document)}catch(e){list=null};' +
+    'if(!list||!list.length)return {ok:false,error:"未找到会话控制器"};' +
+    'var ctl=list[0];var st=ctl.messageStore.getState();var msgs=st.messages||[];' +
+    'function text(m){var c=m&&m.content;if(typeof c==="string")return c;' +
+      'if(!Array.isArray(c))return "";' +
+      'return c.map(function(b){return b&&b.type==="text"?String(b.text||""):""}).filter(Boolean).join("\\n")}' +
+    'function parts(m,withText){var t=text(m);' +
+      'return {id:String(m&&(m.id||m.messageId||m.requestId)||""),' +
+      'text:withText?t.slice(0,' + DIGEST_TEXT_CHARS + '):"",len:t.length}}' +
+    'var anchor=null;' +
+    'for(var i=msgs.length-1;i>=0;i--){var mm=msgs[i];if(!mm)continue;' +
+      'if(mm.messageType!=="assistant")continue;' +
+      'if(mm.loading)continue;' +
+      'var at=text(mm);if(!at)continue;' +
+      'anchor={index:i,id:String(mm.id||mm.messageId||mm.requestId||""),' +
+        'text:at.slice(0,' + DIGEST_TEXT_CHARS + '),len:at.length};break}' +
+    'var tail=[];' +
+    'for(var k=Math.max(0,msgs.length-' + SNAPSHOT_TAIL + ');k<msgs.length;k++){tail.push(parts(msgs[k],true))}' +
+    'return {ok:true,conversationId:ctl.conversationId||"",count:msgs.length,' +
+      'streaming:!!(st.streamingRequestId||st.streamingMessageId),anchor:anchor,tail:tail}' +
+  '}catch(e){return {ok:false,error:String(e&&e.message||e)}}})()';
+}
+
+/**
+ * 把 renderer 返回的原始对象规整成判据要用的快照（digest 在 Node 侧算，口径只有一份）。
+ * 读不到就返回 null —— 调用方据此走「不冒险」的降级路径。
+ */
+function normalizeSnapshot(raw) {
+  const r = raw && typeof raw === 'object' ? raw : null;
+  if (!r || r.ok !== true) return null;
+  const anchor = r.anchor && typeof r.anchor === 'object' ? r.anchor : null;
+  const tail = Array.isArray(r.tail) ? r.tail : [];
+  return {
+    conversationId: String(r.conversationId || ''),
+    count: Number(r.count) || 0,
+    streaming: r.streaming === true,
+    anchor: anchor ? { index: Number(anchor.index) || 0, digest: digestOfParts(anchor) } : null,
+    tail: tail.map(digestOfParts),
+  };
+}
+
+/**
+ * 判定「副本是不是已经把限流前已完成的内容同步过来了」。
+ *
+ * 纯函数，**判据只有一份**：daemon 与单测共用，两边不会漂移。
+ * @returns {{complete:boolean, reason:string}}
+ *   reason ∈ ok | no-source | no-anchor | no-copy | copy-shorter | anchor-mismatch
+ */
+function compareSnapshot(source, copy) {
+  const s = source && typeof source === 'object' ? source : null;
+  const c = copy && typeof copy === 'object' ? copy : null;
+  if (!s) return { complete: false, reason: 'no-source' };
+  // 源里没有「已完成的回复」⇒ 副本里没有可续的上下文，发「继续」没有意义（立刻降级重发）
+  if (!s.anchor) return { complete: false, reason: 'no-anchor' };
+  if (!c) return { complete: false, reason: 'no-copy' };
+  // 条数不能少：少了就说明还没同步完（或者只同步了一部分）
+  if (Number(c.count) < Number(s.count)) return { complete: false, reason: 'copy-shorter' };
+  // 源快照的那条锚点必须能在副本里找到。
+  // 不比「副本的锚点 === 源的锚点」：抓完快照之后源这边还可能把那条被打断的回复落成
+  // 「已完成」，于是副本的锚点会往后挪一条 —— 那种情况内容是**齐的**，不该判失败。
+  const hit = c.tail.indexOf(s.anchor.digest) >= 0 || (c.anchor && c.anchor.digest === s.anchor.digest);
+  if (!hit) return { complete: false, reason: 'anchor-mismatch' };
+  return { complete: true, reason: 'ok' };
+}
+
+
 // 续跑是否「已经跑完」：既没有流式请求，最后一条消息也是**已完成的 assistant 回复**。
 //
 // 用于「续跑结束后自动切回主账号」——账号切换会 Page.reload，回复还在流式输出时动手
@@ -207,10 +316,17 @@ module.exports = {
   LIMIT_FAILOVER_WINDOW_MS,
   LIMIT_BANNER_SELECTORS,
   LIMIT_TEXT_PATTERN,
+  DEFAULT_CONTINUE_TEXT,
+  SNAPSHOT_TAIL,
   limitBannerProbeExpression,
   limitReplyIdleExpression,
   liveModelExpression,
   lastUserTaskTextExpression,
+  hashText,
+  digestOfParts,
+  sessionSnapshotExpression,
+  normalizeSnapshot,
+  compareSnapshot,
   isAccountBlocked,
   markAccountBlocked,
   clearAccountBlocked,
