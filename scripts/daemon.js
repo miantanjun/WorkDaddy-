@@ -403,13 +403,17 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.3.5：限流切号续跑不再重跑已完成的活——落在原会话副本里时**只发一句「继续」**，
 //        发之前先用消息级指纹核对副本内容确实同步完整（四道闸，见 prepareFailoverContinuation）；
 //        副本没就绪/内容没验过/源里没有已完成的回复 → 一律降级重发全文（旧行为）。
-const DAEMON_VERSION = '1.3.5';
+// 1.3.6：① 归档态不再被 lineage 对账冲掉——status 只在「恰好一个成员偏离基线」时传播，
+//        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
+//        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
+//        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
+const DAEMON_VERSION = '1.3.6';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.5-20260917-failover-continue';
+const DAEMON_BUILD_ID = 'release-1.3.6-20260917-archive-and-native-delete';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -5895,6 +5899,53 @@ async function yieldAutoCopyToRenderer() {
   if (pending && !pending.settled) await pending.ready;
 }
 
+/* ---------------- lineage 元数据对账：归档意图（status）的传播规则 ---------------- */
+//
+// 背景（2026-09-17 用户报障）：syncAutoCopyLineage 会把「最新成员」的 title/custom_title/status
+// 整套回写到同 lineage 的其他成员。其中 status 里的 `archived`（WorkBuddy 的归档态，归档后
+// 不显示在左侧任务栏）是**用户的界面意图**，而「谁最新」往往只是**另一个账号又聊了一句**。
+// 于是主账号刚归档的会话被别的账号的活跃度冲成非归档 → 归档的任务又冒出来；重启 WorkBuddy
+// 后云端把 archived 拉回来才「恢复正常」。
+//
+// 规则：以我们自己记录的上一次状态为基线，**只有当恰好一个成员偏离基线**时，才认为那是用户
+// 刚做的动作（归档或恢复），把新状态传播给其他成员；其余情况一律不动 status。
+// 宁可少传播，也绝不覆盖用户的归档/恢复。
+const ARCHIVE_INTENT_FILE = 'session-status-baseline.json';
+
+function readStatusBaseline() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(DATA_DIR, ARCHIVE_INTENT_FILE), 'utf8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch (_) { return {}; }
+}
+
+function saveStatusBaseline(baseline) {
+  try { atomicWriteText(path.join(DATA_DIR, ARCHIVE_INTENT_FILE), JSON.stringify(baseline) + '\n'); } catch (_) {}
+}
+
+/**
+ * 决定这次对账把 status 写成什么。
+ * @returns {{status: string|null, changed: boolean}} status=null 表示本次不碰 status（写回各行原值）
+ */
+function resolvePropagatedStatus(live, baseline, lineageId) {
+  const statuses = live.map((member) => String((member.row && member.row.status) || '') || 'Pending');
+  const recorded = baseline[lineageId];
+  if (recorded === undefined || recorded === null || recorded === '') {
+    // 首次见到这条 lineage：只记基线、不改任何行（没有参照时绝不动手）
+    const uniq = Array.from(new Set(statuses));
+    const picked = uniq.length === 1 ? uniq[0] : '';
+    if (baseline[lineageId] !== picked) { baseline[lineageId] = picked; return { status: null, changed: true }; }
+    return { status: null, changed: false };
+  }
+  const diverged = [];
+  for (let i = 0; i < live.length; i += 1) if (statuses[i] !== recorded) diverged.push(i);
+  // 0 个 = 谁都没变（最常见）；≥2 个 = 情况不明（可能被手工改过）→ 都不动
+  if (diverged.length !== 1) return { status: null, changed: false };
+  const next = statuses[diverged[0]];
+  baseline[lineageId] = next;
+  return { status: next, changed: true };
+}
+
 async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   if (!lineageId || PROFILE.kind !== 'workbuddy') return { members: 0, synced: 0, failedFiles: 0, targetIds: [], targetPresent: false };
   const records = getAutoCopySessionMemberRecords(DATA_DIR, lineageId);
@@ -5933,6 +5984,9 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   // 旧版副本可能仍挂着最初源会话的 owner；也修复作为最新来源的副本自身。
   const repairedSource = await copySessionFiles(PROFILE.dataRoot, latest.id, latest.id, ownerIds, options);
   let failedFiles = repairedSource.failed;
+  // status 不按「谁最新听谁的」传播，先算出这次该写什么（null = 本次不碰）
+  const statusBaseline = readStatusBaseline();
+  const propagated = resolvePropagatedStatus(live, statusBaseline, lineageId);
   for (const target of live) {
     if (target.id === latest.id) continue;
     await yieldAutoCopyToRenderer();
@@ -5943,7 +5997,8 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
     try {
       await sqliteRun(
         'UPDATE sessions SET title = ?, custom_title = ?, status = ?, updated_at = ?, last_activity_at = ? WHERE id = ? AND user_id = ? AND deleted_at IS NULL;',
-        [sourceRow.title || '', sourceRow.custom_title || '', sourceRow.status || 'Pending',
+        [sourceRow.title || '', sourceRow.custom_title || '',
+          propagated.status === null ? String(target.row.status || 'Pending') : propagated.status,
           Number(sourceRow.updated_at || Date.now()), Number(sourceRow.last_activity_at || sourceRow.updated_at || Date.now()),
           target.id, target.uid]
       );
@@ -5951,8 +6006,182 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
       log(`[sessions-auto-copy] 同步会话元数据失败 ${target.uid}/${target.id}: ${error.message}`);
     }
   }
+  if (propagated.changed) saveStatusBaseline(statusBaseline);
   return { members: live.length, synced, failedFiles, sourceId: latest.id, targetIds, targetPresent, payloadTargets };
 }
+
+/* ---------------- 会话删除的唯一实现（面板端点 + 原生软删探测共用） ---------------- */
+//
+// 主从方向由 resolveSessionDeletePlan 决定（唯一权威，见 lib.js）：
+//   删主账号的会话 → 向下级联，其他账号的同源副本一起删；删非主账号 → 只删本账号那一份。
+async function deleteSessionsCore(input) {
+  const ids = normalizeSessionIdBatch(input && input.ids);
+  if (!ids.length) return { ok: false, status: 400, error: '未选择会话' };
+  if (!ids.every(isValidSessionId)) return { ok: false, status: 400, error: '包含无效的会话 ID' };
+  const by = String((input && input.by) || 'session-delete');
+  const primaryUid = String(primaryAccountStore.get() || '').trim();
+  // 1) 先查请求行各自的归属账号 —— 主从判定的唯一依据是「谁真正持有这份物理副本」，
+  //    而不是 lineage 的出身账号（原始版本完全可能落在非主账号里）。
+  const requestedRows = await sqliteQuery(
+    'SELECT id, user_id FROM sessions WHERE id IN (' + sqlPlaceholders(ids) + ');',
+    ids
+  );
+  const plan = resolveSessionDeletePlan(DATA_DIR, {
+    ids,
+    rows: requestedRows,
+    primaryUid,
+    mode: input && input.mode,
+  });
+  const requestedSet = new Set(ids.map(String));
+  const memberIds = Array.from(new Set(plan.deleteIds.filter((id) => isValidSessionId(id))));
+  if (!memberIds.length) return { ok: false, status: 404, error: '会话不存在或已删除' };
+  const before = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id IN (' + sqlPlaceholders(memberIds) + ');', memberIds);
+  const matchedSet = new Set(before.map((row) => String(row.id || '')));
+  const matchedIds = memberIds.filter((id) => matchedSet.has(String(id)));
+  const matchedRows = before.filter((row) => matchedSet.has(String(row.id || '')));
+  if (!matchedIds.length) return { ok: false, status: 404, error: '会话不存在或已删除' };
+  // 2) 非主账号路径：**先落抑制标记，再删**。顺序很关键 —— 若先删后标记，进程在两步之间
+  //    挂掉就会留下「已经删掉但没标记」的状态，auto-copy 下次切号把副本复制回来。
+  //    先标记则最坏是「标记了但没删成」，用户再删一次即可，不会产生错误数据。
+  let suppressed = 0;
+  if (plan.mode === 'local' && plan.suppressions.length) {
+    for (const item of plan.suppressions) {
+      try {
+        if (setAutoCopySuppression(DATA_DIR, item.lineageId, item.uid, { reason: plan.reason, by })) suppressed += 1;
+      } catch (e) {
+        log(`[sessions-delete] 登记抑制标记失败 ${item.lineageId}/${item.uid}: ${e.message}`);
+        throw e;
+      }
+    }
+  }
+  // 3) 可重试的文件与规则清理；失败时保留 DB 记录作为重试锚点。
+  const wbHome = PROFILE.dataRoot;
+  let filesRemoved = 0;
+  for (const id of matchedIds) filesRemoved += deleteSessionFiles(wbHome, id);
+  let rulesRemoved = 0;
+  for (const row of matchedRows) {
+    try {
+      if (removeAutoCopySession(DATA_DIR, String(row.user_id || '').trim(), row.id)) rulesRemoved++;
+    } catch (e) {
+      log(`[sessions-auto-copy] 删除规则 ${row.id} 失败: ${e.message}`);
+      throw e;
+    }
+  }
+  // 4) 最后真实删除 DB 记录（非软删）。若此步失败，重复请求可安全重试。
+  await sqliteRun(
+    'DELETE FROM sessions WHERE id IN (' + sqlPlaceholders(matchedIds) + ');',
+    matchedIds
+  );
+  // 5) 级联模式：整条 lineage 已删干净，针对它的抑制标记失去意义，清掉避免残留垃圾键。
+  if (plan.mode === 'cascade' && plan.lineageIds.length) {
+    for (const lineageId of plan.lineageIds) {
+      try { clearLineageSuppressions(DATA_DIR, lineageId); } catch (_) {}
+    }
+  }
+  const cascaded = matchedIds.filter((id) => !requestedSet.has(String(id))).length;
+  log(`[sessions-delete] by=${by} mode=${plan.mode} reason=${plan.reason} 已真实删除 ${matchedIds.length} 个会话（DB + ${filesRemoved} 项文件，级联副本 ${cascaded}，抑制标记 ${suppressed}）`);
+  // 本地删了不代表手机端看不到：云端那份还在。顺带清一次（只对本账号的会话有效，
+  // 跨账号会以 other-account 记进日志，不算失败）—— 这是「幽灵会话」的根治点。
+  const uidByAccount = {};
+  for (const row of matchedRows) uidByAccount[String(row.id || '')] = String(row.user_id || '');
+  purgeCloudCopiesAfterLocalDelete(matchedIds, uidByAccount);
+  return {
+    ok: true,
+    mode: plan.mode,
+    reason: plan.reason,
+    primaryUid: primaryUid || null,
+    deleted: matchedIds.length,
+    requested: ids.length,
+    cascaded,
+    filesRemoved,
+    rulesRemoved,
+    suppressed,
+  };
+}
+
+/* ---------------- 原生软删探测：WorkBuddy 自己删的会话也要向下级联 ---------------- */
+//
+// 背景（2026-09-17 用户报障）：在面瘫君（主账号）删掉若干会话后，其他账号的副本还在；
+// 切回主账号时副本又被复制回来。根因是 **WorkDaddy 的级联只挂在面板的删除端点上**，
+// 而用户多数直接在 WorkBuddy 界面里删 —— 那是**软删**（写 sessions.deleted_at），
+// WorkDaddy 完全没参与 ⇒ 不级联、不登记抑制 ⇒ 别处的副本把会话「复活」。
+//
+// 做法：定期扫主账号里「刚被软删」的行，走同一套 deleteSessionsCore 级联删掉其他账号的副本。
+// ⚠️ 用**水位线**兜底：只处理水位线之后被删的行。部署前积压的历史软删（本机现有 60+ 条）
+//    一律不自动动 —— 那可能是用户很久以前删的，也可能想留着；要清必须显式调
+//    POST /api/sessions/native-delete-sweep { includeBacklog: true }。
+const NATIVE_DELETE_SWEEP_FILE = 'native-delete-sweep.json';
+const NATIVE_DELETE_SWEEP_INTERVAL_MS = 20000;
+const NATIVE_DELETE_SWEEP_MAX_PER_RUN = 20;
+
+function readNativeDeleteSweep() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(DATA_DIR, NATIVE_DELETE_SWEEP_FILE), 'utf8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch (_) { return {}; }
+}
+
+function saveNativeDeleteSweep(state) {
+  try { atomicWriteText(path.join(DATA_DIR, NATIVE_DELETE_SWEEP_FILE), JSON.stringify(state) + '\n'); } catch (_) {}
+}
+
+let nativeDeleteSweep = readNativeDeleteSweep();
+let nativeDeleteSweepInFlight = false;
+// 首次运行把水位线定在「现在」：部署之前积压的历史软删不会被自动处理。
+if (!Number.isFinite(Number(nativeDeleteSweep.since))) {
+  nativeDeleteSweep = { since: Date.now(), lastRunAt: 0, lastDeleted: 0, lastCascaded: 0, totalProcessed: 0, errors: 0, lastError: '' };
+  saveNativeDeleteSweep(nativeDeleteSweep);
+}
+
+/** 水位线之后的待处理软删（只读，供进度展示与 sweep 使用） */
+async function pendingNativeDeletes(primaryUid, since) {
+  return sqliteQuery(
+    'SELECT id, user_id, deleted_at, title FROM sessions WHERE user_id = ? AND deleted_at IS NOT NULL AND deleted_at >= ? ORDER BY deleted_at ASC LIMIT ' + NATIVE_DELETE_SWEEP_MAX_PER_RUN + ';',
+    [primaryUid, since]
+  );
+}
+
+async function sweepNativeSessionDeletes(options = {}) {
+  if (nativeDeleteSweepInFlight) return { ok: true, skipped: 'in-flight' };
+  const primaryUid = String(primaryAccountStore.get() || '').trim();
+  if (!primaryUid) return { ok: true, skipped: 'no-primary' };
+  nativeDeleteSweepInFlight = true;
+  try {
+    const includeBacklog = options.includeBacklog === true;
+    const since = includeBacklog ? 0 : Number(nativeDeleteSweep.since) || Date.now();
+    const rows = await pendingNativeDeletes(primaryUid, since);
+    // 「在不在跑」也要能看见：没有待处理项时同样记一次心跳，否则等待状态和没启动无法区分
+    nativeDeleteSweep.lastRunAt = Date.now();
+    if (!rows.length) { saveNativeDeleteSweep(nativeDeleteSweep); return { ok: true, processed: 0, since }; }
+    let deleted = 0, cascaded = 0, processed = 0;
+    for (const row of rows) {
+      try {
+        const result = await deleteSessionsCore({ ids: [String(row.id)], mode: 'cascade', by: 'native-sweep' });
+        if (!result.ok) throw new Error(result.error || '删除失败');
+        deleted += Number(result.deleted) || 0;
+        cascaded += Number(result.cascaded) || 0;
+        processed += 1;
+        nativeDeleteSweep.since = Math.max(since, Number(row.deleted_at) + 1);
+      } catch (error) {
+        // 失败就停在这一行，水位线不越过它 —— 下一拍还能重试，不会静默漏删
+        nativeDeleteSweep.errors = (Number(nativeDeleteSweep.errors) || 0) + 1;
+        nativeDeleteSweep.lastError = String((error && error.message) || error);
+        log('[native-delete-sweep] 处理失败 id=' + String(row.id) + ': ' + nativeDeleteSweep.lastError);
+        break;
+      }
+    }
+    nativeDeleteSweep.lastRunAt = Date.now();
+    nativeDeleteSweep.lastDeleted = deleted;
+    nativeDeleteSweep.lastCascaded = cascaded;
+    nativeDeleteSweep.totalProcessed = (Number(nativeDeleteSweep.totalProcessed) || 0) + processed;
+    saveNativeDeleteSweep(nativeDeleteSweep);
+    if (processed) log('[native-delete-sweep] 主账号原生删除 → 级联清掉 ' + cascaded + ' 个他账号副本（本轮处理 ' + processed + ' 条）');
+    return { ok: true, processed, deleted, cascaded, since: nativeDeleteSweep.since };
+  } finally {
+    nativeDeleteSweepInFlight = false;
+  }
+}
+
 
 const MAX_SESSION_EXPORT_FILES = 20000;
 const MAX_SESSION_IMPORT_ERRORS = 20;
@@ -11722,94 +11951,55 @@ function handleApi(req, res) {
 
   if (req.method === 'POST' && p === '/api/sessions/delete') {
     return readBody(req).then(async (body) => {
-      let ids;
-      try { ids = normalizeSessionIdBatch(body && body.ids); }
-      catch (e) { return json(res, 400, { ok: false, error: e.message }); }
-      if (!ids.length) return json(res, 400, { ok: false, error: '未选择会话' });
-      if (!ids.every(isValidSessionId)) return json(res, 400, { ok: false, error: '包含无效的会话 ID' });
       try {
-        const primaryUid = String(primaryAccountStore.get() || '').trim();
-        // 1) 先查请求行各自的归属账号 —— 主从判定的唯一依据是「谁真正持有这份物理副本」，
-        //    而不是 lineage 的出身账号（原始版本完全可能落在非主账号里）。
-        const requestedRows = await sqliteQuery(
-          'SELECT id, user_id FROM sessions WHERE id IN (' + sqlPlaceholders(ids) + ');',
-          ids
-        );
-        const plan = resolveSessionDeletePlan(DATA_DIR, {
-          ids,
-          rows: requestedRows,
-          primaryUid,
-          mode: body && body.mode,
-        });
-        const requestedSet = new Set(ids.map(String));
-        const memberIds = Array.from(new Set(plan.deleteIds.filter((id) => isValidSessionId(id))));
-        if (!memberIds.length) return json(res, 404, { ok: false, error: '会话不存在或已删除' });
-        const before = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id IN (' + sqlPlaceholders(memberIds) + ');', memberIds);
-        const matchedSet = new Set(before.map((row) => String(row.id || '')));
-        const matchedIds = memberIds.filter((id) => matchedSet.has(String(id)));
-        const matchedRows = before.filter((row) => matchedSet.has(String(row.id || '')));
-        // 2) 非主账号路径：**先落抑制标记，再删**。顺序很关键 —— 若先删后标记，进程在两步之间
-        //    挂掉就会留下「已经删掉但没标记」的状态，auto-copy 下次切号把副本复制回来。
-        //    先标记则最坏是「标记了但没删成」，用户再删一次即可，不会产生错误数据。
-        let suppressed = 0;
-        if (plan.mode === 'local' && plan.suppressions.length) {
-          for (const item of plan.suppressions) {
-            try {
-              if (setAutoCopySuppression(DATA_DIR, item.lineageId, item.uid, { reason: plan.reason, by: 'session-delete' })) suppressed += 1;
-            } catch (e) {
-              log(`[sessions-delete] 登记抑制标记失败 ${item.lineageId}/${item.uid}: ${e.message}`);
-              throw e;
-            }
-          }
-        }
-        // 3) 可重试的文件与规则清理；失败时保留 DB 记录作为重试锚点。
-        const wbHome = PROFILE.dataRoot;
-        let filesRemoved = 0;
-        for (const id of matchedIds) filesRemoved += deleteSessionFiles(wbHome, id);
-        let rulesRemoved = 0;
-        for (const row of matchedRows) {
-          try {
-            if (removeAutoCopySession(DATA_DIR, String(row.user_id || '').trim(), row.id)) rulesRemoved++;
-          } catch (e) {
-            log(`[sessions-auto-copy] 删除规则 ${row.id} 失败: ${e.message}`);
-            throw e;
-          }
-        }
-        // 4) 最后真实删除 DB 记录（非软删）。若此步失败，重复请求可安全重试。
-        if (matchedIds.length) {
-          await sqliteRun(
-            "DELETE FROM sessions WHERE id IN (" + sqlPlaceholders(matchedIds) + ");",
-            matchedIds
-          );
-        }
-        // 5) 级联模式：整条 lineage 已删干净，针对它的抑制标记失去意义，清掉避免残留垃圾键。
-        if (plan.mode === 'cascade' && plan.lineageIds.length) {
-          for (const lineageId of plan.lineageIds) {
-            try { clearLineageSuppressions(DATA_DIR, lineageId); } catch (_) {}
-          }
-        }
-        const cascaded = matchedIds.filter((id) => !requestedSet.has(String(id))).length;
-        log(`[sessions-delete] mode=${plan.mode} reason=${plan.reason} 已真实删除 ${matchedIds.length} 个会话（DB + ${filesRemoved} 项文件，级联副本 ${cascaded}，抑制标记 ${suppressed}）`);
-        // 本地删了不代表手机端看不到：云端那份还在。顺带清一次（只对本账号的会话有效，
-        // 跨账号会以 other-account 记进日志，不算失败）—— 这是「幽灵会话」的根治点。
-        const uidByAccount = {};
-        for (const row of matchedRows) uidByAccount[String(row.id || '')] = String(row.user_id || '');
-        purgeCloudCopiesAfterLocalDelete(matchedIds, uidByAccount);
-        return json(res, 200, {
-          ok: true,
-          mode: plan.mode,
-          reason: plan.reason,
-          primaryUid: primaryUid || null,
-          deleted: matchedIds.length,
-          requested: ids.length,
-          cascaded,
-          filesRemoved,
-          rulesRemoved,
-          suppressed,
-        });
+        const result = await deleteSessionsCore({ ids: body && body.ids, mode: body && body.mode, by: 'panel' });
+        return json(res, result.ok ? 200 : (result.status || 400), result);
       } catch (e) {
         return json(res, 500, { ok: false, error: e.message });
       }
+    });
+  }
+
+  // 原生软删探测：进度/状态（只读）。用户之前抱怨「正在删除但无法查看进度」，这里给出口径。
+  if (req.method === 'GET' && p === '/api/sessions/native-delete-sweep') {
+    return (async () => {
+      try {
+        const primaryUid = String(primaryAccountStore.get() || '').trim();
+        let backlogTotal = 0;
+        let backlogSample = [];
+        if (primaryUid) {
+          const counted = await sqliteQuery(
+            'SELECT COUNT(*) AS c FROM sessions WHERE user_id = ? AND deleted_at IS NOT NULL;',
+            [primaryUid]
+          );
+          backlogTotal = Number((counted[0] || {}).c) || 0;
+          const rows = await pendingNativeDeletes(primaryUid, 0);
+          backlogSample = rows.map((r) => ({ id: r.id, title: String(r.title || '').slice(0, 40), deletedAt: Number(r.deleted_at) }));
+        }
+        return json(res, 200, {
+          ok: true,
+          primaryUid: primaryUid || null,
+          intervalMs: NATIVE_DELETE_SWEEP_INTERVAL_MS,
+          since: Number(nativeDeleteSweep.since) || 0,
+          lastRunAt: Number(nativeDeleteSweep.lastRunAt) || 0,
+          lastDeleted: Number(nativeDeleteSweep.lastDeleted) || 0,
+          lastCascaded: Number(nativeDeleteSweep.lastCascaded) || 0,
+          totalProcessed: Number(nativeDeleteSweep.totalProcessed) || 0,
+          errors: Number(nativeDeleteSweep.errors) || 0,
+          lastError: String(nativeDeleteSweep.lastError || ''),
+          backlogTotal,
+          backlogSample,
+          note: '水位线(since)之后被软删的会每 20 秒自动级联清理；backlogTotal 是更早的历史积压，需要 POST { includeBacklog: true } 才清。',
+        });
+      } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+    })();
+  }
+  if (req.method === 'POST' && p === '/api/sessions/native-delete-sweep') {
+    return readBody(req).then(async (body) => {
+      try {
+        const result = await sweepNativeSessionDeletes({ includeBacklog: !!(body && body.includeBacklog) });
+        return json(res, 200, Object.assign({ ok: true }, result));
+      } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
     });
   }
 
@@ -12819,6 +13009,9 @@ const scheduleHeartbeatTimer = setInterval(() => {
   try { if (scheduleLedger.heartbeat(scheduleLedgerState, Date.now())) persistScheduleLedger(); } catch (_) {}
 }, 30000);
 scheduleHeartbeatTimer.unref && scheduleHeartbeatTimer.unref();
+// 原生软删探测：WorkBuddy 界面里删掉的会话也要向下级联（只处理水位线之后被删的，见函数注释）
+const nativeDeleteSweepTimer = setInterval(() => { sweepNativeSessionDeletes().catch(() => {}); }, NATIVE_DELETE_SWEEP_INTERVAL_MS);
+nativeDeleteSweepTimer.unref && nativeDeleteSweepTimer.unref();
 // 闲置切回主账号：独立后台拍子（不依赖自动化任务是否启用 —— 这是「账号使用策略」）
 startIdleSwitchbackTicker();
 // 自动更新：启动时检查一次（延迟 8s 等网络就绪），之后每 6 小时一次

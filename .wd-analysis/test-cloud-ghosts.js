@@ -143,7 +143,7 @@ const hookCalls = (daemonSrc.match(/purgeCloudCopiesAfterLocalDelete\(/g) || [])
 ok(hookCalls === 3, 'B4 删除后挂钩：1 处定义 + 2 处调用（delete / purge-copy）', hookCalls);
 ok(/log\('\[sessions-purge\] 已删除单份副本[\s\S]{0,400}?purgeCloudCopiesAfterLocalDelete\(\[id\]/.test(daemonSrc),
   'B5 purge-copy 删完顺带清云端');
-ok(/\[sessions-delete\] mode=[\s\S]{0,600}?purgeCloudCopiesAfterLocalDelete\(matchedIds/.test(daemonSrc),
+ok(/\[sessions-delete\] by=[^\]]*mode=[\s\S]{0,600}?purgeCloudCopiesAfterLocalDelete\(matchedIds/.test(daemonSrc),
   'B6 sessions/delete 删完顺带清云端');
 
 ok(/function pickWorkbuddyDaemonClient\(\)/.test(daemonSrc), 'B7 渲染层取 daemon 客户端的函数存在');
