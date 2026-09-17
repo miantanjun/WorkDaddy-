@@ -160,8 +160,11 @@ ok(RESULT.indexOf('其余对话') >= 0, 'H9 对话超出展示条数时用汇总
   ok(SRC.indexOf("'" + key + "':") >= 0, 'H' + (10 + i) + ' i18n 词典含「' + key + '」');
 });
 // 目录名是时间戳这件事不能只靠前端：扫描器必须拿到标题才有得渲染。
-ok(/SPACE_SCAN_VERSION = 3/.test(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'space-scan.js'), 'utf8')),
-  'H16 扫描结果版本号已递增（旧缓存必须失效重扫，否则用户看不到标题）');
+// 版本号只卡**下限**（标题维度引入于 v3），不写死 —— 写死等于以后每次改口径都误报回归。
+const spaceScanVersion = Number((fs.readFileSync(path.join(__dirname, '..', 'scripts', 'space-scan.js'), 'utf8')
+  .match(/SPACE_SCAN_VERSION = (\d+)/) || [])[1]);
+ok(spaceScanVersion >= 3,
+  'H16 扫描结果版本号 >= 3（旧缓存必须失效重扫，否则用户看不到标题）', spaceScanVersion);
 ok(/SELECT id, user_id, cwd, title, custom_title FROM sessions/.test(
   fs.readFileSync(path.join(__dirname, '..', 'scripts', 'daemon.js'), 'utf8')),
   'H17 daemon 侧的 resolver 已把 title / custom_title 取出来透传给扫描器');

@@ -227,6 +227,7 @@ const { createAutomationNotifier } = require('./toast-options.js');
 const { runCompletionReport, probeAccountCompletion } = require('./completion-report.js');
 const { createPrimaryAccountStore } = require('./primary-account.js');
 const { scanSpace, spaceSlug, SPACE_SCAN_VERSION } = require('./space-scan.js');
+const copyManifest = require('./copy-manifest.js');
 const cloudCleanup = require('./cloud-cleanup.js');
 const PROFILE = getProfile();
 const DATA_DIR = defaultDataDir();
@@ -409,13 +410,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
 //        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
 //        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
-const DAEMON_VERSION = '1.3.10';
+const DAEMON_VERSION = '1.3.11';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.10-20260917-session-open-default-budget';
+const DAEMON_BUILD_ID = 'release-1.3.11-20260917-copy-manifest';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -5649,6 +5650,12 @@ function sessionBucketPaths(wbHome, sessionId) {
   paths.push({ kind: 'meta', target: path.join(wbHome, 'tasks', id) });
   paths.push({ kind: 'meta', target: path.join(wbHome, 'file-history', id) });
   paths.push({ kind: 'meta', target: path.join(wbHome, 'artifact-index', id + '.json') });
+  // 下面三项必须与 space-scan.js 的 KEYED_TOPS 保持一致：清单（来自空间扫描）与现场
+  // 测量会在同一次排序里混用，口径不一致就会出现「同一条会话两个数」的错序。
+  // ⚠️ KEYED_TOPS 加了新的会话维度路径，这里要跟着加。
+  paths.push({ kind: 'meta', target: path.join(wbHome, 'changes-detail', id) });
+  paths.push({ kind: 'meta', target: path.join(wbHome, 'changes-index', id + '.json') });
+  paths.push({ kind: 'meta', target: path.join(wbHome, 'file-tree-manifests', id + '.json') });
   paths.push({ kind: 'payload', target: path.join(wbHome, 'workspace', 'sessions', id) });
   return paths;
 }
@@ -5687,26 +5694,70 @@ function autoCopySessionLabel(row) {
 }
 
 /**
- * 体积升序排序：先量体积，再让小会话（无产物/产物很小）优先进队列。
- * 目的是让进度条在几十秒内就能推进到接近 N/N，而不是被一个 500MB+
- * 的会话堵在队首、全线停摆（本机实测 workspace/sessions 单条最大 709MB）。
+ * 复制计划排序 —— 「先分档，档内仍按体积升序」。
+ *
+ * 为什么不是纯体积升序：体积不是唯一的成本。一个 2MB / 8 万文件的会话字节很小，
+ * 纯体积升序会把它排到队首，但它要跑 8 万次文件操作，照样能把串行队列堵十几分钟
+ * （space-scan.js 的注释里记过「单条会话产物可达 32 万文件」）。所以档位取
+ * max(产物体积档, 产物文件数档)，两者任一超标都往后排。档内行为与旧实现一致。
+ *
+ * 取数优先读空间扫描派生的清单（copy-manifest.js）：命中且未过期 → 直接用，
+ * 省掉整棵目录树的同步遍历（本机实测单账号 24~29 条约 300ms，且这期间事件循环是卡住的）；
+ * 未命中 / 会话在扫描之后又被写过 → 现场测量，并把结果回写清单，下次即命中。
+ *
+ * @returns {{plan:Array, measured:Array, tiers:object, stats:object}} plan 已排好序
  */
-function sortAutoCopyPlanBySize(plan, wbHome) {
-  return (Array.isArray(plan) ? plan : []).map((row, index) => {
-    const stats = sessionContentSize(wbHome, row && row.id);
-    return Object.assign({}, row, {
-      sizeBytes: stats.bytes,
-      sizeFiles: stats.files,
-      workspaceBytes: stats.workspaceBytes,
-      workspaceFiles: stats.workspaceFiles,
-      planIndex: index,
-    });
-  }).sort((a, b) => {
-    if (a.workspaceBytes !== b.workspaceBytes) return a.workspaceBytes - b.workspaceBytes;
-    if (a.sizeFiles !== b.sizeFiles) return a.sizeFiles - b.sizeFiles;
-    if (a.sizeBytes !== b.sizeBytes) return a.sizeBytes - b.sizeBytes;
-    return a.planIndex - b.planIndex;
+function sortAutoCopyPlanBySize(plan, wbHome, options = {}) {
+  const cache = readCopyManifestCache();
+  return copyManifest.sortPlan(plan, {
+    uid: options.uid,
+    index: cache ? cache.index : null,
+    wbHome,
+    measure: sessionContentSize,
+    now: options.now,
+    freshMs: options.freshMs,
+    probe: options.probe,
   });
+}
+
+/**
+ * 清单读缓存。
+ * 同一份清单会被「空间扫描完成」与「复制结束回写」两次改写，用文件 mtime + size 做失效判据，
+ * 避免每次排序都重读并解析一遍 JSON（清单几百 KB 时解析本身就不便宜）。
+ */
+let copyManifestCache = null;
+function readCopyManifestCache() {
+  const file = copyManifest.manifestPath(DATA_DIR);
+  let stat = null;
+  try { stat = fs.statSync(file); } catch (_) { copyManifestCache = null; return null; }
+  const stamp = Number(stat.mtimeMs) + ':' + Number(stat.size);
+  if (copyManifestCache && copyManifestCache.stamp === stamp) return copyManifestCache;
+  const manifest = copyManifest.readManifest(DATA_DIR);
+  copyManifestCache = manifest ? { stamp, manifest, index: copyManifest.indexManifest(manifest) } : null;
+  return copyManifestCache;
+}
+/** 让缓存失效（写完清单后必须调，否则下一次排序还会拿到旧解析结果）。 */
+function invalidateCopyManifestCache() {
+  copyManifestCache = null;
+}
+/**
+ * 从前一次空间扫描的落盘结果派生清单。
+ * 用途：用户升级到本版本时，磁盘上可能已经有一份（上一版写的）扫描结果 —— 直接派生即可，
+ * 不必逼用户重扫一次空间页。扫描结果版本低于 4 时清单会标记 payloadSplit=false，
+ * 排序退化为「按总量分档」，不会假装有产物拆分。
+ */
+function deriveCopyManifestFromCache(reason) {
+  try {
+    const raw = fs.existsSync(SPACE_SCAN_CACHE) ? JSON.parse(fs.readFileSync(SPACE_SCAN_CACHE, 'utf8')) : null;
+    if (!raw || !Array.isArray(raw.sessions)) return null;
+    const out = copyManifest.writeManifest(DATA_DIR, raw, { wbHome: PROFILE.dataRoot });
+    invalidateCopyManifestCache();
+    if (out.written) log('[copy-manifest] ' + reason + '：' + copyManifest.describeManifest(out.manifest));
+    return out.manifest;
+  } catch (error) {
+    log('[copy-manifest] ' + reason + ' 派生失败: ' + ((error && error.message) || error));
+    return null;
+  }
 }
 
 // ── 产物目录的硬链接去重 ──────────────────────────────────────────────────
@@ -7376,14 +7427,24 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
     if (job.cancelRequested) { finishPaused(); return; }
     // A rapid switch chain may enqueue this job before the previous copy has
     // created the target rows. Re-plan after the queue reaches this job.
-    // 先量体积再排序：小会话（无产物/产物很小）优先复制，大会话排到最后。
-    // 原来的顺序来自 created_at DESC，一个 500MB+ 的会话就可能把串行队列
-    // 堵在队首十几分钟，界面上表现为「切了号但什么都没发生」。
-    job.plan = sortAutoCopyPlanBySize(await buildAutoCopyPlan(sourceUid, targetUid), wbHome);
+    // 排序：先分档（产物体积 / 产物文件数），档内仍按体积升序。取数优先用空间扫描
+    // 派生出来的清单，缺口才现场测量 —— 详见 sortAutoCopyPlanBySize 的注释。
+    const sized = sortAutoCopyPlanBySize(await buildAutoCopyPlan(sourceUid, targetUid), wbHome, { uid: sourceUid });
+    job.plan = sized.plan;
     job.total = job.plan.length;
     job.planBytes = job.plan.reduce((sum, row) => sum + (row.sizeBytes || 0), 0);
+    job.planTiers = sized.tiers;
     job.phase = 'meta';
-    log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 计划 ${job.total} 个会话，合计 ${formatByteSize(job.planBytes)}（已按体积升序排列）`);
+    log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 计划 ${job.total} 个会话，合计 ${formatByteSize(job.planBytes)}`
+      + `（档位 ${sized.tiers[0] || 0}/${sized.tiers[1] || 0}/${sized.tiers[2] || 0}/${sized.tiers[3] || 0}，清单命中 ${sized.stats.fromList}/${sized.stats.total}）`);
+    // 本次现场测到的条目回写清单：这次要多花的测量成本，下次（含别的账号触发的复制）
+    // 就能省掉。回写必须紧跟排序 —— 它是同步的，不受后面任何 return / 暂停影响。
+    if (sized.measured.length) {
+      const merged = copyManifest.mergeMeasured(DATA_DIR, sourceUid, sized.measured, { wbHome });
+      invalidateCopyManifestCache();
+      log('[copy-manifest] 回写 ' + merged.added + ' 条现场测量'
+        + (merged.written ? '' : '（未落盘：' + merged.reason + '）'));
+    }
     const payloadQueue = [];
     for (let index = 0; index < job.plan.length; index++) {
       const src = job.plan[index];
@@ -7740,6 +7801,18 @@ function startSpaceScanJob() {
           await replaceFileWithRetry(SPACE_SCAN_CACHE, JSON.stringify(result));
         } catch (error) {
           log('[space-scan] 写入缓存失败: ' + error.message);
+        }
+        // 顺带派生「复制排队清单」。纯派生，不产生额外目录遍历（只在写的时候为每条会话
+        // 探一次 mtime，本机 77 条约 3ms）。扫描被中断时 status 不是 done，走不到这里 ——
+        // 半截的数字比旧数字更危险，copy-manifest 里还有第二道 complete 校验兜着。
+        try {
+          const out = copyManifest.writeManifest(DATA_DIR, result, { wbHome });
+          invalidateCopyManifestCache();
+          log('[copy-manifest] ' + (out.written
+            ? '已更新 · ' + copyManifest.describeManifest(out.manifest)
+            : '未更新：' + out.reason));
+        } catch (error) {
+          log('[copy-manifest] 写入失败: ' + ((error && error.message) || error));
         }
       }
       log(`[space-scan] ${job.status} 文件=${result.totals.files} 去重前=${result.totals.rawBytes} 去重后=${result.totals.bytes} 账号=${result.accounts.length} 空间=${result.spaces.length} 用时=${result.elapsedMs}ms`);
@@ -13283,6 +13356,10 @@ refreshAskModeIfEnabled();
 // 启动时补偿持续会话指令块（开关开启但 app-config 块缺失/被改写时补写）
 refreshAutoContinueIfEnabled();
 repairMissingSessionWorkspaces().catch((error) => log('[sessions-cwd-repair] 启动修复失败: ' + error.message));
+// 从磁盘上已有的空间扫描结果派生一份复制排队清单。这样升级到本版本之后不必为了
+// 让新排序生效而重扫一次空间页；若那份扫描结果是旧版（没有产物拆分），清单会如实
+// 标记 payloadSplit=false 并按总量分档，不会假装有数据。
+deriveCopyManifestFromCache('启动派生');
 const sessionCwdRepairTimer = setInterval(() => {
   repairMissingSessionWorkspaces().catch((error) => log('[sessions-cwd-repair] 定时修复失败: ' + error.message));
 }, 5000);

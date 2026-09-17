@@ -176,7 +176,17 @@ function buildSandbox(overrides) {
     formatByteSize: (n) => String(n),
     autoCopySessionLabel: (row) => row.label || String(row.id),
     buildAutoCopyPlan: async () => { if (overrides.planGate) await overrides.planGate.promise; return plan; },
-    sortAutoCopyPlanBySize: (list) => list,
+    // v1.3.11 起返回值从「数组」变成「{plan, measured, tiers, stats}」——排序改走后端
+    // 的 copy-manifest（清单优先、缺口现场测量）。桩件给出空 measured，于是回写分支被
+    // 短路，但 copyManifest / invalidateCopyManifestCache 仍要注入，免得以后放开就炸。
+    sortAutoCopyPlanBySize: (list) => ({
+      plan: list,
+      measured: [],
+      tiers: { 0: list.length, 1: 0, 2: 0, 3: 0 },
+      stats: { fromList: 0, fromMeasure: 0, listSplit: 0, total: list.length },
+    }),
+    copyManifest: { mergeMeasured: () => ({ added: 0, written: false, reason: 'stub' }) },
+    invalidateCopyManifestCache: () => {},
     copySessionRecord: async (src, targetUid) => {
       calls.copy++;
       if (overrides.onCopy) overrides.onCopy(src, targetUid, calls);

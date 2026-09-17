@@ -117,7 +117,15 @@ const RESOLVE = {
     scan.spaceSlug('C:\\Users\\Lyon\\WorkBuddy\\2026-08-11-14-13-10'));
   ok(scan.spaceSlug('') === '' && scan.spaceSlug(null) === '' && scan.spaceSlug(undefined) === '',
     'A0c 空值安全（返回空串）');
-  ok(scan.SPACE_SCAN_VERSION === 3, 'A0d 版本号已随归属口径变更递增（旧缓存会失效重扫）', scan.SPACE_SCAN_VERSION);
+  // 版本号只卡**下限**，不写死。写死等于「每次升版本都误报回归」；
+  // 而「忘了升版本」由下面 A0e 的实质断言兜住（结果里真的有 v4 的字段）。
+  ok(scan.SPACE_SCAN_VERSION >= 4, 'A0d 版本号不低于 4（v4 = 产物目录单独口径）', scan.SPACE_SCAN_VERSION);
+  ok(typeof scan.isPayloadRel === 'function'
+    && scan.isPayloadRel('workspace/sessions') === true
+    && scan.isPayloadRel('workspace/sessions/abc') === true
+    && scan.isPayloadRel('workspace/sessions-other') === false
+    && scan.isPayloadRel('workspace') === false,
+    'A0e 产物子树判定：只认 workspace/sessions 本身及其后代，不误伤同名前缀');
 
   console.log('[A] 结构与断言基线');
   const progress = [];
@@ -314,6 +322,60 @@ const RESOLVE = {
     ok(noTitle.conversations.every((x) => x.title === '(未命名对话)') || noTitle.conversations.length === 0,
       'L11 调用方不注入 title 时不崩，统一落到「(未命名对话)」');
     try { fs.rmSync(root2, { recursive: true, force: true }); } catch (_) {}
+  }
+
+  console.log('[M] 产物目录单独口径（v4：复制排队的数据来源）');
+  {
+    const r = await scan.scanSpace(root, {
+      resolveSession: RESOLVE.session,
+      resolveAccountName: RESOLVE.accountName,
+      resolveSpaceSlug: RESOLVE.spaceSlug,
+    });
+    const byId = {};
+    r.sessions.forEach((s) => { byId[s.id] = s; });
+    // 硬链接的两个副本谁被算成「去重保留者」取决于目录遍历顺序（NTFS 上按名字排，
+    // 但不是契约），所以这里只断言**两者之和**，不赌谁先谁后。
+    //   夹具事实：SA/payload.bin 1000（与 SB 同 inode）+ SA/nested/deep.bin 40 + SB/payload.bin(同 inode)
+    ok(byId[SA].payloadBytes + byId[SB].payloadBytes === 1040,
+      'M1 产物字节：嵌套目录内的文件也算进产物（1000 + 40，硬链接副本去重为 0）',
+      byId[SA].payloadBytes + '+' + byId[SB].payloadBytes);
+    ok(byId[SA].payloadRawBytes + byId[SB].payloadRawBytes === 2040,
+      'M2 产物 raw 口径不做去重（复制要搬的是两份，不是一份）',
+      byId[SA].payloadRawBytes + '+' + byId[SB].payloadRawBytes);
+    ok(byId[SA].payloadFiles + byId[SB].payloadFiles === 3,
+      'M3 产物文件数：①SA/payload ②SA/nested/deep ③SB/payload（硬链接照样数一份文件）',
+      byId[SA].payloadFiles + '+' + byId[SB].payloadFiles);
+    ok(byId[SA].payloadBytes <= byId[SA].bytes && byId[SB].payloadBytes <= byId[SB].bytes,
+      'M4 产物口径是总占用的子集（不是同一份数字换个名字）',
+      { sa: [byId[SA].payloadBytes, byId[SA].bytes], sb: [byId[SB].payloadBytes, byId[SB].bytes] });
+    ok(byId[SA].bytes + byId[SB].bytes === 1870,
+      'M5 总量口径不受影响：SA 1470 + SB 400（SB 的产物是硬链接，已去重）',
+      byId[SA].bytes + '+' + byId[SB].bytes);
+
+    const aSum = r.accounts.reduce((sum, a) => sum + a.payloadBytes, 0);
+    ok(aSum === 1040, 'M6 账号层面产物口径 = 其名下会话产物之和（不含 storage / memory）', aSum);
+    const uid1 = r.accounts.find((a) => a.uid === UID1);
+    ok(uid1 && uid1.payloadBytes + (r.accounts.find((a) => a.uid === UID2) || {}).payloadBytes === 1040
+      && uid1.payloadBytes <= 1040,
+      'M7 账号产物口径不会把 storage(200) / memory(50) 混进来',
+      uid1 && { uid1: uid1.payloadBytes, bytes: uid1.bytes });
+
+    const blobs = r.shared.find((x) => x.name === 'blobs');
+    ok(blobs && blobs.payloadBytes === 0, 'M8 共享项（blobs）不产生产物口径数字', blobs && blobs.payloadBytes);
+    ok(r.unattributed.payloadBytes === 10 && r.unattributed.payloadFiles === 1,
+      'M9 未归属：归属不明的会话目录，产物照样计量（不会凭空消失）',
+      { b: r.unattributed.payloadBytes, f: r.unattributed.payloadFiles });
+
+    const conv = r.conversations.find((x) => x.cwd === CWD);
+    ok(conv && conv.payloadBytes === 1040 && conv.payloadFiles === 3,
+      'M10 任务对话层的产物口径 = 其下各会话之和（清单可直接引用这一行）',
+      conv && { b: conv.payloadBytes, f: conv.payloadFiles });
+
+    const acctPayload = r.accounts.reduce((sum, a) => sum + a.payloadBytes, 0);
+    ok(acctPayload <= r.totals.bytes,
+      'M11 产物口径之和不超过总量（口径自洽，不会算出「比总量还大」）',
+      { acctPayload, total: r.totals.bytes });
+    ok(r.version === scan.SPACE_SCAN_VERSION, 'M12 结果里的版本号与常量一致', r.version);
   }
 
   try { fs.rmSync(root, { recursive: true, force: true }); } catch (_) {}

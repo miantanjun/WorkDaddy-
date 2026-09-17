@@ -176,8 +176,12 @@ ok(SRC.indexOf('font-style:normal;font-size:9px;line-height:1;opacity:0') >= 0,
   'C10 未排序时箭头隐形但保留宽度（切换时不跳位）');
 ok(SRC.indexOf("'点击按实际占用排序': 'Click to sort by on-disk size'") >= 0, 'C11 tooltip 1 整句入典');
 ok(SRC.indexOf("'点击按文件数排序': 'Click to sort by file count'") >= 0, 'C12 tooltip 2 整句入典');
-// 关键：没改扫描器 → 不必递增 SPACE_SCAN_VERSION → 不需要重扫（本机冷跑约 110 秒）
-ok(/^const SPACE_SCAN_VERSION = 3;/m.test(SCAN), 'C13 space-scan.js 未动：版本号仍是 3（旧缓存继续可用，不用重扫）');
+// v1.3.11 起扫描器确实动过了：v4 增加「产物目录单独口径」（见 test-space-scan.js 的 M 组），
+// 复制排队清单靠它取数。所以这里只卡**下限**，不再写死等于 3 ——
+// 写死等于「以后每次升版本都误报回归」。
+// C14/C15 仍守着原本的意图：排序与渲染逻辑不许渗进扫描器。
+const scanVersion = Number((SCAN.match(/^const SPACE_SCAN_VERSION = (\d+);/m) || [])[1]);
+ok(scanVersion >= 4, 'C13 扫描器版本 >= 4（v4 = 产物目录单独口径）', scanVersion);
 ok(SCAN.indexOf('spaceSort') < 0 && SCAN.indexOf('spaceRows') < 0, 'C14 排序逻辑没有渗进扫描器');
 ok(count(SCAN, '.sort((a, b) => b.rawBytes - a.rawBytes);') === 4,
   'C15 扫描器仍按 rawBytes 出默认顺序（账号/会话/空间/共享四处，排序只发生在渲染层）',

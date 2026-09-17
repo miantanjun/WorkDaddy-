@@ -40,7 +40,11 @@ const path = require('path');
 // 结果结构的版本号。改动**归属口径 / 键规则**时必须递增：daemon 读缓存时对不上版本就丢弃重扫，
 // 否则旧的错结果会一直显示。v2 = spaceSlug 修正（盘符小写 + `:\` 合并）。v3 = 增加「会话（任务对话）」
 // 维度：spaces[].conversations（按标题去重后的对话占用）+ 顶层 sessions[]（单条会话占用）。
-const SPACE_SCAN_VERSION = 3;
+// v4 = 会话/空间桶增加「产物目录」单独口径 payloadBytes/payloadFiles/payloadRawBytes
+//      （只累加 workspace/sessions/<uuid>/ 子树）。复制排队要的是**产物**，
+//      正文 jsonl 与索引通常只有几十 KB，混进总量会把「产物巨大的会话」稀释掉；
+//      另外「文件数多但字节不大」的会话是复制里的慢活，需要一个独立的文件数口径。
+const SPACE_SCAN_VERSION = 4;
 
 // 相对 dataRoot 的顶层路径 → 子项键的解析方式。
 //   session-dir   子项是目录，目录名 = 会话 uuid
@@ -86,8 +90,23 @@ function spaceSlug(cwd) {
     .replace(/[\\/]/g, '-');
 }
 
+/** 产物目录（workspace/sessions/<uuid>/）在 dataRoot 里的相对前缀。 */
+const PAYLOAD_PREFIX = 'workspace/sessions';
+
+/** 判断一次遍历所在的相对目录是否位于产物子树内（rel 一律用 `/` 拼）。 */
+function isPayloadRel(rel) {
+  const r = String(rel || '');
+  return r === PAYLOAD_PREFIX || r.indexOf(PAYLOAD_PREFIX + '/') === 0;
+}
+
 function makeBucket() {
-  return { bytes: 0, rawBytes: 0, files: 0, dirs: 0, sessions: 0 };
+  return {
+    bytes: 0, rawBytes: 0, files: 0, dirs: 0, sessions: 0,
+    // 产物目录单独一份口径（见 SPACE_SCAN_VERSION v4）。payloadBytes 与 bytes 同样做硬链接去重；
+    // payloadRawBytes 是「不去重」的物理文件总长 —— 复制排队看的是**要搬多少活**，
+    // 侧栏里显示的则是去重后的实际占用，两者刻意分开，不互相顶替。
+    payloadBytes: 0, payloadRawBytes: 0, payloadFiles: 0,
+  };
 }
 
 function finalizeBucket(bucket) {
@@ -97,6 +116,9 @@ function finalizeBucket(bucket) {
     files: bucket.files,
     dirs: bucket.dirs,
     sessions: bucket.sessions,
+    payloadBytes: bucket.payloadBytes || 0,
+    payloadRawBytes: bucket.payloadRawBytes || 0,
+    payloadFiles: bucket.payloadFiles || 0,
   };
 }
 
@@ -199,17 +221,18 @@ async function scanSpace(root, options = {}) {
   };
 
   // 处理一个文件：去重判定 → 记入 totals（恰好一次）+ 每个归属 bucket
-  const handleFile = async (filePath, buckets) => {
+  // inPayload=true 时额外累加「产物目录」口径（只有 workspace/sessions/<uuid>/ 子树会传 true）。
+  const handleFile = async (filePath, buckets, inPayload) => {
     let lstat = null;
     try { lstat = await fs.promises.lstat(filePath); }
     catch (_) {
       totals.unreadable += 1;
-      for (const b of buckets) { b.files += 1; }
+      for (const b of buckets) { b.files += 1; if (inPayload) b.payloadFiles += 1; }
       return;
     }
     if (lstat.isSymbolicLink()) {
       totals.skippedLinks += 1;
-      for (const b of buckets) { b.files += 1; }
+      for (const b of buckets) { b.files += 1; if (inPayload) b.payloadFiles += 1; }
       return;
     }
     const size = Number(lstat.size) || 0;
@@ -232,6 +255,11 @@ async function scanSpace(root, options = {}) {
       b.files += 1;
       b.rawBytes += size;
       if (counted) b.bytes += size;
+      if (inPayload) {
+        b.payloadFiles += 1;
+        b.payloadRawBytes += size;
+        if (counted) b.payloadBytes += size;
+      }
     }
   };
 
@@ -260,6 +288,9 @@ async function scanSpace(root, options = {}) {
   // 两者都为空的顶层子树落到 shared[顶层名]。
   const walk = async (rel, topName, keyEntry, innerBuckets) => {
     currentPath = rel;
+    // 这一层是否已经在产物子树里。放在循环外算一次：rel 在本层内不变，
+    // 每文件重算一次纯属浪费（大产物目录动辄几万文件）。
+    const inPayload = isPayloadRel(rel);
     const dir = path.join(root, rel);
     let entries;
     try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); }
@@ -335,7 +366,7 @@ async function scanSpace(root, options = {}) {
         }
         stack.push({ rel: childRel, topName, keyEntry: childKeyEntry, inner: childInner });
       } else if (entry.isFile()) {
-        await handleFile(childPath, buckets);
+        await handleFile(childPath, buckets, inPayload);
       } else {
         totals.skippedLinks += 1;
       }
@@ -406,13 +437,17 @@ async function scanSpace(root, options = {}) {
 
   // (cwd, 标题) -> 聚合；用于回答「这个工作目录里的哪个任务对话占了最多」。
   const conversationKey = (cwd, title) => String(cwd) + '\u0000' + (title || '(未命名对话)');
-  const conversationMap = new Map();  // key -> {cwd, title, sessions, bytes, rawBytes, files}
+  const conversationMap = new Map();  // key -> {cwd, title, sessions, bytes, rawBytes, files, payloadBytes, payloadFiles}
   const conversationsByCwd = new Map(); // cwd -> Map(key -> item)
   for (const item of sessionsOut) {
     const key = conversationKey(item.cwd, item.title);
     let conv = conversationMap.get(key);
     if (!conv) {
-      conv = { cwd: item.cwd, title: item.title || '(未命名对话)', sessions: 0, bytes: 0, rawBytes: 0, files: 0 };
+      conv = {
+        cwd: item.cwd, title: item.title || '(未命名对话)', sessions: 0,
+        bytes: 0, rawBytes: 0, files: 0,
+        payloadBytes: 0, payloadRawBytes: 0, payloadFiles: 0,
+      };
       conversationMap.set(key, conv);
       if (item.cwd) {
         if (!conversationsByCwd.has(item.cwd)) conversationsByCwd.set(item.cwd, new Map());
@@ -423,6 +458,9 @@ async function scanSpace(root, options = {}) {
     conv.bytes += item.bytes;
     conv.rawBytes += item.rawBytes;
     conv.files += item.files;
+    conv.payloadBytes += item.payloadBytes || 0;
+    conv.payloadRawBytes += item.payloadRawBytes || 0;
+    conv.payloadFiles += item.payloadFiles || 0;
   }
   const conversationsOut = Array.from(conversationMap.values())
     // 按「实际占用」排序而不是 rawBytes：同一段对话被复制到 3 个账号时 rawBytes ≈ 3×bytes，
@@ -472,6 +510,8 @@ async function scanSpace(root, options = {}) {
 module.exports = {
   SPACE_SCAN_VERSION,
   KEYED_TOPS,
+  PAYLOAD_PREFIX,
+  isPayloadRel,
   spaceSlug,
   accountFileUid,
   scanSpace,

@@ -11,7 +11,7 @@ const ROOT = path.resolve(__dirname, '..');
 const SUITES = [
   ['test-sync-pause.js', 62],
   ['test-cascade-delete.js', 66],
-  ['test-space-scan.js', 55],
+  ['test-space-scan.js', 68],
   ['test-space-ui.js', 70],
   ['test-limit-failover.js', 47],
   ['test-limit-switchback.js', 138],
@@ -26,6 +26,7 @@ const SUITES = [
   ['test-schedule-verify.js', 254],
   ['test-archive-isolation.js', 63],
   ['test-session-open.js', 70],   // v1.3.9/1.3.10：session.open 迷你 renderer 仿真
+  ['test-copy-manifest.js', 95],  // v1.3.11：空间扫描 → 复制排队清单 → 排序
 ];
 
 const out = [];
