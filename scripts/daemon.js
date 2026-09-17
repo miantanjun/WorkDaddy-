@@ -407,13 +407,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
 //        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
 //        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
-const DAEMON_VERSION = '1.3.6';
+const DAEMON_VERSION = '1.3.7';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.6-20260917-archive-and-native-delete';
+const DAEMON_BUILD_ID = 'release-1.3.7-20260917-native-delete-race';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -6157,7 +6157,17 @@ async function sweepNativeSessionDeletes(options = {}) {
     for (const row of rows) {
       try {
         const result = await deleteSessionsCore({ ids: [String(row.id)], mode: 'cascade', by: 'native-sweep' });
-        if (!result.ok) throw new Error(result.error || '删除失败');
+        if (!result.ok) {
+          // ⚠️ 404 = 这一行已经被**同一条 lineage 的其它行**顺手级联删掉了（正常竞态，不是故障。
+          //    实测：一轮里处理到某行时，它已作为前一条 lineage 的成员被删）。
+          //    放行并推进水位线，避免把它记成一次错误、以及让水位线停在它前面。
+          if (result.status === 404) {
+            processed += 1;
+            nativeDeleteSweep.since = Math.max(since, Number(row.deleted_at) + 1);
+            continue;
+          }
+          throw new Error(result.error || '删除失败');
+        }
         deleted += Number(result.deleted) || 0;
         cascaded += Number(result.cascaded) || 0;
         processed += 1;
