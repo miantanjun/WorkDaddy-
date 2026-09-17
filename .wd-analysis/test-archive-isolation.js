@@ -294,8 +294,12 @@ async function groupC() {
     console.log('  skip  daemon 未在 127.0.0.1:47832 运行，跳过 HTTP 集成断言');
   } else {
     const live = probe.body && probe.body.buildId;
-    console.log('  info  daemon buildId = ' + live);
-    check('D0 daemon 已加载本阶段构建', /^(selfhost|release)-1\.3\.8-\d{8}-archive-isolation$/.test(String(live)), live);
+    const srcBuild = (daemonSrc.match(/DAEMON_BUILD_ID = '([^']+)';/) || [])[1];
+    console.log('  info  daemon buildId = ' + live + '  源码 buildId = ' + srcBuild);
+    // 同样别写死 build id：这条断言要抓的是「跑着的 daemon 是不是你刚改的这份代码」，
+    // 所以拿它跟**源码里的 DAEMON_BUILD_ID** 比 —— 比写死某个阶段的 slug 更强也更耐用。
+    check('D0 daemon 已加载当前源码这一版（buildId 与源码一致，即「改完记得重启」）',
+      !!srcBuild && String(live) === srcBuild, 'live=' + live + ' src=' + srcBuild);
 
     const report = await call('GET', '/api/sessions/archived-copies');
     check('D1 GET /api/sessions/archived-copies → 200 且结构完整', report.status === 200 && report.body && report.body.ok === true

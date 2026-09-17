@@ -25,7 +25,7 @@ const SUITES = [
   ['test-scheduled-send.js', 184],
   ['test-schedule-verify.js', 254],
   ['test-archive-isolation.js', 63],
-  ['test-session-open.js', 69],   // v1.3.9：session.open 迷你 renderer 仿真
+  ['test-session-open.js', 70],   // v1.3.9/1.3.10：session.open 迷你 renderer 仿真
 ];
 
 const out = [];

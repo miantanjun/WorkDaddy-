@@ -15,7 +15,8 @@
  * 旧实现每轮都点、点完只判效 1.6 秒，预算 15 秒 —— 加载超过 15 秒就必挂。
  *
  * 修法（两层，缺一不可）：
- *   · 预算：session.open 的 timeoutMs 由定时发送放大到 90s（原来写死 15000）。
+ *   · 预算：session.open 的 timeoutMs 由定时发送放大到 90s；daemon 侧兜底从写死的
+ *     15000 提到 60000（存量任务的 step 里没有 timeoutMs，走的就是这条兜底）。
  *   · 空转：判定「加载中」（waited 或 selected===id）后不再每轮点击，改观测等待；
  *     20 秒仍无进展才退回点击。**第 1 轮保留一次「预热点击」**——因为还存在
  *     「侧栏行高亮但路由没指过来」的情形，那种情况下点击才是唯一出路。
@@ -54,11 +55,22 @@ const sliceFn = (src, name) => {
 };
 
 const NEWFN = sliceFn(SRC, 'openConversationById');
+// 对照基线 = 「最后一个还没有 waitOnly 的 daemon.js 提交」。
+// ⚠️ 不能直接用 HEAD：本套件提交之后 HEAD 就是修复版，对照会失效（踩过）。
+// 也不能写死 SHA：往后任何一次 rebase/重写都会让它失效。按内容回溯最稳。
 let OLDFN = null;
+let OLDREF = null;
 try {
-  OLDFN = sliceFn(norm(execFileSync(GIT, ['-C', 'D:/WorkDaddy', 'show', 'HEAD:scripts/daemon.js'],
-    { maxBuffer: 64 * 1024 * 1024 }).toString('utf8')), 'openConversationById');
+  const shas = execFileSync(GIT, ['-C', 'D:/WorkDaddy', 'log', '--format=%H', '-n', '40', '--', 'scripts/daemon.js'],
+    { maxBuffer: 8 * 1024 * 1024 }).toString('utf8').trim().split('\n').filter(Boolean);
+  for (const sha of shas) {
+    const src = norm(execFileSync(GIT, ['-C', 'D:/WorkDaddy', 'show', sha + ':scripts/daemon.js'],
+      { maxBuffer: 64 * 1024 * 1024 }).toString('utf8'));
+    if (!src.includes('waitOnly')) { OLDFN = sliceFn(src, 'openConversationById'); OLDREF = sha.slice(0, 8); break; }
+  }
 } catch (e) { OLDFN = null; }
+console.log('\n[基线] 修复前实现取自 ' + (OLDREF || '(取不到，相关对照将跳过)') +
+  '（最后一个不含 waitOnly 的 daemon.js 提交）');
 
 /* =================== A 组：源码接线 =================== */
 console.log('\n[A] 源码接线');
@@ -82,6 +94,7 @@ ok(/loadingSessionIdRef\.current === id/.test(SRC), 'A12 注释写明命中的�
 ok(/ui-docs-viewer/.test(SRC), 'A13 注释给出取证来源（renderer 源码文件）');
 ok(/"no-row"/.test(FNBLOCK), 'A14 「行不在」有独立 reason=no-row（不与 no-result 混淆）');
 ok(/Math\.min\(300000, Math\.max\(3000, Number\(timeoutMs\) \|\| 15000\)\)/.test(SRC), 'A15 预算钳制在 [3s, 300s]');
+ok(/Number\(detail && detail\.timeoutMs\) \|\| 60000/.test(SRC), 'A16 session.open 兜底预算 60s（存量任务 step 里没有 timeoutMs 时走这条）');
 
 console.log('\n[AA] scheduled-send 编译产物');
 ok(/const OPEN_TIMEOUT_MS = 90000;/.test(SSRC), 'AA1 定义了 OPEN_TIMEOUT_MS=90000');

@@ -409,13 +409,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
 //        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
 //        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
-const DAEMON_VERSION = '1.3.9';
+const DAEMON_VERSION = '1.3.10';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.9-20260917-session-open-wait';
+const DAEMON_BUILD_ID = 'release-1.3.10-20260917-session-open-default-budget';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -4745,7 +4745,12 @@ function startAutomationRun(task, event = null) {
       const openedUid = (currentAccount() || {}).uid;
       if (!openedUid) throw new Error('没有可用账号');
       if (!cdp.connected) throw new Error('WorkBuddy 未连接，无法打开会话');
-      const opened = await withInput(() => openConversationById(target, Number(detail && detail.timeoutMs) || 15000));
+      // 兜底预算 60s（原为 15s）。定时发送会在 step 上显式带 90s，但**存量任务**的
+      // step 里没有 timeoutMs，走的就是这个兜底 —— 而 renderer 自己写明「loadSession
+      // 在飞时（daemon 忙时可达 90s+）」，15s 必然把「正在加载」误判成「找不到会话」。
+      // 注意：真正的失败路径不会白等满 60s —— 无行时 scrollTop 累加到 40000 就 break
+      // （约 33s），无列表/无响应只轮询到 deadline。
+      const opened = await withInput(() => openConversationById(target, Number(detail && detail.timeoutMs) || 60000));
       if (isCancelled() || (currentAccount() || {}).uid !== openedUid) throw new Error('打开会话后账号或运行状态已变化');
       if (!opened) throw new Error('未能在会话列表里找到并打开目标会话，请确认它属于当前账号');
       return { ok: true, conversationId: target };
