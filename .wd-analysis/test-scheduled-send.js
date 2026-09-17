@@ -238,7 +238,17 @@ const opLog = (events) => events.filter((e) => /^(session\.|model\.set)/.test(e)
   check('路由用 normalizeRequest 先校验', /scheduledSend\.normalizeRequest\(/.test(DAEMON_SRC));
   check('路由用 buildTask 编译并经 validateTask', /validateTask\(scheduledSend\.buildTask\(/.test(DAEMON_SRC));
   check('路由按 id upsert（可重编辑）', /tasks\[index\] = task; else tasks\.unshift\(task\);/.test(DAEMON_SRC));
-  check('build id 已递增（新代码才会被加载）', /DAEMON_BUILD_ID = '[^']*scheduled-send'/.test(DAEMON_SRC));
+  // build id 是「新 daemon 代码到底有没有被加载」的唯一凭据：改 daemon.js 就必须改它，
+  // 否则 app 壳会继续报旧版本、关于页也看不出区别。
+  // 原先这里把功能关键字 'scheduled-send' 写死进正则 —— 下一个功能名一上来就必然翻红
+  // （2026-09-17「切号后 session.open 打不开会话」修复把 build id 改成 session-open-fix 时就撞上了）。
+  // 改成锁「格式 + 版本下限 + 不等于引入定时发送的那一版」，守的还是「必须递增」，但不再被后续功能名推翻。
+  const buildId = (DAEMON_SRC.match(/const DAEMON_BUILD_ID = '([^']+)';/) || [])[1] || '';
+  check('build id 形如 release-x.y.z-YYYYMMDD-功能', /^release-\d+\.\d+\.\d+-\d{8}-[A-Za-z0-9][A-Za-z0-9-]*$/.test(buildId), 'got=' + JSON.stringify(buildId));
+  const bidVer = (buildId.match(/^release-(\d+)\.(\d+)\.(\d+)-/) || []).slice(1).map(Number);
+  check('build id 已递增（不低于引入定时发送的 1.3.1，且不等于那一版）',
+    bidVer.length === 3 && (bidVer[0] * 10000 + bidVer[1] * 100 + bidVer[2]) >= 10301 && buildId !== 'release-1.3.1-20260917-scheduled-send',
+    'got=' + buildId);
 
   lines.push('== B3 inject.js ==');
   check('工具栏新增「定时发送」按钮', /id="wbs-auto-sched"/.test(INJECT_SRC));

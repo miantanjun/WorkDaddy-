@@ -390,13 +390,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.3.1：修 Token 用量归属——切号复制的副本会话会把整段用量错记到源账号（内嵌 sessionId
 //        仍是源会话），且已被删除会话的用量因归属映射查不到而被整条丢弃。归属改为按物理
 //        文件判定（内嵌源会话「在场」才算导入副本），sessions 映射同时覆盖已删除会话。
-const DAEMON_VERSION = '1.3.1';
+const DAEMON_VERSION = '1.3.2';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
-// 本机 fork 用自己的修改版版本号（1.3.1 = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.1-20260917-scheduled-send';
+// 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
+const DAEMON_BUILD_ID = 'release-1.3.2-20260917-session-open-fix';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -6310,16 +6310,45 @@ function limitFailoverSyncWaitMs(requested) {
   return Math.max(LIMIT_FAILOVER_SYNC_WAIT_MS_MIN, Math.round(n * 1000));
 }
 
-/** 打开指定会话（按 id 精确定位侧栏行 → 点击 → 轮询确认已选中）。虚拟列表要滚动扫描。 */
+/**
+ * 打开指定会话（按 id 精确定位侧栏行 → 点击 → 轮询确认已选中）。虚拟列表要滚动扫描。
+ *
+ * ⚠️ 2026-09-17 修复（「12:05 定时发送没发出消息」的真因）：
+ * **侧栏行的可点区域不是外层 `.conversation-item`，而是它内部的 `._card_` 元素。**
+ * 实测（切号刷新后的半就绪状态）：点 `.conversation-item` 6.3s 毫无反应；派发完整指针事件序列
+ * （pointerdown/mousedown/pointerup/mouseup/click）同样 6.1s 毫无反应；点内部的 `_card_`
+ * **424ms 就生效**（`.conversation-shell` 挂载 + controller.conversationId === 目标）。
+ * 旧实现走父链时遇到第一个 `conversation-item` 就停下，最终点到外层 ⇒ 白点，
+ * 再叠加内层「死等 8 秒」确认，15s 预算被烧光后报「未能在会话列表里找到并打开目标会话」。
+ *
+ * 现在：① 按优先级轮换候选元素（_card_ → _header_ → .conversation-item → 行本身）；
+ * ② 点完只等 1.6s 判效——有会话被打开就留在首选候选上重试，一点动静都没有就换下一个候选；
+ * ③ 进循环先查 controller，目标已打开直接返回（省一次点击与一轮等待）。
+ * 失败时在 daemon.log 留一行 `[session-open] … reason=…`（no-list / found-but-inert 可区分）。
+ */
 async function openConversationById(sessionId, timeoutMs) {
   const id = String(sessionId || '').trim();
   if (!id || !cdp.connected) return false;
   const deadline = Date.now() + (Number(timeoutMs) || 15000);
+  // 候选按「实测有效度」排序：_card_ 是唯一在半就绪状态下被证明有效的那个。
+  const picks = [
+    'hit.querySelector(\'[class*="_card_"]\')',
+    'hit.querySelector(\'[class*="_header_"]\')',
+    'hit.querySelector(".conversation-item")',
+    'hit',
+  ];
   let scrollTop = 0;
+  let pickIndex = 0;
+  let reason = 'unknown';
   while (Date.now() < deadline) {
     const expr =
       '(function(){try{' +
       'var id=' + JSON.stringify(id) + ';' +
+      'var compat=window.__wbsWorkBuddyCompat;' +
+      'var opened=false;' +
+      'try{var cs=(compat&&compat.findConversationControllers(document))||[];' +
+      'for(var q=0;q<cs.length;q++){if(String(cs[q].conversationId||"")===id){opened=true;break}}}catch(e){}' +
+      'if(opened)return {ok:true,found:true,opened:true};' +
       'var list=document.querySelector(".conversation-list");' +
       'if(!list)return {ok:false,reason:"no-list"};' +
       'var hit=document.querySelector("[data-conversation-id=\\""+id+"\\"]");' +
@@ -6330,26 +6359,39 @@ async function openConversationById(sessionId, timeoutMs) {
       '  if(c)c.scrollTop=' + String(scrollTop) + ';' +
       '  return {ok:true,found:false};' +
       '}' +
-      'var row=hit;' +
-      'for(var d=0;d<8&&row&&row.parentElement;d++){var rc=row.className||"";if(rc.indexOf("conversation-item")!==-1||rc.indexOf("_card_")!==-1)break;row=row.parentElement;}' +
-      'var card=(row&&row!==list&&(row.className||"").indexOf("conversation-item")!==-1)?row:(hit.querySelector(".conversation-item")||hit);' +
+      'var card=' + picks[pickIndex] + '||hit;' +
       'card.click();' +
-      'return {ok:true,found:true};' +
+      'return {ok:true,found:true,clicked:String(card.className||card.tagName||"")};' +
       '}catch(e){return {ok:false,reason:String(e&&e.message||e)}}})()';
     const res = await runCdpExpression(expr, { awaitPromise: false }).catch(() => null);
+    if (res && res.opened) return true;
     if (res && res.found) {
-      // 点了之后等控制器真的切到目标会话（点错/没点上都能被这里发现）
-      const until = Date.now() + 8000;
+      // 点完只等一小段就判效：控制器挂上了说明这个候选点得动（留在它上面继续试），
+      // 一点动静都没有就换下一个候选元素。旧代码「死等 8 秒」正是预算被烧光的原因。
+      const until = Date.now() + 1600;
+      let reacted = false;
       while (Date.now() < until) {
-        await sleep(400);
+        await sleep(300);
         const live = await readLiveModel().catch(() => null);
-        if (live && live.ok && String(live.conversationId || '') === id) return true;
+        if (live && live.ok) {
+          if (String(live.conversationId || '') === id) return true;
+          reacted = true; // 有会话被打开了、但不是目标 —— 回到首选候选重新点目标
+        }
       }
+      pickIndex = reacted ? 0 : pickIndex + 1;
+      if (pickIndex >= picks.length) {
+        pickIndex = 0;
+        scrollTop += 480;
+        if (scrollTop > 40000) scrollTop = 0;
+      }
+      continue;
     }
+    reason = (res && res.reason) || 'no-result';
     scrollTop += 480;
     if (scrollTop > 40000) break;
     await sleep(400);
   }
+  log('[session-open] 打开会话失败 id=' + id + ' reason=' + reason + ' pick=' + pickIndex);
   return false;
 }
 
