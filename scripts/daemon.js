@@ -104,6 +104,7 @@ const {
   updateMeta,
   canonicalWorkspace,
   getAutoCopyRules,
+  readAutoCopyConfig,
   dedupeAutoCopySessionRows,
   setAutoCopyRule,
   setAutoCopyAllSessions,
@@ -120,6 +121,7 @@ const {
   moveAutoCopySession,
   removeAutoCopySession,
   removeAutoCopySessionMember,
+  pickArchivedCrossAccountTargets,
   removeAutoCopyAccount,
   collectLineageMembersForDelete,
   resolveSessionDeletePlan,
@@ -407,13 +409,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
 //        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
 //        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
-const DAEMON_VERSION = '1.3.7';
+const DAEMON_VERSION = '1.3.8';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.7-20260917-native-delete-race';
+const DAEMON_BUILD_ID = 'release-1.3.8-20260917-archive-isolation';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -5899,53 +5901,19 @@ async function yieldAutoCopyToRenderer() {
   if (pending && !pending.settled) await pending.ready;
 }
 
-/* ---------------- lineage 元数据对账：归档意图（status）的传播规则 ---------------- */
+/* ---------------- 归档（status）的跨账号隔离：归档只属于主账号 ---------------- */
 //
-// 背景（2026-09-17 用户报障）：syncAutoCopyLineage 会把「最新成员」的 title/custom_title/status
-// 整套回写到同 lineage 的其他成员。其中 status 里的 `archived`（WorkBuddy 的归档态，归档后
-// 不显示在左侧任务栏）是**用户的界面意图**，而「谁最新」往往只是**另一个账号又聊了一句**。
-// 于是主账号刚归档的会话被别的账号的活跃度冲成非归档 → 归档的任务又冒出来；重启 WorkBuddy
-// 后云端把 archived 拉回来才「恢复正常」。
+// 2026-09-17 起 syncAutoCopyLineage **不再回写 status**（见下方 UPDATE 里的注释）。
+// 历史实现（v1.3.6 的「基线传播」+ session-status-baseline.json）曾试图在「归档不被冲掉」
+// 与「归档也能同步到其他账号」之间折中，只传播「恰好一个成员偏离基线」的状态；
+// 但用户最终定的语义是**归档只在主账号进行、不复制也不显示到其他账号**，
+// 那套折中连同基线文件一起废弃 —— 文件保留在磁盘上不删（便于回滚），daemon 不再读写它。
 //
-// 规则：以我们自己记录的上一次状态为基线，**只有当恰好一个成员偏离基线**时，才认为那是用户
-// 刚做的动作（归档或恢复），把新状态传播给其他成员；其余情况一律不动 status。
-// 宁可少传播，也绝不覆盖用户的归档/恢复。
-const ARCHIVE_INTENT_FILE = 'session-status-baseline.json';
-
-function readStatusBaseline() {
-  try {
-    const raw = JSON.parse(fs.readFileSync(path.join(DATA_DIR, ARCHIVE_INTENT_FILE), 'utf8'));
-    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
-  } catch (_) { return {}; }
-}
-
-function saveStatusBaseline(baseline) {
-  try { atomicWriteText(path.join(DATA_DIR, ARCHIVE_INTENT_FILE), JSON.stringify(baseline) + '\n'); } catch (_) {}
-}
-
-/**
- * 决定这次对账把 status 写成什么。
- * @returns {{status: string|null, changed: boolean}} status=null 表示本次不碰 status（写回各行原值）
- */
-function resolvePropagatedStatus(live, baseline, lineageId) {
-  const statuses = live.map((member) => String((member.row && member.row.status) || '') || 'Pending');
-  const recorded = baseline[lineageId];
-  if (recorded === undefined || recorded === null || recorded === '') {
-    // 首次见到这条 lineage：只记基线、不改任何行（没有参照时绝不动手）
-    const uniq = Array.from(new Set(statuses));
-    const picked = uniq.length === 1 ? uniq[0] : '';
-    if (baseline[lineageId] !== picked) { baseline[lineageId] = picked; return { status: null, changed: true }; }
-    return { status: null, changed: false };
-  }
-  const diverged = [];
-  for (let i = 0; i < live.length; i += 1) if (statuses[i] !== recorded) diverged.push(i);
-  // 0 个 = 谁都没变（最常见）；≥2 个 = 情况不明（可能被手工改过）→ 都不动
-  if (diverged.length !== 1) return { status: null, changed: false };
-  const next = statuses[diverged[0]];
-  baseline[lineageId] = next;
-  return { status: next, changed: true };
-}
-
+// 现在归档隔离集中在这三处：
+//   ① syncAutoCopyLineage ：不写 status（本段）
+//   ② buildAutoCopyPlan  ：status==='archived' 的源行不进复制计划
+//   ③ sweepArchivedCopies：登录到非主账号时清掉该账号上的归档副本（见文件后段）
+// 不变量 I-1：全表 status='archived' 的行只允许属于主账号。
 async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   if (!lineageId || PROFILE.kind !== 'workbuddy') return { members: 0, synced: 0, failedFiles: 0, targetIds: [], targetPresent: false };
   const records = getAutoCopySessionMemberRecords(DATA_DIR, lineageId);
@@ -5984,9 +5952,6 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   // 旧版副本可能仍挂着最初源会话的 owner；也修复作为最新来源的副本自身。
   const repairedSource = await copySessionFiles(PROFILE.dataRoot, latest.id, latest.id, ownerIds, options);
   let failedFiles = repairedSource.failed;
-  // status 不按「谁最新听谁的」传播，先算出这次该写什么（null = 本次不碰）
-  const statusBaseline = readStatusBaseline();
-  const propagated = resolvePropagatedStatus(live, statusBaseline, lineageId);
   for (const target of live) {
     if (target.id === latest.id) continue;
     await yieldAutoCopyToRenderer();
@@ -5996,9 +5961,10 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
     failedFiles += files.failed;
     try {
       await sqliteRun(
-        'UPDATE sessions SET title = ?, custom_title = ?, status = ?, updated_at = ?, last_activity_at = ? WHERE id = ? AND user_id = ? AND deleted_at IS NULL;',
+        // ⚠️ 刻意**不写 status**：归档（archived）是主账号专属的用户意图，不能跟着「谁最新」传播，
+        //    否则别的账号一活跃就把主账号的归档冲回普通态、或把归档态带到别人的任务列表里。
+        'UPDATE sessions SET title = ?, custom_title = ?, updated_at = ?, last_activity_at = ? WHERE id = ? AND user_id = ? AND deleted_at IS NULL;',
         [sourceRow.title || '', sourceRow.custom_title || '',
-          propagated.status === null ? String(target.row.status || 'Pending') : propagated.status,
           Number(sourceRow.updated_at || Date.now()), Number(sourceRow.last_activity_at || sourceRow.updated_at || Date.now()),
           target.id, target.uid]
       );
@@ -6006,7 +5972,6 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
       log(`[sessions-auto-copy] 同步会话元数据失败 ${target.uid}/${target.id}: ${error.message}`);
     }
   }
-  if (propagated.changed) saveStatusBaseline(statusBaseline);
   return { members: live.length, synced, failedFiles, sourceId: latest.id, targetIds, targetPresent, payloadTargets };
 }
 
@@ -6192,6 +6157,286 @@ async function sweepNativeSessionDeletes(options = {}) {
   }
 }
 
+
+/* ---------------- 归档跨账号隔离：archived 是主账号专属状态 ---------------- */
+//
+// 背景（2026-09-17 用户报障）：主账号归档的任务对话，切到其他账号后偶尔又出现在任务列表里，
+// 再切一次又消失。根因是 sessions.status 被**三方共写**：
+//   ① WorkBuddy 客户端按当前登录账号从云端回写；② 自动复制照抄源行 status；
+//   ③ 对账把「最新成员」的 status 回写整条 lineage。
+// 而 archived（归档）承载的是**用户的界面意图**，不该跨账号共享。
+//
+// 三条规则（不变量 I-1：全表 status='archived' 的行只允许属于主账号）：
+//   R1 对账不再写 status（syncAutoCopyLineage）
+//   R2 归档行不进复制计划（buildAutoCopyPlan）
+//   R3 其他账号的归档副本清掉 + 登录态拍子兜底（本段）
+//
+// ⚠️ **只在「该账号为当前登录账号」时动手**，这是硬要求不是优化：云端删除按当前登录账号鉴权
+//    （见 purgeCloudCopiesAfterLocalDelete），非登录态删本地 → 云端还在 → 客户端下次拉取会把
+//    会话以**普通**身份写回列表，等于把用户抱怨的现象做成常驻。
+const ARCHIVE_ISOLATION_FILE = 'archive-isolation.json';
+const ARCHIVE_ISOLATION_INTERVAL_MS = 20000;
+const ARCHIVE_ISOLATION_MAX_PER_RUN = 10;
+
+function readArchiveIsolation() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(DATA_DIR, ARCHIVE_ISOLATION_FILE), 'utf8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch (_) { return {}; }
+}
+
+function saveArchiveIsolation(state) {
+  try { atomicWriteText(path.join(DATA_DIR, ARCHIVE_ISOLATION_FILE), JSON.stringify(state) + '\n'); } catch (_) {}
+}
+
+let archiveIsolation = readArchiveIsolation();
+let archiveIsolationInFlight = false;
+if (!Number.isFinite(Number(archiveIsolation.createdAt))) {
+  archiveIsolation = {
+    createdAt: Date.now(), lastRunAt: 0, lastSeenUid: '', lastPurged: 0,
+    totalPurged: 0, errors: 0, lastError: '', pendingForCurrent: 0, orphanCount: 0, skipped: '',
+  };
+  saveArchiveIsolation(archiveIsolation);
+}
+
+function archiveIsolationEnabled() {
+  return String(process.env.WBSWITCH_ARCHIVE_ISOLATION || '') !== '0';
+}
+
+/** 只读：全表 archived 活行 + 血缘登记索引（判定「这份副本在主账号那边还在不在」用） */
+async function collectArchivedCopyState() {
+  const raw = await sqliteQuery(
+    "SELECT id, user_id, title, custom_title, updated_at FROM sessions WHERE deleted_at IS NULL AND status = 'archived';"
+  );
+  const rows = raw.map((row) => ({
+    id: String(row.id || ''),
+    uid: String(row.user_id || ''),
+    title: String(row.custom_title || row.title || ''),
+    updatedAt: Number(row.updated_at || 0),
+  })).filter((row) => row.id);
+  const lineageBySession = {};
+  const membersByLineage = {};
+  try {
+    const config = readAutoCopyConfig(DATA_DIR);
+    for (const lineageId of Object.keys(config.sessions || {})) {
+      const lineage = config.sessions[lineageId] || {};
+      const members = (Array.isArray(lineage.members) ? lineage.members : [])
+        .map((member) => ({ uid: String((member && member.uid) || ''), id: String((member && member.id) || '') }))
+        .filter((member) => member.uid && member.id);
+      if (!members.length) continue;
+      membersByLineage[lineageId] = members;
+      for (const member of members) if (!lineageBySession[member.id]) lineageBySession[member.id] = lineageId;
+    }
+    // 历史数据里 members 可能缺失但 sessionIndex 有登记，兜一层
+    for (const uid of Object.keys(config.sessionIndex || {})) {
+      const bucket = config.sessionIndex[uid] || {};
+      for (const sessionId of Object.keys(bucket)) {
+        if (!lineageBySession[sessionId]) lineageBySession[sessionId] = String(bucket[sessionId] || '');
+      }
+    }
+  } catch (error) {
+    log('[archive-isolation] 读取血缘登记失败: ' + String((error && error.message) || error));
+  }
+  return { rows, lineageBySession, membersByLineage };
+}
+
+/** 只读报告：主账号该留的 / 其他账号该清的 / 归类不明只上报的 */
+async function listArchivedCrossAccountCopies() {
+  const primaryUid = String(primaryAccountStore.get() || '').trim();
+  const live = currentAccount();
+  const currentUid = String((live && live.uid) || '').trim();
+  const state = await collectArchivedCopyState();
+  const picked = pickArchivedCrossAccountTargets({
+    rows: state.rows,
+    lineageBySession: state.lineageBySession,
+    membersByLineage: state.membersByLineage,
+    primaryUid,
+  });
+  return {
+    ok: true,
+    primaryUid: primaryUid || null,
+    currentUid: currentUid || null,
+    onPrimary: !!(primaryUid && currentUid === primaryUid),
+    enabled: archiveIsolationEnabled(),
+    intervalMs: ARCHIVE_ISOLATION_INTERVAL_MS,
+    maxPerRun: ARCHIVE_ISOLATION_MAX_PER_RUN,
+    sweep: {
+      createdAt: Number(archiveIsolation.createdAt) || 0,
+      lastRunAt: Number(archiveIsolation.lastRunAt) || 0,
+      lastSeenUid: String(archiveIsolation.lastSeenUid || ''),
+      lastPurged: Number(archiveIsolation.lastPurged) || 0,
+      totalPurged: Number(archiveIsolation.totalPurged) || 0,
+      errors: Number(archiveIsolation.errors) || 0,
+      lastError: String(archiveIsolation.lastError || ''),
+      pendingForCurrent: Number(archiveIsolation.pendingForCurrent) || 0,
+      orphanCount: Number(archiveIsolation.orphanCount) || 0,
+      skipped: String(archiveIsolation.skipped || ''),
+      inFlight: archiveIsolationInFlight === true,
+    },
+    keep: picked.keep,
+    targets: picked.targets,
+    orphanArchived: picked.orphanArchived,
+    note: '归档只属于主账号（不变量 I-1）。其他账号上的归档副本要切到该账号登录态才能删 —— '
+      + '云端删除按当前登录账号鉴权，非登录态删本地只会让会话被云端以普通身份拉回列表。',
+  };
+}
+
+/**
+ * 单份物理副本删除（purge-copy 端点与归档隔离拍子**共用**）：
+ * 只删这一份，不级联、不写抑制（语义见 §21「重复副本清理原语」）。
+ */
+async function purgeLocalSessionCopyCore(input) {
+  const id = String((input && input.id) || '').trim();
+  if (!isValidSessionId(id)) return { ok: false, status: 400, error: '无效的会话 ID' };
+  const expectUid = String((input && input.expectUid) || '').trim();
+  const by = String((input && input.by) || 'purge-copy');
+  const rows = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id = ?;', [id]);
+  if (!rows.length) return { ok: false, status: 404, error: '会话不存在' };
+  const ownerUid = String(rows[0].user_id || '');
+  if (expectUid && ownerUid !== expectUid) {
+    return { ok: false, status: 409, error: '会话归属账号与请求不一致，已拒绝' };
+  }
+  let filesRemoved = 0;
+  try { filesRemoved = deleteSessionFiles(PROFILE.dataRoot, id); }
+  catch (error) { log('[sessions-purge] 删文件失败 ' + id + ': ' + String((error && error.message) || error)); }
+  await sqliteRun('DELETE FROM sessions WHERE id = ?;', [id]);
+  // 元数据只摘掉这一份成员登记（其它账号的副本原样保留）
+  try {
+    const lineageId = getAutoCopySession(DATA_DIR, ownerUid, id).lineageId;
+    if (lineageId) removeAutoCopySessionMember(DATA_DIR, lineageId, ownerUid, id);
+  } catch (error) {
+    log('[sessions-purge] 摘除成员登记失败 ' + id + ': ' + String((error && error.message) || error));
+  }
+  log('[sessions-purge] 已删除单份副本 ' + JSON.stringify({ id, uid: ownerUid, filesRemoved, by }));
+  // 云端那份不会因为本地删除而消失（手机端看的就是它）——顺带清一次，火后不理。
+  purgeCloudCopiesAfterLocalDelete([id], { [id]: ownerUid });
+  return { ok: true, id, uid: ownerUid, filesRemoved };
+}
+
+/**
+ * 面板/脚本入口：清理其他账号的归档副本（支持 dry-run 与 uids 过滤）。
+ * 只删「当前登录账号名下」的那些；其余收进 needsSwitch，由调用方决定要不要切号。
+ */
+async function purgeArchivedCrossAccountCopies(options = {}) {
+  const primaryUid = String(primaryAccountStore.get() || '').trim();
+  const live = currentAccount();
+  const currentUid = String((live && live.uid) || '').trim();
+  const state = await collectArchivedCopyState();
+  const picked = pickArchivedCrossAccountTargets({
+    rows: state.rows,
+    lineageBySession: state.lineageBySession,
+    membersByLineage: state.membersByLineage,
+    primaryUid,
+  });
+  const wanted = Array.isArray(options.uids) ? options.uids.map((uid) => String(uid || '').trim()).filter(Boolean) : [];
+  const targets = wanted.length ? picked.targets.filter((item) => wanted.indexOf(item.uid) >= 0) : picked.targets;
+  const deletable = currentUid ? targets.filter((item) => item.uid === currentUid) : [];
+  const needsSwitch = Array.from(new Set(targets.filter((item) => item.uid !== currentUid).map((item) => item.uid)));
+  const base = {
+    ok: true,
+    primaryUid: primaryUid || null,
+    currentUid: currentUid || null,
+    keep: picked.keep,
+    targets,
+    orphanArchived: picked.orphanArchived,
+    needsSwitch,
+    skippedNotCurrent: targets.length - deletable.length,
+  };
+  if (options.dryRun) {
+    return Object.assign(base, {
+      dryRun: true,
+      deleted: 0,
+      failed: [],
+      plan: deletable.map((item) => ({ id: item.id, uid: item.uid, lineageId: item.lineageId, primaryId: item.primaryId, title: item.title })),
+      note: '干跑：未改动任何数据。needsSwitch 里的账号需要切到该账号登录态才能清（云端鉴权按当前账号）。',
+    });
+  }
+  let deleted = 0;
+  const failed = [];
+  for (const item of deletable.slice(0, ARCHIVE_ISOLATION_MAX_PER_RUN)) {
+    try {
+      const result = await purgeLocalSessionCopyCore({ id: item.id, expectUid: item.uid, by: 'archive-purge' });
+      if (result.ok) deleted += 1;
+      else failed.push({ id: item.id, uid: item.uid, error: result.error || ('HTTP ' + result.status) });
+    } catch (error) {
+      failed.push({ id: item.id, uid: item.uid, error: String((error && error.message) || error) });
+    }
+  }
+  if (deleted) log('[archive-isolation] 手动清理：删掉 ' + deleted + ' 份归档副本（账号 ' + String(currentUid || '').slice(0, 8) + '）');
+  return Object.assign(base, { dryRun: false, deleted, failed });
+}
+
+/** 常驻拍子：只在「当前登录账号 ≠ 主账号」时删该账号名下的归档行（判定链见段首注释） */
+async function sweepArchivedCopies() {
+  if (archiveIsolationInFlight) return { ok: true, skipped: 'in-flight' };
+  if (!archiveIsolationEnabled()) return { ok: true, skipped: 'disabled' };
+  // ⚠️ 没有待处理项时也要推进 lastRunAt，否则「在跑」与「没启动」分不出来（§32.3 踩过）
+  archiveIsolation.lastRunAt = Date.now();
+  const primaryUid = String(primaryAccountStore.get() || '').trim();
+  if (!primaryUid) {
+    archiveIsolation.skipped = 'no-primary';
+    saveArchiveIsolation(archiveIsolation);
+    return { ok: true, skipped: 'no-primary' };
+  }
+  const live = currentAccount();
+  const currentUid = String((live && live.uid) || '').trim();
+  if (!currentUid) {
+    archiveIsolation.skipped = 'no-current';
+    saveArchiveIsolation(archiveIsolation);
+    return { ok: true, skipped: 'no-current' };
+  }
+  archiveIsolation.lastSeenUid = currentUid;
+  archiveIsolationInFlight = true;
+  try {
+    const state = await collectArchivedCopyState();
+    const picked = pickArchivedCrossAccountTargets({
+      rows: state.rows,
+      lineageBySession: state.lineageBySession,
+      membersByLineage: state.membersByLineage,
+      primaryUid,
+    });
+    archiveIsolation.orphanCount = picked.orphanArchived.length;
+    if (currentUid === primaryUid) {
+      // 主账号上的归档是**合法**的（「归档只在主账号进行」）：只统计、不动作。
+      archiveIsolation.pendingForCurrent = 0;
+      archiveIsolation.lastPurged = 0;
+      archiveIsolation.skipped = 'on-primary';
+      saveArchiveIsolation(archiveIsolation);
+      return { ok: true, skipped: 'on-primary', targets: picked.targets.length };
+    }
+    const mine = picked.targets.filter((item) => item.uid === currentUid);
+    archiveIsolation.pendingForCurrent = mine.length;
+    if (!mine.length) {
+      archiveIsolation.lastPurged = 0;
+      archiveIsolation.skipped = '';
+      saveArchiveIsolation(archiveIsolation);
+      return { ok: true, purged: 0, remaining: 0 };
+    }
+    let purged = 0;
+    for (const item of mine.slice(0, ARCHIVE_ISOLATION_MAX_PER_RUN)) {
+      try {
+        const result = await purgeLocalSessionCopyCore({ id: item.id, expectUid: item.uid, by: 'archive-isolation' });
+        if (result.ok) { purged += 1; continue; }
+        archiveIsolation.errors = (Number(archiveIsolation.errors) || 0) + 1;
+        archiveIsolation.lastError = result.error || ('HTTP ' + result.status);
+        log('[archive-isolation] 清理失败 id=' + String(item.id) + ' uid=' + String(item.uid).slice(0, 8) + ' err=' + archiveIsolation.lastError);
+      } catch (error) {
+        archiveIsolation.errors = (Number(archiveIsolation.errors) || 0) + 1;
+        archiveIsolation.lastError = String((error && error.message) || error);
+        log('[archive-isolation] 清理异常 id=' + String(item.id) + ': ' + archiveIsolation.lastError);
+      }
+    }
+    archiveIsolation.lastPurged = purged;
+    archiveIsolation.totalPurged = (Number(archiveIsolation.totalPurged) || 0) + purged;
+    archiveIsolation.pendingForCurrent = mine.length - purged;
+    archiveIsolation.skipped = '';
+    saveArchiveIsolation(archiveIsolation);
+    if (purged) log('[archive-isolation] 登录账号 ' + currentUid.slice(0, 8) + ' 上清掉 ' + purged + ' 份归档副本（归档只属于主账号）');
+    return { ok: true, purged, remaining: archiveIsolation.pendingForCurrent };
+  } finally {
+    archiveIsolationInFlight = false;
+  }
+}
 
 const MAX_SESSION_EXPORT_FILES = 20000;
 const MAX_SESSION_IMPORT_ERRORS = 20;
@@ -6623,7 +6868,12 @@ async function buildAutoCopyPlan(sourceUid, targetUid) {
   const suppressedLineages = new Set(getSuppressedLineagesForTarget(DATA_DIR, target));
   const selectedRows = dedupeAutoCopySessionRows(rows, { [source]: rules.allLineages })
     .filter((row) => isAutoCopySessionSelected(rules, row))
-    .filter((row) => suppressedLineages.size === 0 || !suppressedLineages.has(String(rules.allLineages[String(row.id)] || '')));
+    .filter((row) => suppressedLineages.size === 0 || !suppressedLineages.has(String(rules.allLineages[String(row.id)] || '')))
+    // 归档跨账号隔离（R2）：status==='archived' 的源行**不参与自动复制**（任何源账号一律）。
+    // 归档是主账号专属状态，复制过去只会让别的账号列表里冒出本该隐藏的会话，再被
+    // 「对账回写 / 云端回写」来回抖。这里刻意用**按 status 动态过滤**而不是写 suppressed
+    // 抑制表：抑制是不可逆的，而用户以后取消归档时理应恢复复制。
+    .filter((row) => String(row.status || '') !== 'archived');
   // Full-copy and workspace matches need stable hidden lineages for idempotent
   // repeated switches. Prepare the whole batch with one metadata write.
   const lineageSessionIds = selectedRows
@@ -11928,31 +12178,13 @@ function handleApi(req, res) {
   // 用途：重复副本清理（见 §21）与内部的孤儿副本自愈。
   if (req.method === 'POST' && p === '/api/sessions/purge-copy') {
     return readBody(req).then(async (body) => {
-      const id = String((body && body.id) || '').trim();
-      if (!isValidSessionId(id)) return json(res, 400, { ok: false, error: '无效的会话 ID' });
-      const expectUid = String((body && body.uid) || '').trim();
       try {
-        const rows = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id = ?;', [id]);
-        if (!rows.length) return json(res, 404, { ok: false, error: '会话不存在' });
-        const ownerUid = String(rows[0].user_id || '');
-        if (expectUid && ownerUid !== expectUid) {
-          return json(res, 409, { ok: false, error: '会话归属账号与请求不一致，已拒绝' });
-        }
-        let filesRemoved = 0;
-        try { filesRemoved = deleteSessionFiles(PROFILE.dataRoot, id); }
-        catch (error) { log('[sessions-purge] 删文件失败 ' + id + ': ' + error.message); }
-        await sqliteRun('DELETE FROM sessions WHERE id = ?;', [id]);
-        // 元数据只摘掉这一份成员登记（其它账号的副本原样保留）
-        try {
-          const lineageId = getAutoCopySession(DATA_DIR, ownerUid, id).lineageId;
-          if (lineageId) removeAutoCopySessionMember(DATA_DIR, lineageId, ownerUid, id);
-        } catch (error) {
-          log('[sessions-purge] 摘除成员登记失败 ' + id + ': ' + error.message);
-        }
-        log('[sessions-purge] 已删除单份副本 ' + JSON.stringify({ id, uid: ownerUid, filesRemoved }));
-        // 云端那份不会因为本地删除而消失（手机端看的就是它）——顺带清一次，火后不理。
-        purgeCloudCopiesAfterLocalDelete([id], { [id]: ownerUid });
-        return json(res, 200, { ok: true, id, uid: ownerUid, filesRemoved });
+        const result = await purgeLocalSessionCopyCore({
+          id: body && body.id,
+          expectUid: body && body.uid,
+          by: 'purge-copy',
+        });
+        return json(res, result.ok ? 200 : (result.status || 400), result);
       } catch (e) {
         return json(res, 400, { ok: false, error: e.message });
       }
@@ -12010,6 +12242,31 @@ function handleApi(req, res) {
         const result = await sweepNativeSessionDeletes({ includeBacklog: !!(body && body.includeBacklog) });
         return json(res, 200, Object.assign({ ok: true }, result));
       } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+    });
+  }
+
+  // 归档跨账号隔离（只读）：主账号的归档行该留，其他账号的归档副本该清。
+  // 报告三组：keep（主账号，合法）/ targets（其他账号，待清）/ orphanArchived（归类不明，只上报不自动删）。
+  if (req.method === 'GET' && p === '/api/sessions/archived-copies') {
+    return (async () => {
+      try {
+        return json(res, 200, await listArchivedCrossAccountCopies());
+      } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+    })();
+  }
+  // 清理其他账号的归档副本：{ dryRun:true } 只回清单不写数据；{ uids:[...] } 只清指定账号。
+  // 只删「当前登录账号名下」的 —— 其余进 needsSwitch（云端鉴权按当前账号，非登录态删了会被拉回）。
+  if (req.method === 'POST' && p === '/api/sessions/archived-copies/purge') {
+    return readBody(req).then(async (body) => {
+      try {
+        const result = await purgeArchivedCrossAccountCopies({
+          dryRun: !!(body && body.dryRun),
+          uids: body && body.uids,
+        });
+        return json(res, result.ok ? 200 : (result.status || 400), result);
+      } catch (e) {
+        return json(res, 500, { ok: false, error: e.message });
+      }
     });
   }
 
@@ -13022,6 +13279,10 @@ scheduleHeartbeatTimer.unref && scheduleHeartbeatTimer.unref();
 // 原生软删探测：WorkBuddy 界面里删掉的会话也要向下级联（只处理水位线之后被删的，见函数注释）
 const nativeDeleteSweepTimer = setInterval(() => { sweepNativeSessionDeletes().catch(() => {}); }, NATIVE_DELETE_SWEEP_INTERVAL_MS);
 nativeDeleteSweepTimer.unref && nativeDeleteSweepTimer.unref();
+// 归档跨账号隔离：archived 只属于主账号 —— 登录到非主账号时清掉该账号上的归档副本
+// （只在登录态动手，理由见函数注释；WBSWITCH_ARCHIVE_ISOLATION=0 可整体关掉）
+const archiveIsolationTimer = setInterval(() => { sweepArchivedCopies().catch(() => {}); }, ARCHIVE_ISOLATION_INTERVAL_MS);
+archiveIsolationTimer.unref && archiveIsolationTimer.unref();
 // 闲置切回主账号：独立后台拍子（不依赖自动化任务是否启用 —— 这是「账号使用策略」）
 startIdleSwitchbackTicker();
 // 自动更新：启动时检查一次（延迟 8s 等网络就绪），之后每 6 小时一次

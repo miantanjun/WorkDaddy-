@@ -183,13 +183,24 @@ const ep = (() => {
   const j = daemonSrc.indexOf("p === '/api/sessions/delete'", i);
   return i >= 0 && j > i ? daemonSrc.slice(i, j) : '';
 })();
+// 2026-09-17（v1.3.8 归档跨账号隔离）：purge-copy 的实现抽成了 purgeLocalSessionCopyCore
+// —— 端点退化成薄封装，与「归档隔离」拍子共用同一份实现。断言随之改锚到 core，
+// 并额外守住「端点确实委托给 core」，免得将来有人在端点里另抄一份逻辑。
+const core = (() => {
+  const i = daemonSrc.indexOf('async function purgeLocalSessionCopyCore');
+  if (i < 0) return '';
+  const j = daemonSrc.indexOf('\n}\n', i);
+  return j > i ? daemonSrc.slice(i, j) : '';
+})();
 ok(ep.length > 0, 'D1 端点存在');
-ok(ep.indexOf('deleteSessionFiles(PROFILE.dataRoot, id)') >= 0, 'D2 复用官方 deleteSessionFiles（含 app/sessions.json 应用缓存）');
-ok(ep.indexOf('DELETE FROM sessions WHERE id = ?') >= 0, 'D3 删掉那一行');
-ok(ep.indexOf('resolveSessionDeletePlan') < 0, 'D4 **不走**级联删除计划 —— 主账号上的重复副本绝不能级联（会连源会话一起删）');
-ok(ep.indexOf('setAutoCopySuppression') < 0, 'D5 不写抑制标记（同 lineage 的保留副本还要继续同步）');
-ok(ep.indexOf('removeAutoCopySessionMember(DATA_DIR, lineageId, ownerUid, id)') >= 0, 'D6 只摘掉这一份的成员登记');
-ok(ep.indexOf("expectUid && ownerUid !== expectUid") >= 0, 'D7 归属账号不匹配时拒绝（防误删）');
+ok(ep.indexOf('purgeLocalSessionCopyCore(') >= 0, 'D1b 端点委托给共用实现（不另抄一份逻辑）');
+ok(core.length > 0, 'D1c 共用实现 purgeLocalSessionCopyCore 存在');
+ok(core.indexOf('deleteSessionFiles(PROFILE.dataRoot, id)') >= 0, 'D2 复用官方 deleteSessionFiles（含 app/sessions.json 应用缓存）');
+ok(core.indexOf('DELETE FROM sessions WHERE id = ?') >= 0, 'D3 删掉那一行');
+ok(core.indexOf('resolveSessionDeletePlan') < 0, 'D4 **不走**级联删除计划 —— 主账号上的重复副本绝不能级联（会连源会话一起删）');
+ok(core.indexOf('setAutoCopySuppression') < 0, 'D5 不写抑制标记（同 lineage 的保留副本还要继续同步）');
+ok(core.indexOf('removeAutoCopySessionMember(DATA_DIR, lineageId, ownerUid, id)') >= 0, 'D6 只摘掉这一份的成员登记');
+ok(core.indexOf("expectUid && ownerUid !== expectUid") >= 0, 'D7 归属账号不匹配时拒绝（防误删）');
 
 // 真机校验分支（带令牌打 daemon）在 test-sync-pause.js 的 D 段（那边有 apiCall + 令牌）
 

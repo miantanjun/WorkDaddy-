@@ -976,6 +976,58 @@ function removeAutoCopySessionMember(dataDir, lineageId, uid, sessionId) {
   return true;
 }
 
+// 归档跨账号隔离的清单计算（纯函数、零 IO；daemon 只负责喂数据）。
+//
+// 不变量 I-1：全表 `sessions.status='archived'` 的行只允许属于主账号。
+// 于是「其他账号上的 archived 行」= 需要清理的副本；但删之前必须确认
+// **同 lineage 的主账号成员此刻也是 archived** —— 否则那份内容可能只存在于这个账号里，
+// 删了就真没了（归入 orphanArchived，只上报、不自动删）。
+function pickArchivedCrossAccountTargets(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const rows = Array.isArray(src.rows) ? src.rows : [];
+  const primaryUid = String(src.primaryUid || '').trim();
+  const lineageBySession = src.lineageBySession && typeof src.lineageBySession === 'object' ? src.lineageBySession : {};
+  const membersByLineage = src.membersByLineage && typeof src.membersByLineage === 'object' ? src.membersByLineage : {};
+  const keep = [];
+  const targets = [];
+  const orphanArchived = [];
+  const archivedIds = new Set();
+  for (const row of rows) if (row && row.id) archivedIds.add(String(row.id));
+  // 每条 lineage 上「属于主账号且此刻仍是 archived」的那一份
+  const primaryArchivedByLineage = {};
+  if (primaryUid) {
+    for (const lineageId of Object.keys(membersByLineage)) {
+      const members = membersByLineage[lineageId];
+      if (!Array.isArray(members)) continue;
+      for (const member of members) {
+        if (!member || String(member.uid || '') !== primaryUid) continue;
+        if (archivedIds.has(String(member.id || ''))) { primaryArchivedByLineage[lineageId] = String(member.id); break; }
+      }
+    }
+  }
+  const seen = new Set();
+  for (const row of rows) {
+    if (!row || !row.id) continue;
+    const id = String(row.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const uid = String(row.uid || '');
+    const item = { id, uid, title: String(row.title || ''), updatedAt: Number(row.updatedAt || 0) };
+    if (!uid) { orphanArchived.push(Object.assign({}, item, { lineageId: '', reason: 'no-owner' })); continue; }
+    if (!primaryUid) { orphanArchived.push(Object.assign({}, item, { lineageId: '', reason: 'no-primary' })); continue; }
+    if (uid === primaryUid) { keep.push(item); continue; }
+    const lineageId = String(lineageBySession[id] || '');
+    const primaryId = lineageId ? String(primaryArchivedByLineage[lineageId] || '') : '';
+    if (lineageId && primaryId && primaryId !== id) {
+      targets.push(Object.assign({}, item, { lineageId, primaryId }));
+    } else {
+      orphanArchived.push(Object.assign({}, item, { lineageId, reason: lineageId ? 'primary-not-archived' : 'no-lineage' }));
+    }
+  }
+  return { keep, targets, orphanArchived };
+}
+
+
 function moveAutoCopySession(dataDir, fromUid, toUid, sessionId) {
   const meta = readMeta(dataDir);
   const config = ensureAutoCopyMeta(meta);
@@ -1837,6 +1889,7 @@ module.exports = {
   mergeAutoCopyLineages,
   addAutoCopySessionMember,
   removeAutoCopySessionMember,
+  pickArchivedCrossAccountTargets,
   moveAutoCopySession,
   removeAutoCopySession,
   removeAutoCopyAccount,
