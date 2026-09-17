@@ -208,8 +208,10 @@ const {
   configureAutomationRuntime,
   installBuiltinTask,
   adoptBuiltinTask,
+  atomicWriteText,
 } = require('./automation.js');
 const scheduledSend = require('./scheduled-send.js');
+const scheduleLedger = require('./schedule-ledger.js');
 
 const { assertAccountRequestUrl, createTaskState, cancellableWait, createRendererGate, probeSessionReceipt, receiptComplete } = require('./automation-runtime.js');
 const acquireAutomationRenderer = createRendererGate();
@@ -390,13 +392,21 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.3.1：修 Token 用量归属——切号复制的副本会话会把整段用量错记到源账号（内嵌 sessionId
 //        仍是源会话），且已被删除会话的用量因归属映射查不到而被整条丢弃。归属改为按物理
 //        文件判定（内嵌源会话「在场」才算导入副本），sessions 映射同时覆盖已删除会话。
-const DAEMON_VERSION = '1.3.2';
+// 1.3.2：修「切号后 session.open 打不开会话」——侧栏会话行的可点区域是内层 ._card_ 而不是
+//        外层 .conversation-item（详见 .wd-analysis/probe-click-strategy.js）。
+// 1.3.3：定时任务“发没发出去”核验台账——槽位命中先落盘登记，run 结束回填结果，
+//        30 秒一拍核验「该发而没发成」的槽位并写桌面人话报告 + 弹一次汇总提示；只读不重发。
+// 1.3.4：修核验台账两个缺陷——① 心跳判据改用 lastWriteAt（原用 lastTickAt，而拍子 30 秒 <
+//        60 秒阈值 ⇒ 永远不落盘，台账文件根本不生成）；② 冷启动先落一次盘锚住 createdAt，
+//        否则离线补扫在首次安装下直接失效（场景 B「到点时没开机」永远报不出来）。
+//        另把 logWriteCount 提前声明：修「模块初始化阶段调 log() 被 TDZ 静默吞掉」。
+const DAEMON_VERSION = '1.3.4';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.2-20260917-session-open-fix';
+const DAEMON_BUILD_ID = 'release-1.3.4-20260917-schedule-ledger-fix';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -438,6 +448,153 @@ const limitFailover = require('./limit-failover.js');
 const accountSwitchLog = require('./account-switch-log.js');
 const idleSwitchback = require('./idle-switchback.js');
 const creditRotationCache = new Map();
+
+// ⚠️ 日志写盘计数器**必须声明在任何模块初始化阶段的 log() 调用之前**：
+//    rotateLogsIfNeeded() 里的 `++logWriteCount` 对 `let` 是 TDZ，初始化阶段调用会抛
+//    ReferenceError，而 log() 的 try/catch 会把它**静默吞掉** —— 症状是「代码明明跑了，
+//    日志一行都没有」（2026-09-17 实测：台账锚点建出来了，daemon.log 里却是空的）。
+//    所以这个声明放在这里，而不是跟着 log() 一起放到文件末尾。
+let logWriteCount = 0;
+
+/* ---------------- 定时任务「到底发出去没有」核验（2026-09-17） ---------------- */
+//
+// 用户诉求：任务到点之后，隔一段时间核验一次「这一次到底触发了没有」，别再静默失败。
+// 完整设计与风险分析见工作区《WorkDaddy-定时任务核验机制-设计与实现方案.md》，这里只记要点：
+//
+//   · **只读**：台账不参与「这一轮该不该跑」，去重仍只由 automation-schedule-state.json（marks）
+//     决定。核验不会调用任何发送路径、不改写 marks ⇒ 结构上不可能造成重复触发。
+//   · **不自动重发**：与 daemon.js 既有政策一致（Do not retry an unconfirmed send）。
+//     「点了发送但没拿到回执」这种失败结果不确定，自动重发就是双发风险。
+//   · 判据来自会话回执：run 成功且拿到 userMessageId 才算 ok（见 sessionAction 的收尾校验）。
+//   · 上报只在「该发而没发成」时发生；同一槽位只上报一次（落盘 reportedAt，重启也不重报）。
+//
+// ⚠️ 改这里之前先读那份设计文档的「风险与对策」表。
+
+const SCHEDULE_VERIFY_ENABLED = String(process.env.WBSWITCH_SCHEDULE_VERIFY || '').trim() !== '0';
+const SCHEDULE_VERIFY_TICK_MS = Math.max(5000, Number(process.env.WBSWITCH_SCHEDULE_VERIFY_TICK_MS) || 30000);
+const SCHEDULE_VERIFY_GRACE_MS = Math.max(5000, Number(process.env.WBSWITCH_SCHEDULE_VERIFY_GRACE_MS) || 60000);
+const SCHEDULE_VERIFY_START_DELAY_MS = 5000;
+
+let scheduleLedgerState = scheduleLedger.readLedger(DATA_DIR, { fsImpl: fs });
+let scheduleVerifyNotifier = null;
+let scheduleVerifyInFlight = false;
+// 启动那一刻的离线窗口起点：必须在任何心跳落盘之前抓，否则「上次什么时候还活着」就丢了。
+const scheduleOfflineFrom = Number(scheduleLedgerState.lastTickAt) || Number(scheduleLedgerState.createdAt) || Date.now();
+
+// 台账文件不存在（首次安装 / 被人清过）→ 立刻落一次盘，把 createdAt 锚住。
+// ⚠️ 不锚的话每次冷启动 createdAt 都等于「现在」，离线窗口起点 = 现在 ⇒ offlineMisses 被
+//    MIN_OFFLINE_GAP_MS 直接早退，设计里的「场景 B（到点时 WorkBuddy 没开、once 任务永久死亡）」
+//    永远报不出来。2026-09-17 实测三场景：冷启动 → 上报 0（该报没报）；台账已存在 → 上报正常。
+//    首次安装这一拍本来也无从翻旧账（没有「上一次还活着」可参照），从第二次启动起才有效。
+if (!scheduleLedger.ledgerFileExists(DATA_DIR, { fsImpl: fs })) {
+  log('[schedule-verify] 首次建立台账，锚住 createdAt=' + new Date(scheduleLedgerState.createdAt).toISOString());
+  persistScheduleLedger();
+}
+
+function persistScheduleLedger() {
+  try {
+    scheduleLedger.trimLedger(scheduleLedgerState, { now: Date.now() });
+    scheduleLedger.writeLedger(DATA_DIR, scheduleLedgerState, { fsImpl: fs, atomicWriteText });
+  } catch (error) {
+    log('[schedule-verify] 台账写盘失败: ' + String((error && error.message) || error));
+  }
+}
+
+/** 槽位命中时登记「这一刻本该发生一次发送」（由 createScheduleTicker 的 onSlot 回调触发） */
+function noteScheduleSlot(info) {
+  try {
+    const task = info && info.task;
+    if (!task || !task.id || !info.slot) return;
+    scheduleLedger.recordExpected(scheduleLedgerState, {
+      taskId: task.id,
+      slot: info.slot,
+      source: info.source,
+      name: String(task.name || ''),
+      bodyBrief: scheduleLedger.bodySnippetOf(task),
+      dispatched: info.dispatched !== false,
+      now: Number(info.expectedAt) || Date.now(),
+    });
+    persistScheduleLedger();
+  } catch (error) {
+    log('[schedule-verify] 登记失败: ' + String((error && error.message) || error));
+  }
+}
+
+/** 运行结束后回填结果。只有登记过的槽位才回填（手动/事件/interval 运行不带 slot） */
+function recordScheduleSlotOutcome(run, status) {
+  try {
+    if (!run || !run.scheduleSlot) return;
+    scheduleLedger.recordOutcome(scheduleLedgerState, {
+      taskId: run.taskId,
+      slot: run.scheduleSlot,
+      status,
+      error: status === 'ok' ? '' : String(run.error || ''),
+      messageId: status === 'ok' ? String(run.lastMessageId || '') : '',
+      maybeSent: run.maybeSent === true,
+      runId: run.id,
+      now: Date.now(),
+      startedAt: run.startedAt,
+    });
+    persistScheduleLedger();
+  } catch (error) {
+    log('[schedule-verify] 结果回填失败: ' + String((error && error.message) || error));
+  }
+}
+
+function scheduleVerifyNotify(message) {
+  try {
+    if (!cdp.connected) return;
+    if (!scheduleVerifyNotifier) scheduleVerifyNotifier = createAutomationNotifier(automationNotifyToast, 'schedule-verify');
+    // 固定 id：多次核验只更新同一条提示，不会堆一屏
+    Promise.resolve(scheduleVerifyNotifier.show('warning', message, { duration: 9000, id: 'miss' })).catch(() => {});
+  } catch (_) { /* 提示失败不影响核验 */ }
+}
+
+/** 一拍：找出「该发而没发成」的槽位 → 写桌面人话报告 + 弹一次汇总提示 + 标记已上报 */
+function runScheduleVerify(reason) {
+  if (!SCHEDULE_VERIFY_ENABLED || scheduleVerifyInFlight) return null;
+  scheduleVerifyInFlight = true;
+  try {
+    const now = Date.now();
+    const tasks = readAutomations(DATA_DIR);
+    const byId = new Map(tasks.map((task) => [task.id, task]));
+    const nameOf = (taskId) => String((byId.get(taskId) || {}).name || '');
+    const items = [];
+    const due = scheduleLedger.dueEntries(scheduleLedgerState, {
+      now,
+      graceMs: SCHEDULE_VERIFY_GRACE_MS,
+      isRunning: (taskId) => Array.from(automationRuns.values()).some((run) => run.taskId === taskId && run.status === 'running'),
+    });
+    for (const item of due) {
+      const task = byId.get(item.taskId);
+      // 任务已被删除 / 已被停用：用户已经不指望它了，不打扰（条目留给 trim 自然过期）
+      if (!task || task.enabled === false) continue;
+      items.push({ ...item, name: String(task.name || item.name || '') });
+    }
+    // 离线补扫（WorkBuddy 当时没开）：只在启动那一拍做（心跳一写，窗口就只剩几十秒，自然不再触发）
+    const offline = scheduleLedger.offlineMisses(scheduleLedgerState, tasks, {
+      now, graceMs: SCHEDULE_VERIFY_GRACE_MS, fromMs: reason === 'startup' ? scheduleOfflineFrom : undefined,
+    });
+    for (const item of offline) items.push({ ...item, name: String((byId.get(item.taskId) || {}).name || item.name || '') });
+    if (!items.length) return { ok: true, reported: 0 };
+    const text = scheduleLedger.buildMissReport(items, { now, taskNameOf: nameOf });
+    const dir = scheduleLedger.resolveReportDir({ env: process.env, existsSync: fs.existsSync, fallbackDir: DATA_DIR });
+    const written = scheduleLedger.writeReport({ dir, at: now, text, fsImpl: fs });
+    log('[schedule-verify] 发现 ' + items.length + ' 条未发出的定时任务；桌面日志 ' +
+      (written && written.ok ? '已写入 ' : '写入失败 ') + String((written && written.file) || '') +
+      (written && written.error ? ' (' + written.error + ')' : ''));
+    scheduleVerifyNotify(scheduleLedger.buildToast(items));
+    scheduleLedger.markReported(scheduleLedgerState, [...due, ...offline], { now, kind: 'miss' });
+    persistScheduleLedger();
+    return { ok: true, reported: items.length };
+  } catch (error) {
+    log('[schedule-verify] 核验异常: ' + String((error && error.stack) || error));
+    return null;
+  } finally {
+    scheduleVerifyInFlight = false;
+  }
+}
+
 const WATCH_INTERVAL = 3000; // 文件监听兜底
 const BACKUP_DEBOUNCE = 1500; // CDP 事件触发的备份防抖
 const CDP_RECONNECT_MS = 5000;
@@ -1729,7 +1886,7 @@ function applyUpdate() {
 }
 
 
-let logWriteCount = 0;
+// logWriteCount 声明在文件前部（模块初始化阶段也要能写日志，见那里的注释）
 function rotateLogsIfNeeded() {
   if (++logWriteCount % 100 !== 0) return;
   const file = logFile(DATA_DIR);
@@ -4459,6 +4616,12 @@ function startAutomationRun(task, event = null) {
   }
   const id = 'run_' + Date.now().toString(36) + '_' + crypto.randomBytes(3).toString('hex');
   const run = { id, taskId: task.id, status: 'running', startedAt: Date.now(), finishedAt: 0, error: '', logs: [], result: null, navigationSerial: event && event.navigationSerial, pageSessionId: event && event.pageSessionId };
+  // 定时任务核验台账的挂点：只有「命中墙钟槽位」的派发才带 slot（见 automation.js createScheduleTicker）。
+  // 手动运行 / 事件触发 / interval 都不带 ⇒ 不参与「该发而没发成」的核验，不会产生噪音。
+  run.scheduleSlot = event && event.slot ? String(event.slot) : '';
+  run.scheduleSource = event && event.slot ? String(event.source || '') : '';
+  run.maybeSent = false;
+  run.lastMessageId = '';
   const isCancelled = () => run.status === 'cancelled' || run.superseded === true ||
     (task.trigger.restartOnNavigation && event && (event.navigationSerial !== mainFrameNavigationSerial || event.pageSessionId !== cdpPageSessionId));
   log('[automation-focus-diagnostics] automation:start ' + JSON.stringify({ runId: id, taskId: task.id, source: event && event.source || '', account: event && event.account || null, cdpTargetUrl: cdp.targetUrl, cdpTargetTitle: cdp.targetTitle }));
@@ -4500,6 +4663,14 @@ function startAutomationRun(task, event = null) {
     }
   };
   let lastReceipt = null;
+  // 「已经点过发送、但没拿到回执」这类失败的统一构造器：打上 maybeSent，
+  // 定时任务核验台账据此把结论写成「结果不确定，先看会话再决定要不要补发」。
+  // ⚠️ 语义对齐 daemon.js 里那条既有政策：Do not retry an unconfirmed send.
+  const unconfirmedSendError = (message) => {
+    const error = new Error(message);
+    error.maybeSent = true;
+    return error;
+  };
   const readSession = async () => {
     if (isCancelled()) throw new Error('任务已停止');
     const response = await cdpSend('Runtime.evaluate', { expression: '(' + probeSessionReceipt.toString() + ')()', returnByValue: true });
@@ -4568,18 +4739,20 @@ function startAutomationRun(task, event = null) {
       if (op === 'session.send' ? !selected || selected.conversationId !== detail.conversationId : selected && (!before || selected.conversationId !== before.conversationId)) throw new Error('会话已变化，停止发送');
     } }));
     // Do not retry an unconfirmed send: it may already have reached WorkBuddy.
+    // 2026-09-17：这里之后的失败都打上 maybeSent —— 消息**可能已经发出去了**。
+    // 定时任务核验台账靠这个标记决定文案（不确定态绝不能建议「直接重发」）。
     const end = Date.now() + 12000;
     while (Date.now() < end) {
-      if ((currentAccount() || {}).uid !== accountUid) throw new Error('发送后账号已变化，请检查会话；不会自动重发');
+      if ((currentAccount() || {}).uid !== accountUid) throw unconfirmedSendError('发送后账号已变化，请检查会话；不会自动重发');
       const snapshot = await readSession();
       if (snapshot && snapshot.userMessageId && (!before || snapshot.conversationId !== before.conversationId || snapshot.userMessageId !== before.userMessageId)) {
-        if (op === 'session.send' && snapshot.conversationId !== detail.conversationId) throw new Error('发送后会话发生变化，请检查发送结果');
+        if (op === 'session.send' && snapshot.conversationId !== detail.conversationId) throw unconfirmedSendError('发送后会话发生变化，请检查发送结果');
         lastReceipt = {ok:true,accountUid,conversationId:snapshot.conversationId,userMessageId:snapshot.userMessageId,requestId:snapshot.requestId,baselineAssistantId:before && before.conversationId===snapshot.conversationId ? before.assistantId : ''};
         return lastReceipt;
       }
       await cancellableWait(100,isCancelled);
     }
-    throw new Error('未确认会话发送回执，请检查 WorkBuddy；不会自动重发');
+    throw unconfirmedSendError('未确认会话发送回执，请检查 WorkBuddy；不会自动重发');
   };
   // Compatibility aliases retain the historical New Task send behavior.
   const sessionSendCurrent = async message => sessionAction('session.create',{message});
@@ -4613,7 +4786,17 @@ function startAutomationRun(task, event = null) {
   run.cleanupNotifications = runNotifier.cleanup;
   const publicAccounts = () => listAccounts(DATA_DIR).map(a => ({uid:a.uid,nickname:a.nickname,isPrimary:primaryAccountStore.get()===a.uid}));
   const publicCurrent = () => { const a = currentAccount(); return a ? {uid:a.uid,nickname:a.nickname,isPrimary:primaryAccountStore.get()===a.uid} : null; };
-  const runDeps = { sessionAction, primaryAccount: async () => publicAccounts().find(a=>a.isPrimary) || null, dismissToast: runNotifier.dismiss, completionReport, event, listAccounts: async () => publicAccounts(), currentAccount: publicCurrent, accountSwitch: (account, detail) => withInput(() => automationSwitchAccount(account), !!(detail && detail.restore)), accountStatus: automationAccountStatus, accountCheckin: async (account) => {
+  // 包一层只为「顺手把会话回执留下来」：userMessageId 是「消息确实落地」的强证据，
+  // 定时任务核验台账把它当成 success 的凭据存起来（不改任何发送行为，只是旁路记录）。
+  const sessionActionWithReceipt = async (op, detail) => {
+    const result = await sessionAction(op, detail);
+    if (result && result.userMessageId) {
+      run.lastMessageId = String(result.userMessageId);
+      run.lastReceipt = { conversationId: String(result.conversationId || ''), accountUid: String(result.accountUid || '') };
+    }
+    return result;
+  };
+  const runDeps = { sessionAction: sessionActionWithReceipt, primaryAccount: async () => publicAccounts().find(a=>a.isPrimary) || null, dismissToast: runNotifier.dismiss, completionReport, event, listAccounts: async () => publicAccounts(), currentAccount: publicCurrent, accountSwitch: (account, detail) => withInput(() => automationSwitchAccount(account), !!(detail && detail.restore)), accountStatus: automationAccountStatus, accountCheckin: async (account) => {
     if (!account || !account.uid) throw new Error('没有可用账号');
     const result = await claimDailyForUid(account.uid);
     appendRunLog('account:checkin:' + (result.skipped ? 'skipped' : result.ok ? 'success' : 'failed'));
@@ -4658,8 +4841,8 @@ function startAutomationRun(task, event = null) {
   // 若面板还没收会抢焦点）。结束按 run.wasPanelOpen 恢复展开，若运行前本就收起则保持收起。
   run.completion = panelPrepare
     .then(() => executeTask(task, runDeps))
-    .then(async (result) => { if (isCancelled()) throw new Error('任务已停止'); if (run.wasPanelOpen) await automationPanelSetOpen(true); if (run.status === 'running') { run.status = 'success'; run.result = result; run.finishedAt = Date.now(); } log('[automation-focus-diagnostics] automation:finish ' + JSON.stringify({ runId: id, status: run.status, error: run.error })); })
-    .catch(async (error) => { if (run.wasPanelOpen && !run.superseded && (!task.trigger.restartOnNavigation || !event || event.navigationSerial === mainFrameNavigationSerial && event.pageSessionId === cdpPageSessionId)) await automationPanelSetOpen(true); run.status = isCancelled() ? 'cancelled' : 'failed'; run.error = run.superseded ? '页面已切换，重新检测新页面' : String(error && error.message || error); run.finishedAt = Date.now(); appendRunLog(run.error); log('[automation-focus-diagnostics] automation:finish ' + JSON.stringify({ runId: id, status: run.status, error: run.error })); })
+    .then(async (result) => { if (isCancelled()) throw new Error('任务已停止'); if (run.wasPanelOpen) await automationPanelSetOpen(true); if (run.status === 'running') { run.status = 'success'; run.result = result; run.finishedAt = Date.now(); } recordScheduleSlotOutcome(run, 'ok'); log('[automation-focus-diagnostics] automation:finish ' + JSON.stringify({ runId: id, status: run.status, error: run.error })); })
+    .catch(async (error) => { if (run.wasPanelOpen && !run.superseded && (!task.trigger.restartOnNavigation || !event || event.navigationSerial === mainFrameNavigationSerial && event.pageSessionId === cdpPageSessionId)) await automationPanelSetOpen(true); run.status = isCancelled() ? 'cancelled' : 'failed'; run.maybeSent = error && error.maybeSent === true; run.error = run.superseded ? '页面已切换，重新检测新页面' : String(error && error.message || error); run.finishedAt = Date.now(); recordScheduleSlotOutcome(run, 'failed'); appendRunLog(run.error); log('[automation-focus-diagnostics] automation:finish ' + JSON.stringify({ runId: id, status: run.status, error: run.error })); })
     .finally(async () => {
       // Include cached/skipped results and refresh once after the whole run so an
       // earlier account snapshot cannot leave the open panel with stale badges.
@@ -9519,6 +9702,35 @@ function handleApi(req, res) {
     return json(res, 200, { ok: true, tasks: tasks.map((task) => ({ ...task, manualRunnable: canManuallyRunTask(task), compatible: isTaskCompatible(task) })), runs });
   }
 
+  // 定时任务核验台账的只读视图（面板将来可接；现在用于人工核对与验收）
+  if (req.method === 'GET' && p === '/api/schedule-ledger') {
+    const tasks = readAutomations(DATA_DIR);
+    const byId = new Map(tasks.map((task) => [task.id, task]));
+    const counts = { ok: 0, failed: 0, pending: 0, busy: 0, missing: 0, unreported: 0 };
+    const items = [];
+    for (const taskId of Object.keys(scheduleLedgerState.entries)) {
+      for (const slot of Object.keys(scheduleLedgerState.entries[taskId])) {
+        const entry = scheduleLedgerState.entries[taskId][slot];
+        if (counts[entry.status] != null) counts[entry.status] += 1;
+        if (!entry.reportedAt && entry.status !== 'ok' && entry.status !== 'missing') counts.unreported += 1;
+        items.push({ taskId, taskName: String((byId.get(taskId) || {}).name || entry.name || ''), ...entry });
+      }
+    }
+    items.sort((a, b) => (b.expectedAt || 0) - (a.expectedAt || 0));
+    return json(res, 200, {
+      ok: true,
+      enabled: SCHEDULE_VERIFY_ENABLED,
+      graceMs: SCHEDULE_VERIFY_GRACE_MS,
+      tickMs: SCHEDULE_VERIFY_TICK_MS,
+      createdAt: scheduleLedgerState.createdAt,
+      lastTickAt: scheduleLedgerState.lastTickAt,
+      reportDir: scheduleLedger.resolveReportDir({ env: process.env, existsSync: fs.existsSync, fallbackDir: DATA_DIR }),
+      reportPrefix: scheduleLedger.REPORT_PREFIX,
+      counts,
+      items: items.slice(0, 50),
+    });
+  }
+
   if (req.method === 'POST' && p === '/api/automations/logs/clear') {
     return readBody(req).then((body) => {
       const taskId = String(body && body.taskId || '').trim();
@@ -12475,7 +12687,7 @@ restoreSleepMode();
 startServer();
 cdpLoop();
 // All automatic check-in entry points are owned by the visible automation task.
-const tickAutomationSchedules = createScheduleTicker(DATA_DIR);
+const tickAutomationSchedules = createScheduleTicker(DATA_DIR, { onSlot: noteScheduleSlot });
 function runAutomationSchedules() {
   tickAutomationSchedules(readAutomations(DATA_DIR), startAutomationRun,
     (id) => Array.from(automationRuns.values()).some((run) => run.taskId === id && run.status === 'running'));
@@ -12483,6 +12695,16 @@ function runAutomationSchedules() {
 runAutomationSchedules();
 const automationScheduleTimer = setInterval(runAutomationSchedules, 1000);
 automationScheduleTimer.unref && automationScheduleTimer.unref();
+// 定时任务核验：独立拍子 + 启动首拍（首拍负责「上次没开机时错过的那几个时刻」）。
+// 首拍必须早于第一次心跳（心跳默认 30 秒才跑），否则离线窗口就取不到了。
+const scheduleVerifyStartTimer = setTimeout(() => { runScheduleVerify('startup'); }, SCHEDULE_VERIFY_START_DELAY_MS);
+scheduleVerifyStartTimer.unref && scheduleVerifyStartTimer.unref();
+const scheduleVerifyTimer = setInterval(() => runScheduleVerify('tick'), SCHEDULE_VERIFY_TICK_MS);
+scheduleVerifyTimer.unref && scheduleVerifyTimer.unref();
+const scheduleHeartbeatTimer = setInterval(() => {
+  try { if (scheduleLedger.heartbeat(scheduleLedgerState, Date.now())) persistScheduleLedger(); } catch (_) {}
+}, 30000);
+scheduleHeartbeatTimer.unref && scheduleHeartbeatTimer.unref();
 // 闲置切回主账号：独立后台拍子（不依赖自动化任务是否启用 —— 这是「账号使用策略」）
 startIdleSwitchbackTicker();
 // 自动更新：启动时检查一次（延迟 8s 等网络就绪），之后每 6 小时一次

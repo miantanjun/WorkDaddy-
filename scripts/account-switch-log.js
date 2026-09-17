@@ -74,12 +74,20 @@ function accountLabel(uid, nickname) {
   return '未知账号';
 }
 
-function logFileName(ts) {
+/**
+ * 通用的一天一个文件命名：`<prefix>YYYY-MM-DD<suffix>`。
+ * 2026-09-17 抽出来给「定时任务核验日志」共用（同一套 BOM/CRLF/只追加语义）。
+ */
+function namedLogFileName(prefix, ts, suffix) {
   const d = new Date(Number(ts) || Date.now());
   const date = Number.isNaN(d.getTime())
     ? 'unknown'
     : d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
-  return LOG_PREFIX + date + LOG_SUFFIX;
+  return String(prefix) + date + (suffix == null ? LOG_SUFFIX : String(suffix));
+}
+
+function logFileName(ts) {
+  return namedLogFileName(LOG_PREFIX, ts, LOG_SUFFIX);
 }
 
 /**
@@ -329,27 +337,43 @@ function buildIdleSwitchBackReport(p) {
 }
 
 /**
- * 追加一段报告。首次创建文件时写 BOM + 说明头。
+ * 通用「桌面人话报告」追加：一天一个文件、只追加、首次创建写 BOM + 说明头、内部 LF → 落盘 CRLF。
+ * 2026-09-17 抽出（原 appendReport 本体），供「账号切换日志」与「定时任务核验日志」共用，
+ * 避免两份实现各自踩 BOM/换行/桌面被 OneDrive 接管的坑。
+ *
+ * @param {object} options {dir, at, text, fsImpl, prefix?, header?, suffix?}
  * @returns {{ok:boolean, file:string, created?:boolean, bytes?:number, error?:string}}
  */
-function appendReport(options) {
+function appendNamedReport(options) {
   const opts = options || {};
   const dir = String(opts.dir || '').trim();
-  const file = dir ? path.join(dir, logFileName(opts.at)) : '';
+  const file = dir
+    ? path.join(dir, namedLogFileName(opts.prefix == null ? LOG_PREFIX : opts.prefix, opts.at, opts.suffix))
+    : '';
   if (!dir) return { ok: false, file: '', error: '没有可写的日志目录' };
   const io = opts.fsImpl || fsDefault;
+  const header = opts.header == null ? FILE_HEADER : String(opts.header);
   const body = String(opts.text == null ? '' : opts.text)
     .replace(/\r\n/g, '\n')
     .replace(/\n/g, '\r\n');
   try {
     io.mkdirSync(dir, { recursive: true });
     const exists = typeof io.existsSync === 'function' ? io.existsSync(file) : false;
-    const chunk = (exists ? '' : '\uFEFF' + FILE_HEADER.replace(/\n/g, '\r\n') + '\r\n') + body;
+    const chunk = (exists ? '' : '\uFEFF' + header.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n') + '\r\n') + body;
     io.appendFileSync(file, chunk, { encoding: 'utf8' });
     return { ok: true, file, created: !exists, bytes: Buffer.byteLength(chunk, 'utf8') };
   } catch (error) {
     return { ok: false, file, error: String((error && error.message) || error) };
   }
+}
+
+/**
+ * 追加一段账号切换报告（语义 = 账号切换日志，文件名/说明头都用本模块常量）。
+ * @returns {{ok:boolean, file:string, created?:boolean, bytes?:number, error?:string}}
+ */
+function appendReport(options) {
+  const opts = options || {};
+  return appendNamedReport({ ...opts, prefix: LOG_PREFIX, header: FILE_HEADER });
 }
 
 module.exports = {
@@ -362,8 +386,10 @@ module.exports = {
   snippet,
   accountLabel,
   logFileName,
+  namedLogFileName,
   desktopCandidates,
   resolveLogDir,
+  appendNamedReport,
   buildTriggerReport,
   buildFailureReport,
   buildSwitchBackReport,

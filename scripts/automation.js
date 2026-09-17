@@ -194,7 +194,17 @@ function localScheduleSlot(date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-function createScheduleTicker(dataDir) {
+/**
+ * @param {string} dataDir
+ * @param {object} [hooks] 可选。`hooks.onSlot({task, slot, expectedAt, source, dispatched})`
+ *   在**槽位命中并已落盘 marks 之后、start 之前**同步回调一次（非 interval 槽位）。
+ *   2026-09-17 新增，供「定时任务核验台账」登记「这一刻本该发生一次发送」。
+ *   ⚠️ 回调**只允许登记，不允许影响调度**：它抛错被吞掉，返回值被忽略，
+ *   既不会改写 marks，也不会决定这一轮跑不跑 —— 核验机制不可能造成重复触发。
+ */
+function createScheduleTicker(dataDir, hooks) {
+  const hook = hooks && typeof hooks === 'object' ? hooks : {};
+  const onSlot = typeof hook.onSlot === 'function' ? hook.onSlot : null;
   const due = new Map();
   const stateFile = dataDir && path.join(dataDir, 'automation-schedule-state.json');
   let marks = {};
@@ -202,7 +212,9 @@ function createScheduleTicker(dataDir) {
   if (!marks || typeof marks !== 'object' || Array.isArray(marks)) marks = {};
   return (tasks, start, isRunning, now = Date.now()) => {
     const ids = new Set();
+    let slotTag = null;
     for (const task of tasks) {
+      slotTag = null;   // 每个任务单独算：只有「非 interval 且命中了墙钟槽位」才会有值
       const schedule = task.schedule;
       if (!isTaskCompatible(task) || !task.enabled || !schedule || schedule.type === 'manual') continue;
       try { validateSchedule(schedule); } catch (_) { continue; }
@@ -231,8 +243,15 @@ function createScheduleTicker(dataDir) {
           try { atomicWriteText(stateFile, JSON.stringify(marks) + '\n'); }
           catch (_) { continue; }
         }
+        // ⚠️ 顺序：marks 落盘 → 核验登记 → start。登记必须早于派发：
+        // 「正在跑所以跳过」这种情形（dispatched=false）只在这里能观察到，事后无法反推。
+        // expectedAt 取「槽位的整分点」而不是本次 tick 的毫秒（槽位本来就是分钟粒度，
+        // 带上 tick 的秒/毫秒会让台账里的时刻和槽位串对不上）。
+        slotTag = slot;
+        const slotMs = date.getTime() - date.getSeconds() * 1000 - date.getMilliseconds();
+        if (onSlot) { try { onSlot({ task, slot, expectedAt: slotMs, source: schedule.type, dispatched: !isRunning(task.id) }); } catch (_) {} }
       }
-      if (!isRunning(task.id)) start(task, { type: 'schedule', source: schedule.type });
+      if (!isRunning(task.id)) start(task, { type: 'schedule', source: schedule.type, slot: slotTag });
     }
     for (const id of due.keys()) if (!ids.has(id)) due.delete(id);
   };
@@ -993,4 +1012,7 @@ module.exports = {
   normalizeTask,
   validateTask,
   executeTask,
+  // 2026-09-17：定时任务核验台账要落盘，复用这份「内容相同就不写 + tmp→rename」的原子写，
+  // 不再另造一份（daemon 侧通过 schedule-ledger 的 atomicWriteText 选项注入）。
+  atomicWriteText,
 };
