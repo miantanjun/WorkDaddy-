@@ -27,6 +27,7 @@ const SUITES = [
   ['test-archive-isolation.js', 63],
   ['test-session-open.js', 70],   // v1.3.9/1.3.10：session.open 迷你 renderer 仿真
   ['test-copy-manifest.js', 95],  // v1.3.11：空间扫描 → 复制排队清单 → 排序
+  ['test-send-verify.js', 38],    // v1.3.12：发送点击必须核验「草稿被吃掉」才算成功
 ];
 
 const out = [];

@@ -410,13 +410,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
 //        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
 //        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
-const DAEMON_VERSION = '1.3.11';
+const DAEMON_VERSION = '1.3.12';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.11-20260917-copy-manifest';
+const DAEMON_BUILD_ID = 'release-1.3.12-20260918-send-verify';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -2293,7 +2293,20 @@ async function cdpMouseClick(source, x, y, extra = {}, options = {}) {
   log('[cdp-focus-diagnostics] mouse-click:dispatch ' + JSON.stringify({ source, x, y, extra, targetUrl: cdp.targetUrl, targetTitle: cdp.targetTitle }));
   // 页面未产出绘制帧时，mouseMoved 的 ACK 可卡约 5 秒，期间坐标可能已过期。
   // 明确定位的弹窗关闭按钮不依赖 hover，直接按下/松开即可。
-  if (!options.skipMove) await cdpSend('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+  if (!options.skipMove) {
+    await cdpSend('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    // 上面这条 await 可能刚卡了好几秒（渲染器不产帧时不 ACK）。位置敏感的目标
+    // 允许调用方在**按下之前**重新测量一次，避免把过期的坐标按下去。
+    if (typeof options.remeasure === 'function') {
+      try {
+        const fresh = await options.remeasure();
+        if (fresh && Number.isFinite(fresh.x) && Number.isFinite(fresh.y) && (fresh.x !== x || fresh.y !== y)) {
+          log('[cdp-focus-diagnostics] mouse-click:remeasure ' + JSON.stringify({ source, from: { x, y }, to: { x: fresh.x, y: fresh.y } }));
+          x = fresh.x; y = fresh.y;
+        }
+      } catch (_) { /* 重测失败就沿用原坐标 */ }
+    }
+  }
   await cdpSend('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
   await cdpSend('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
 }
@@ -9607,6 +9620,61 @@ async function clearComposerByCdp() {
  * 2) Input.insertText 真实键入文本（触发 beforeinput，Slate/React 完全感知）
  * 3) 找到发送按钮（操作栏最右圆形可点击元素，与 inject.js findSendButton 相同算法）并真实鼠标点击
  */
+/**
+ * 读取 composer 里「真实草稿」的字符数（剔除 Slate 占位符与零宽字符）。
+ * ⚠️ 只返回长度，不返回文本 —— 与 probeSessionReceipt 的脱敏约定一致。
+ *
+ * 这是判断「点了发送到底有没有生效」的唯一可靠判据，来源是 renderer 自己：
+ *   executeSend（lib-chat-ui）只有走到「点击被受理」这一步才 dispatch(clear-draft) 再调 onSend，
+ *   而 handleSend 返回后**只有** reason==='before-send-rejected' 会把草稿放回。
+ * ⇒ 点击之后草稿**还在**，就是这次点击被静默吞掉 ⇒ **确定没发出去**，可以安全重试。
+ *   反之草稿没了才是「发送已被受理」，此时才该交回执轮询去判成败。
+ *
+ * 2026-09-18 12:05 那次失败正是这个形态：daemon 记了 sent:true，而输入框里还留着那 204 字，
+ * 会话里查无此消息 —— 因为 sendStashToComposer 点完就直接返回成功，从来没有回头看结果。
+ */
+function composerDraftExpr() {
+  return `(function(){
+    try {
+      var mic = document.querySelector('.voice-mic-wrap');
+      var ed = null;
+      if (mic) { var p = mic.parentElement;
+        for (var up = 0; up < 6 && p; up++) { var e = p.querySelector('[contenteditable="true"]'); if (e) { ed = e; break; } p = p.parentElement; } }
+      if (!ed) {
+        var all = document.querySelectorAll('[contenteditable="true"]'), best = null, bestBottom = -Infinity;
+        for (var i = 0; i < all.length; i++) { var r = all[i].getBoundingClientRect(); if (r.width > 0 && r.height > 0 && r.bottom > 0 && r.bottom > bestBottom) { best = all[i]; bestBottom = r.bottom; } }
+        ed = best;
+      }
+      if (!ed) return { ok: false, error: 'no editor' };
+      var clone = ed.cloneNode(true);
+      clone.querySelectorAll('[data-slate-placeholder="true"],[data-slate-zero-width]').forEach(function(node){ node.remove(); });
+      var text = (clone.innerText || clone.textContent || '').replace(/[\\uFEFF\\u200B\\u00A0]/g, '');
+      return { ok: true, len: text.trim().length, hasBlocks: !!ed.querySelector('[data-contentblock]') };
+    } catch (e) { return { ok: false, error: String(e) }; }
+  })()`;
+}
+
+/** 发送点击的最大尝试次数。每一次都必须「确认草稿被吃掉」才算成功。 */
+const SEND_CLICK_ATTEMPTS = 3;
+
+/**
+ * 判断「这次点击有没有被 composer 受理」。
+ * @param {{ok:boolean,len:number}|null} after 点击之后读到的草稿（null = 探针本身失败）
+ * @param {number|null} typedLen 点击之前读到的草稿长度
+ * @returns {boolean} true = 草稿已被 clear-draft（受理了）；false = 原样留着（被吞）
+ *
+ * 门阀取「归零，或掉到一半以下」：Slate 对多行文本会做规整，逐字节相等不可靠，
+ * 但「受理 = 清空」这个量级差别足够大，一半以下的余量只用来兜住零宽字符一类的残渣。
+ * ⚠️ after === null（探针读不到编辑器）一律返回 false —— 由调用方翻成「不下结论」，
+ *    绝不能把「读不到」当成「已发出」。
+ */
+function composerDraftConsumed(after, typedLen) {
+  if (!after || after.ok !== true) return false;
+  if (after.len <= 0) return true;
+  if (typedLen === null || typedLen === undefined || typedLen <= 0) return false;
+  return after.len < Math.max(1, Math.floor(typedLen / 2));
+}
+
 async function sendStashToComposer(record) {
   if (!cdp.connected) throw new Error('CDP 未连接，无法发送');
   log('[quick-phrase-diagnostics] composer:start ' + JSON.stringify({ targetUrl: cdp.targetUrl, itemCount: record && record.content && Array.isArray(record.content.items) ? record.content.items.length : 0 }));
@@ -9912,19 +9980,70 @@ async function sendStashToComposer(record) {
   })()`;
   // Only retry the readiness probe, never typing or submitting: after a switch
   // React may need more than one frame to enable the official send button.
-  const sendDeadline = Date.now() + 5000;
-  let sv;
-  while (Date.now() < sendDeadline) {
-    if (record.isCancelled && record.isCancelled()) throw new Error('任务已停止');
-    const sr = await guardedSend('Runtime.evaluate', { expression: sendExpr, returnByValue: true });
-    sv = sr.result && sr.result.value;
-    if (!sv || sv.ok || !sv.retryable || Date.now() >= sendDeadline) break;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(200, sendDeadline - Date.now())));
+  const probeSendButton = async () => {
+    const sendDeadline = Date.now() + 5000;
+    let v;
+    while (Date.now() < sendDeadline) {
+      if (record.isCancelled && record.isCancelled()) throw new Error('任务已停止');
+      const sr = await guardedSend('Runtime.evaluate', { expression: sendExpr, returnByValue: true });
+      v = sr.result && sr.result.value;
+      if (!v || v.ok || !v.retryable || Date.now() >= sendDeadline) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(200, sendDeadline - Date.now())));
+    }
+    if (Date.now() >= sendDeadline) throw new Error('等待发送按钮可点击超时（5 秒），未发送');
+    if (!v || !v.ok) throw new Error((v && v.error) || '未找到发送按钮');
+    return v;
+  };
+  const readDraft = async () => {
+    const r = await guardedSend('Runtime.evaluate', { expression: composerDraftExpr(), returnByValue: true });
+    const v = r.result && r.result.value;
+    return v && v.ok === true ? v : null;
+  };
+  // 点之前先记下草稿长度，点完之后用它判「这一次点击有没有被 renderer 受理」。
+  const typed = await readDraft();
+  const typedLen = typed ? typed.len : null;
+  const draftConsumed = (v) => composerDraftConsumed(v, typedLen);
+
+  let swallowedLen = null;
+  for (let attempt = 1; attempt <= SEND_CLICK_ATTEMPTS; attempt++) {
+    if (record.guard) await record.guard();
+    const pre = await readDraft();
+    // 按钮坐标紧贴点击之前才测，尽量不给「测量→按下」之间留窗口。
+    const sv = await probeSendButton();
+    // 第 1 次跳过 mouseMoved：那条命令的 ACK 在渲染器不产帧时能卡 5 秒（本调用点实测
+    // 5 次里 3 次卡 5016 / 5129 / 5022ms，而全仓库其它 70 处点击都在 230ms 内），
+    // 而坐标恰恰是在卡顿**之前**测的 —— 卡完再按下就可能落在已经失效的位置上。
+    // 第 2 次起换回带悬停的路径，并在按下之前重新测量一次坐标（remeasure）：
+    // 两条路径都试过才认失败，避免「skipMove 在这个按钮上不成立」反而把成功变成失败。
+    await cdpMouseClick('automation:sendPhrase', sv.x, sv.y, { textLen: text.length, button: sv }, attempt === 1
+      ? { skipMove: true }
+      : { remeasure: async () => { const f = await probeSendButton(); return { x: f.x, y: f.y }; } });
+
+    // 点击后立刻回看草稿：被受理 → executeSend 已经 clear-draft；被静默吞掉 → 原样留着。
+    let after = null;
+    const verifyDeadline = Date.now() + 2000;
+    do {
+      if (record.isCancelled && record.isCancelled()) throw new Error('任务已停止');
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      after = await readDraft();
+    } while (!draftConsumed(after) && Date.now() < verifyDeadline);
+    log('[quick-phrase-diagnostics] composer:click-verify ' + JSON.stringify({
+      attempt, skipMove: attempt === 1, x: Math.round(sv.x), y: Math.round(sv.y),
+      typedLen, preLen: pre ? pre.len : null, afterLen: after ? after.len : null,
+    }));
+    // 探针本身读不到编辑器 → 不敢下结论，沿用老行为交给回执轮询，绝不冒重发风险。
+    if (!after) break;
+    if (draftConsumed(after)) { swallowedLen = null; break; }
+    swallowedLen = after.len;
   }
-  if (Date.now() >= sendDeadline) throw new Error('等待发送按钮可点击超时（5 秒），未发送');
-  if (!sv || !sv.ok) throw new Error((sv && sv.error) || '未找到发送按钮');
-  if (record.guard) await record.guard();
-  await cdpMouseClick('automation:sendPhrase', sv.x, sv.y, { textLen: text.length, button: sv });
+  if (swallowedLen !== null) {
+    // 试满次数之后草稿仍原样留着 ⇒ 按 renderer 的语义这几次点击都**没有被受理** ⇒ 确定没发出去。
+    // 打 notSent 而不是 maybeSent：核验台账会写成「定时任务没有发出去 / 要补发」，
+    // 而不是那句既不敢重发、又要用户自己去开会话核对的「结果不确定」。
+    // 这里也**不**自动补发 —— 判定权交回调度侧，避免任何双发风险。
+    // 顺带把 204 字还给用户：草稿仍在，任务重排后走的是同一段输入链路。
+    throw Object.assign(new Error('点击发送未生效（内容仍留在输入框，已按免悬停 / 带悬停两条路径重试 ' + SEND_CLICK_ATTEMPTS + ' 次），确认未发出'), { notSent: true });
+  }
   const result = { sent: true, textLen: text.length, itemCount: allItems.length, imagesRestored, imagesFailed, blocksRestored, blocksFailed };
   log('[quick-phrase-diagnostics] composer:finish ' + JSON.stringify({ ok: true, result: { sent: result.sent, textLen: result.textLen, itemCount: result.itemCount } }));
   return result;
