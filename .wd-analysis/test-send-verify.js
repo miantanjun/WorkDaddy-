@@ -128,6 +128,8 @@ function makeFakeDocument(opts = {}) {
 const draftFnFactory = new Function(sliceFn(SRC, 'composerDraftExpr') + '\nreturn composerDraftExpr;');
 const buildDraftExpr = draftFnFactory();
 const consumedFn = new Function(sliceFn(SRC, 'composerDraftConsumed') + '\nreturn composerDraftConsumed;')();
+// Node 侧的 hash 实现（与 renderer 模板里内联的那段必须同源）—— 两边交叉比对用
+const nodeHash = new Function(sliceFn(SRC, 'fnv1a32') + '\n' + sliceFn(SRC, 'composerDraftHash') + '\nreturn composerDraftHash;')();
 
 function runDraftExpr(opts) {
   const { document: doc } = makeFakeDocument(opts);
@@ -135,29 +137,55 @@ function runDraftExpr(opts) {
   const fn = new Function('document', 'return ' + expr + ';');
   return fn(doc);
 }
+/** 只保留 ok/len/hasBlocks（hash 单独断言，免得每个用例都要带上） */
+function draftShape(opts) {
+  const r = runDraftExpr(opts);
+  const out = { ok: r.ok, len: r.len, hasBlocks: r.hasBlocks };
+  if (r.error) out.error = r.error;
+  return out;
+}
 
 /* ============================ A 段：真跑探针 ============================ */
 console.log('== A 组 composerDraftExpr（真执行注入表达式 + 假 DOM） ==');
-eq('A1 空编辑器（只有占位符）读成 0 字', runDraftExpr({ placeholder: '今天帮你做些什么？' }), { ok: true, len: 0, hasBlocks: false });
-eq('A2 真文字长度准确（25 字）', runDraftExpr({ text: 'WBS-PROBE-0918-abcdefghij' }), { ok: true, len: 25, hasBlocks: false });
-eq('A3 占位符不计入长度', runDraftExpr({ text: 'hello', placeholder: '今天帮你做些什么？' }),
+eq('A1 空编辑器（只有占位符）读成 0 字', draftShape({ placeholder: '今天帮你做些什么？' }), { ok: true, len: 0, hasBlocks: false });
+eq('A2 真文字长度准确（25 字）', draftShape({ text: 'WBS-PROBE-0918-abcdefghij' }), { ok: true, len: 25, hasBlocks: false });
+eq('A3 占位符不计入长度', draftShape({ text: 'hello', placeholder: '今天帮你做些什么？' }),
   { ok: true, len: 5, hasBlocks: false });
-eq('A4 零宽字符被剔除（\\uFEFF\\u200B\\u00A0 都不算字）', runDraftExpr({ text: '\uFEFF\u200Babc\u00A0\u200B' }),
+eq('A4 零宽字符被剔除（\\uFEFF\\u200B\\u00A0 都不算字）', draftShape({ text: '\uFEFF\u200Babc\u00A0\u200B' }),
   { ok: true, len: 3, hasBlocks: false });
-eq('A5 首尾空白与换行 trim 掉', runDraftExpr({ text: '\n\n  204字的内容  \n' }), { ok: true, len: 7, hasBlocks: false });
-eq('A6 hasBlocks 反映 [data-contentblock] 存在', runDraftExpr({ text: 'x', hasBlocks: true }),
+eq('A5 首尾空白与换行 trim 掉', draftShape({ text: '\n\n  204字的内容  \n' }), { ok: true, len: 7, hasBlocks: false });
+eq('A6 hasBlocks 反映 [data-contentblock] 存在', draftShape({ text: 'x', hasBlocks: true }),
   { ok: true, len: 1, hasBlocks: true });
-eq('A7 没有 .voice-mic-wrap 也能退回全量 contenteditable 找到编辑器', runDraftExpr({ text: 'abcdef', withMic: false }),
+eq('A7 没有 .voice-mic-wrap 也能退回全量 contenteditable 找到编辑器', draftShape({ text: 'abcdef', withMic: false }),
   { ok: true, len: 6, hasBlocks: false });
-eq('A8 找不到编辑器时明确返回 ok:false（不伪造成 0）', runDraftExpr({ noEditor: true, withMic: false }),
+eq('A8 找不到编辑器时明确返回 ok:false（不伪造成 0）', draftShape({ noEditor: true, withMic: false }),
   { ok: false, error: 'no editor' });
 
 // 脱敏约定：探针只准暴露长度，不准把输入框里的字带回来（与 probeSessionReceipt 一致）。
 const probeKeys = Object.keys(runDraftExpr({ text: 'SECRET-CONTENT-42' })).sort();
-eq('A9 返回值只暴露 ok/len/hasBlocks（绝不回传文本）', probeKeys, ['hasBlocks', 'len', 'ok']);
-ok(/len: text\.trim\(\)\.length/.test(sliceFn(SRC, 'composerDraftExpr'))
+eq('A9 返回值只暴露 ok/len/hash/hasBlocks（绝不回传文本）', probeKeys, ['hasBlocks', 'hash', 'len', 'ok']);
+ok(/len: norm\.length/.test(sliceFn(SRC, 'composerDraftExpr'))
   && !/len:\s*text(?![.\w])/.test(sliceFn(SRC, 'composerDraftExpr')),
   'A10 探针源码里没有任何「原样回传文本」的写法');
+
+// hash 是「这段草稿是不是我上次留下的同一段」的唯一判据（v1.3.15），
+// renderer 模板内联了一段 FNV-1a，Node 侧另有一份 —— 这里用同一批字符串把两边钉死。
+{
+  const samples = ['', 'a', 'hello', '那当前内容更新至github和编译', 'x'.repeat(223), '\uFEFF\u200B abc \u00A0'];
+  let same = true, bad = '';
+  for (const s of samples) {
+    const got = runDraftExpr({ text: s }).hash;
+    const want = nodeHash(s);
+    if (got !== want) { same = false; bad = JSON.stringify(s).slice(0, 40) + ' got=' + got + ' want=' + want; break; }
+  }
+  ok(same, 'A11 renderer 模板里的 FNV-1a 与 Node 侧同源实现逐样本一致', bad);
+  eq('A12 占位符不进 hash（空草稿 hash = 空串的 hash）', runDraftExpr({ placeholder: '今天帮你做些什么？' }).hash, nodeHash(''));
+  eq('A13 零宽字符剥掉后 hash 与纯文本一致', runDraftExpr({ text: '\uFEFF\u200Babc\u00A0\u200B' }).hash, nodeHash('abc'));
+  ok(runDraftExpr({ text: 'a' }).hash !== runDraftExpr({ text: 'b' }).hash, 'A14 不同内容 hash 不同');
+  eq('A15 换行/空格差异不影响指纹（Slate 换行口径差异不该把自己挡在门外）',
+    runDraftExpr({ text: 'a\n\nb  c\t d' }).hash, nodeHash('abcd'));
+  ok(runDraftExpr({ text: '\n \n  ' }).hash === nodeHash(''), 'A16 纯空白草稿的指纹等于空串指纹（len 仍是空白长度）');
+}
 
 /* ==================== B 段：composerDraftConsumed 真跑 ==================== */
 console.log('== B 组 composerDraftConsumed（真跑判据函数） ==');
@@ -238,6 +266,26 @@ ok(/conversationId: op === 'session.send' \? detail\.conversationId : ''/.test(S
   'E16 sessionAction 把会话 id 透传给发送层（sessionMatches 守卫要用）');
 ok(/composer:verify/.test(sendSrc), 'E17 api 路径同样做「草稿被吃掉」核验');
 ok(/via: apiHandled \? 'api' : 'click'/.test(sendSrc), 'E18 结果里标出走的是哪条路径（可核对）');
+
+console.log('== F 组 requireEmpty 放宽（v1.3.15：只认「自己上次留下的同一段」） ==');
+ok(/composer:draft-present/.test(sendSrc), 'F1 输入框非空时把现场记下来（长度/散列是否吻合）');
+ok(/composer:draft-own-leftover/.test(sendSrc), 'F2 认出是自己残留时单独记一行');
+ok(/const wantHash = composerDraftHash\(text\);/.test(sendSrc)
+  && /ownLeftover = clrV\.len > 0 && clrV\.hash === wantHash/.test(sendSrc),
+  'F3 判定 = 非空 且 忽略空白的内容指纹一致（不会因换行差异把自己挡在门外）');
+ok(/if \(record\.requireEmpty && !ownLeftover\) throw new Error\('会话输入框非空，未覆盖草稿、未发送'\)/.test(sendSrc),
+  'F4 不是自己的残留时仍按用户草稿保护、原样拒绝');
+ok(/function composerDraftHash\(input\)/.test(SRC) && /replace\(\/\\s\+\/g, ''\)/.test(SRC),
+  'F5 composerDraftHash 忽略空白（Slate 换行差异不该挡住自己）');
+ok(/hash: \(h >>> 0\)\.toString\(16\)/.test(sendSrc) && /0x811c9dc5/.test(sendSrc),
+  'F6 clearExpr / composerDraftExpr 都回传 FNV-1a 散列');
+ok(/function fnv1a32\(input\)/.test(SRC) && /function composerDraftHash\(input\)/.test(SRC),
+  'F7 Node 侧有同源的 fnv1a32 / composerDraftHash');
+{
+  const seg = sendSrc.slice(sendSrc.indexOf('composer:draft-present'), sendSrc.indexOf('composer:draft-present') + 420);
+  ok(!/[^n]text:/.test(seg) && !/draft:/.test(seg), 'F8 日志里只有长度/散列，不带草稿正文');
+  ok(seg.indexOf('ownLeftover') > 0, 'F9 日志里带上 ownLeftover 结论');
+}
 
 console.log('== D 组 与核验台账对齐 ==');ok(/run\.maybeSent = error && error\.maybeSent === true;/.test(SRC),
   'D1 run.maybeSent 仍只看 error.maybeSent（notSent 错误天然是 false）');

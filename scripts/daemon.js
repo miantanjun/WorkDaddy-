@@ -410,13 +410,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
 //        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
 //        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
-const DAEMON_VERSION = '1.3.14';
+const DAEMON_VERSION = '1.3.15';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.14-20260918-composer-api-send';
+const DAEMON_BUILD_ID = 'release-1.3.15-20260918-draft-leftover';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -9721,6 +9721,33 @@ async function clearComposerByCdp() {
  * 3) 找到发送按钮（操作栏最右圆形可点击元素，与 inject.js findSendButton 相同算法）并真实鼠标点击
  */
 /**
+ * FNV-1a 32 位。**只**用来判断「输入框里那段草稿是不是我上一次留下的同一段」，
+ * 因此只回传长度与散列，绝不把文本带出渲染进程（沿用脱敏约定）。
+ * ⚠️ renderer 侧 `composerDraftExpr` 的模板里内联了同一段算法，两边必须逐字一致 ——
+ *    `.wd-analysis/test-send-verify.js` 的 A 组会拿同一批字符串交叉比对，防止改一边忘另一边。
+ */
+function fnv1a32(input) {
+  const s = String(input == null ? '' : input);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
+/** 与 renderer 侧同口径：剥掉零宽字符与不换行空格 → 再去掉**所有空白** → 最后取 FNV-1a。
+ *
+ * 为什么忽略空白：只拿它判「这段草稿是不是我上次留下的同一段」。
+ * Slate 对多行文本的换行/缩进处理与 daemon 键入的那份字符串可能不完全逐字相同，
+ * 但对空白不敏感的指纹仍然要求**全部非空白字符逐字一致**（223 字量级，碰撞可忽略），
+ * 既不会因为一个换行差异就把自己挡在门外，也不会误伤用户真正在写的草稿。
+ */
+function composerDraftHash(input) {
+  return fnv1a32(String(input == null ? '' : input).replace(/[\uFEFF\u200B\u00A0]/g, '').replace(/\s+/g, ''));
+}
+
+/**
  * 读取 composer 里「真实草稿」的字符数（剔除 Slate 占位符与零宽字符）。
  * ⚠️ 只返回长度，不返回文本 —— 与 probeSessionReceipt 的脱敏约定一致。
  *
@@ -9749,7 +9776,12 @@ function composerDraftExpr() {
       var clone = ed.cloneNode(true);
       clone.querySelectorAll('[data-slate-placeholder="true"],[data-slate-zero-width]').forEach(function(node){ node.remove(); });
       var text = (clone.innerText || clone.textContent || '').replace(/[\\uFEFF\\u200B\\u00A0]/g, '');
-      return { ok: true, len: text.trim().length, hasBlocks: !!ed.querySelector('[data-contentblock]') };
+      var norm = text.trim();
+      // 指纹忽略空白（口径见 composerDraftHash 的注释）：只用来判「是不是我上次留下的同一段」。
+      var key = norm.replace(/[\\s]+/g, '');
+      var h = 0x811c9dc5;
+      for (var hi = 0; hi < key.length; hi++) { h ^= key.charCodeAt(hi); h = Math.imul(h, 0x01000193); }
+      return { ok: true, len: norm.length, hash: (h >>> 0).toString(16), hasBlocks: !!ed.querySelector('[data-contentblock]') };
     } catch (e) { return { ok: false, error: String(e) }; }
   })()`;
 }
@@ -9966,13 +9998,34 @@ async function sendStashToComposer(record) {
       // inspect a detached clone so the live editor and its selection stay intact.
       var clone = ed.cloneNode(true);
       clone.querySelectorAll('[data-slate-placeholder="true"],[data-slate-zero-width]').forEach(function(node){ node.remove(); });
-      return { ok: true, hasContent: ((clone.innerText || clone.textContent || '').replace(/[\\uFEFF\\u200B\\u00A0]/g, '').trim().length > 0) || !!ed.querySelector('[data-contentblock]') };
+      var content = (clone.innerText || clone.textContent || '').replace(/[\\uFEFF\\u200B\\u00A0]/g, '');
+      var norm = content.trim();
+      // len / hash 供「这段草稿是不是我上次留下的同一段」判断用（v1.3.15），只回传长度与散列；
+      // hash 忽略空白（口径与 composerDraftHash 一致）。
+      var key = norm.replace(/[\\s]+/g, '');
+      var h = 0x811c9dc5;
+      for (var hi = 0; hi < key.length; hi++) { h ^= key.charCodeAt(hi); h = Math.imul(h, 0x01000193); }
+      return { ok: true, len: norm.length, hash: (h >>> 0).toString(16), hasContent: norm.length > 0 || !!ed.querySelector('[data-contentblock]') };
     } catch (e) { return { ok: false, error: String(e) }; }
   })()`;
   const clr = await guardedSend('Runtime.evaluate', { expression: clearExpr, returnByValue: true });
   const clrV = clr.result && clr.result.value;
   if (!clrV || !clrV.ok) throw new Error((clrV && clrV.error) || '无法聚焦输入框');
-  if (record.requireEmpty && clrV.hasContent) throw new Error('会话输入框非空，未覆盖草稿、未发送');
+  // v1.3.15：输入框非空时不再一律拒绝。
+  // WorkBuddy 会把未发出的草稿**持久化**（renderer 的 draftStorageKey = cb-draft:会话id），
+  // 于是「上一次失败留下的那段文本」会在下次任务进来时原样躺在输入框里，被 requireEmpty 挡住 ——
+  // 2026-09-18 20:26 就是这么死的：会话输入框非空，未覆盖草稿、未发送，连发送都没走到。
+  // 判据：**忽略空白的内容指纹与散列都等于我这次要发的内容**，才认作「我自己的残留」，清掉重打；
+  // 不等就仍按「用户的草稿」保护、原样拒绝。只比对长度与散列，不回传文本。
+  if (clrV.hasContent) {
+    const wantHash = composerDraftHash(text);
+    const ownLeftover = clrV.len > 0 && clrV.hash === wantHash;
+    log('[quick-phrase-diagnostics] composer:draft-present ' + JSON.stringify({
+      requireEmpty: !!record.requireEmpty, len: clrV.len, hashMatch: clrV.hash === wantHash, ownLeftover,
+    }));
+    if (record.requireEmpty && !ownLeftover) throw new Error('会话输入框非空，未覆盖草稿、未发送');
+    if (ownLeftover) log('[quick-phrase-diagnostics] composer:draft-own-leftover ' + JSON.stringify({ len: clrV.len }));
+  }
   if (clrV.hasContent) {
     // 直接执行 renderer 编辑命令，不经过 macOS 原生菜单快捷键。
     // 旧 Cmd+A 把 Windows 的 65 当作 macOS 原生键码，会误弹“关于 WorkBuddy”并阻塞 CDP。
