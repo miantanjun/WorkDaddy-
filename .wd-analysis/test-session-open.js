@@ -140,13 +140,17 @@ function baseState(over) {
     loadMs: 1500,          // 点击后多久控制器挂上
     loadFinishIn: null,    // 开场就有一个 load 在飞，再过这么久落地
     cdpNull: false,        // runCdpExpression 返回 null（渲染进程卡住）
+    // ---- v1.3.13 侧栏收起态（18:05 那次 session.open 的失败形态）----
+    sidebarCollapsed: false, // true = #root>.teams-container 带 sidebar-collapsed，列表不存在
+    slotPresent: true,       // 标题栏左上槽是否存在（真机恒有）
+    expandIneffective: false, // 点「展开侧边栏」也不管用（模拟唤醒手段失效）
   }, over || {});
 }
 
 function createRenderer(state, clock) {
   let pending = null;
   if (state.loadFinishIn != null) pending = { at: clock.v + state.loadFinishIn, id: state.targetId };
-  const counter = { attempts: 0, effective: 0, swallowed: [], headerClicks: 0, evalError: null, perEval: [] };
+  const counter = { attempts: 0, effective: 0, swallowed: [], headerClicks: 0, evalError: null, perEval: [], expandClicks: 0 };
 
   const materialize = () => {
     if (pending && clock.v >= pending.at) {
@@ -193,12 +197,42 @@ function createRenderer(state, clock) {
     querySelectorAll: (sel) => (sel === '.collapsible-section-header' ? headerNodes : []),
     querySelector: (sel) => (sel === '.conversation-list-content' ? content : null),
   };
+  /* ---- v1.3.13 侧栏收起态：标题栏左上槽 #workbuddy-titlebar-left-slot ----
+   * 真机实测：收起态那一槽是「展开侧边栏 / 新建任务」，展开态是「收起侧边栏 / 搜索 / 筛选」。
+   * 点「展开侧边栏」后 .conversation-list 真的挂出来（实测 16 行）—— 这里照此建模。 */
+  const makeBtn = (aria, track, onClick) => ({
+    className: 'wb-button wb-button--ghost wb-button--medium wb-button--icon-only',
+    tagName: 'BUTTON',
+    getAttribute: (k) => (k === 'aria-label' ? aria : (k === 'data-track-id' ? track : null)),
+    click: onClick,
+  });
+  const expandBtn = makeBtn('展开侧边栏', '', () => {
+    counter.expandClicks += 1;
+    if (!state.expandIneffective) { state.sidebarCollapsed = false; state.list = true; state.hit = true; state.rows = state.rows || 15; }
+  });
+  // ⚠️ 展开态那一槽的第一枚是「收起侧边栏」：任何「槽里第一枚非新建任务的按钮」式兜底都会**点反**（真实踩过）
+  const collapseBtn = makeBtn('收起侧边栏', '', () => {});
+  const searchBtn = makeBtn('搜索', 'conversation_list_search', () => {});
+  const filterBtn = makeBtn('筛选', '', () => {});
+  const newTaskBtn = makeBtn('新建任务', 'agent_new_task_button_clicked', () => {});
+  const slot = {
+    querySelectorAll: (sel) => (sel === 'button'
+      ? (state.sidebarCollapsed ? [expandBtn, newTaskBtn] : [collapseBtn, searchBtn, filterBtn])
+      : []),
+  };
+  const teamsNode = { className: 'teams-container sidebar-collapsed' };
   const doc = {
-    querySelectorAll: (sel) => (sel === '[data-conversation-id]' ? { length: state.rows } : { length: 0 }),
+    querySelectorAll: (sel) => {
+      if (sel === '[data-conversation-id]') return { length: state.rows };
+      if (sel === '.conversation-list') return { length: state.list ? 1 : 0 };
+      return { length: 0 };
+    },
     querySelector(sel) {
       if (sel === '.conversation-list') return state.list ? list : null;
       if (sel.indexOf('data-conversation-id=') >= 0) return state.hit ? hit : null;
       if (sel === '.conversation-list-content') return content;
+      if (sel === '#workbuddy-titlebar-left-slot') return state.slotPresent ? slot : null;
+      if (sel === '.teams-container.sidebar-collapsed') return state.sidebarCollapsed ? teamsNode : null;
       return null;
     },
   };
@@ -376,6 +410,57 @@ const GATE = (e) => e.gate;
       }), { timeoutMs: 1 });
       ok(o.elapsed < 2000, 'S41 旧实现 timeoutMs=1 → 只跑 1 轮就退（钳制是真的新增）', 'elapsed=' + o.elapsed);
     }
+  }
+
+  /* ---------- S44 侧栏收起态（18:05 那次 session.open 的失败形态）----------
+   * 真因：WorkBuddy 把「侧栏是否展开」持久化在 localStorage 的 agent-ui-sidebar-expanded；
+   * 为 false 时切号 reload 之后 #root>.teams-container 带 sidebar-collapsed，
+   * .conversation-sidebar 成了宽 0 / 0 子节点的空壳 ⇒ .conversation-list 根本不存在 ⇒ reason=no-list。
+   * 加上「no-list 被当成 no-row 滚动、84 轮 ≈34s 就 break」，任务第一步必死。这里把两件事都钉住。 */
+  {
+    const mk = () => baseState({
+      sidebarCollapsed: true, list: false, hit: false, rows: 0,
+      selected: null, routeId: null, controllers: [], loadMs: 1500,
+    });
+    const n = await runImpl(NEWFN, mk(), { timeoutMs: 90000 });
+    eq('S44 收起态：点了 1 次「展开侧边栏」', n.expandClicks, 1);
+    ok(n.result === true, 'S45 展开后列表真的挂出来 → 会话打开成功');
+    ok(n.attempts === 1 && n.effective === 1, 'S46 展开之后照常走「点会话行」，1 次生效', 'attempts=' + n.attempts);
+    ok(n.logs.some((l) => /会话侧栏处于收起态，已点「展开侧边栏」/.test(l)), 'S47 唤醒留了可核对日志');
+    ok(n.logs.some((l) => /侧栏唤醒结果 .*"listExists":1/.test(l)), 'S48 唤醒结果日志带 listExists/rows');
+  }
+
+  /* ---------- S49 展开态：一次都不许点（守住「对成功路径零影响」）---------- */
+  {
+    const n = await runImpl(NEWFN, baseState({ selected: TARGET, routeId: TARGET, controllers: [TARGET] }), { timeoutMs: 90000 });
+    ok(n.result === true, 'S49 展开态：照旧一次成功');
+    eq('S50 展开态：展开按钮一次都没点', n.expandClicks, 0);
+    ok(!n.logs.some((l) => /会话侧栏处于收起态/.test(l)), 'S51 展开态：连唤醒日志都不写（严格 no-op）');
+  }
+
+  /* ---------- S52 唤醒手段失效：有节制重试，绝不无限狂点 ---------- */
+  {
+    const n = await runImpl(NEWFN, baseState({
+      sidebarCollapsed: true, list: false, hit: false, rows: 0,
+      selected: null, routeId: null, controllers: [], expandIneffective: true,
+    }), { timeoutMs: 30000 });
+    ok(n.result === false, 'S52 唤醒无效 + 侧栏一直不出现 → false');
+    ok(n.expandClicks >= 2 && n.expandClicks <= 3, 'S53 唤醒有节制重试（≤3 次），不会无限狂点', 'expandClicks=' + n.expandClicks);
+    ok(n.attempts === 0, 'S54 全程没乱点会话行（没列表可点）');
+    ok(n.logs.some((l) => /第 \d+ 次尝试唤醒/.test(l)), 'S55 重试唤醒有日志');
+  }
+
+  /* ---------- S56 no-list 不再被 34s 早退截断（旧实现滚 84 轮就 break）---------- */
+  {
+    const n = await runImpl(NEWFN, baseState({
+      list: false, hit: false, rows: 0, slotPresent: false,
+      selected: null, routeId: null, controllers: [],
+    }), { timeoutMs: 90000 });
+    ok(n.result === false, 'S56 侧栏始终不存在 → false');
+    ok(n.elapsed >= 80000, 'S57 no-list 用满 90s 预算（旧实现 ≈34s 就 break，白丢 56s）', 'elapsed=' + n.elapsed);
+    ok(n.attempts === 0, 'S58 全程零次点会话行');
+    ok(n.logs.some((l) => /无列表轮次=\d+/.test(l)), 'S59 失败日志带「无列表轮次」');
+    ok(n.logs.some((l) => /会话侧栏未挂载，滚动无意义/.test(l)), 'S60 no-list 期间有心跳日志（不再是 34 秒空白）');
   }
 
   /* ---------- S42 所有注入表达式都可被 new Function 解析 ---------- */

@@ -410,13 +410,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
 //        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
 //        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
-const DAEMON_VERSION = '1.3.12';
+const DAEMON_VERSION = '1.3.13';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.12-20260918-send-verify';
+const DAEMON_BUILD_ID = 'release-1.3.13-20260918-sidebar-wake';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -7140,7 +7140,6 @@ async function openConversationById(sessionId, timeoutMs) {
   const id = String(sessionId || '').trim();
   if (!id || !cdp.connected) return false;
   const budgetMs = Math.min(300000, Math.max(3000, Number(timeoutMs) || 15000));
-  const deadline = Date.now() + budgetMs;
   const startedAt = Date.now();
   // 候选按「实测有效度」排序：_card_ 是唯一在半就绪状态下被证明有效的那个。
   const picks = [
@@ -7158,6 +7157,77 @@ async function openConversationById(sessionId, timeoutMs) {
   let diag = null;         // 最后一次观测到的现场，失败时一次性写进日志
   let waitOnly = false;    // 本轮只观测、不点击（目标会话正在加载时点了也会被吞）
   const LOAD_WAIT_MS = 20000; // 判定「加载中」后先等这么久，仍无进展才退回点击
+  let noListRounds = 0;       // 「整个侧栏没挂载」的轮次（与「行不在」分开计）
+  let sidebarWakeTries = 0;   // 唤醒尝试次数（含开头那次）
+  let sidebarWakeAt = 0;      // 上次唤醒时刻（节流）
+  let lastNoListBeatAt = 0;   // no-list 心跳节流
+
+  /* ---------------- 会话侧栏唤醒（2026-09-18 v1.3.13） ----------------
+   * 现场：定时发送 18:05 卡在第一步 session.open，`reason=no-list`、`行数=0`、
+   * `controllers=[]`、`selected=?`，滚动 84 轮 ≈34s 后放弃，一条都没发出去。
+   *
+   * 真因：**WorkBuddy 把「会话侧栏是否展开」持久化在 localStorage 的
+   * `agent-ui-sidebar-expanded`**。一旦它是 false，切号 reload 之后
+   * `#root > .teams-container` 会带 `sidebar-collapsed`，`.conversation-sidebar`
+   * 变成「宽 0 / 0 子节点」的空壳 ⇒ **`.conversation-list` 根本不存在**，
+   * 而本函数的前置就是「找 .conversation-list」⇒ 永远只能拿到 no-list。
+   *
+   * 收起态下标题栏左上槽 `#workbuddy-titlebar-left-slot` 会换成
+   * 「展开侧边栏 / 新建任务」，展开态则是「收起侧边栏 / 搜索 / 筛选」——
+   * **「展开侧边栏」这枚按钮存在本身就是最可靠的收起信号。**
+   *
+   * ⚠️ 两点铁律（都实测踩过）：
+   *   1. 选按钮**只认 aria-label**（i18n key = `taskArtifacts.expandSidebar`，中英分别是
+   *      「展开侧边栏」/「Expand sidebar」）。**绝不能**退化成「槽里第一枚非新建任务的按钮」——
+   *      展开态那一槽第一枚是「收起侧边栏」，那样会**点反**（第一次验证就这么点反了）。
+   *   2. 点击走表达式内的 `el.click()`（与 `card.click()` 同一条路），不用坐标点击：
+   *      省掉 mouseMoved 那 ~5 秒 ACK 卡顿，也不需要关心窗口是否可见。
+   *
+   * 安全约束：**DOM 不呈收起态时严格 no-op**（不点、不记日志、不等待），
+   * 所以对现有成功路径零影响；唤醒失败也绝不阻断，下面还有完整的预算与心跳。
+   */
+  const sidebarProbe = (allowClick) => `(function(){
+    try {
+      var out = { ok: true, collapsed: false, clicked: false, listExists: 0, rows: 0 };
+      var expandLabel = '\\u5c55\\u5f00\\u4fa7\\u8fb9\\u680f';
+      var slot = document.querySelector('#workbuddy-titlebar-left-slot');
+      var collapsed = !!document.querySelector('.teams-container.sidebar-collapsed');
+      var btn = null;
+      if (slot) {
+        var bs = slot.querySelectorAll('button');
+        for (var i = 0; i < bs.length; i++) {
+          var aria = bs[i].getAttribute('aria-label') || '';
+          if (aria.indexOf(expandLabel) >= 0 || /expand sidebar/i.test(aria)) { btn = bs[i]; break; }
+        }
+      }
+      out.collapsed = collapsed || !!btn;
+      if (btn && ${allowClick ? 'true' : 'false'}) { try { btn.click(); out.clicked = true; } catch (_) {} }
+      out.listExists = document.querySelectorAll('.conversation-list').length;
+      out.rows = document.querySelectorAll('[data-conversation-id]').length;
+      return out;
+    } catch (e) { return { ok: false, error: String(e) }; }
+  })()`;
+  try {
+    const first = await runCdpExpression(sidebarProbe(true), { awaitPromise: false });
+    if (first && first.collapsed) {
+      sidebarWakeTries = 1;
+      sidebarWakeAt = Date.now();
+      log('[session-open] 会话侧栏处于收起态，已点「展开侧边栏」' + JSON.stringify({ clicked: !!first.clicked, listExists: first.listExists, rows: first.rows }));
+      // 收起态下 .conversation-list 不存在；展开后要等一两帧才挂出来。这里只**观测**，
+      // 不再点第二下 —— 万一展开已经生效只是 DOM 慢一拍，再点一下会把侧栏又收回去。
+      const wakeUntil = Date.now() + 5000;
+      let now = first;
+      while (now && now.listExists === 0 && Date.now() < wakeUntil) {
+        await sleep(300);
+        now = await runCdpExpression(sidebarProbe(false), { awaitPromise: false }).catch(() => null);
+      }
+      log('[session-open] 侧栏唤醒结果 ' + JSON.stringify({ listExists: now && now.listExists, rows: now && now.rows, elapsedMs: Date.now() - startedAt }));
+    }
+  } catch (_) { /* 唤醒只是加速手段：失败就走下面的老流程，绝不阻断 */ }
+
+  // 唤醒耗时不计入「找行」预算：调用方给的是「打开会话」的总预算，
+  // 唤醒是这个前置动作本身的时间，不该让找行的窗口跟着缩水。
+  const deadline = Date.now() + budgetMs;
   while (Date.now() < deadline) {
     tries += 1;
     const expr =
@@ -7221,7 +7291,12 @@ async function openConversationById(sessionId, timeoutMs) {
         await sleep(300);
         const live = await readLiveModel().catch(() => null);
         if (live && live.ok) {
-          if (String(live.conversationId || '') === id) return true;
+          if (String(live.conversationId || '') === id) {
+            // 这条路径以前**不打日志**，于是 `[session-open] 已打开` 在全量日志里出现 0 次 ——
+            // 打没打开、花了多久、走的哪条路径全都查不出来（2026-09-18 排查时正卡在这）。
+            log('[session-open] 已打开 id=' + id + ' 用时 ' + (Date.now() - startedAt) + 'ms 点击=' + clicks + ' 轮次=' + tries + ' 方式=live');
+            return true;
+          }
           reacted = true; // 有会话被打开了、但不是目标 —— 回到首选候选重新点目标
         }
       }
@@ -7234,6 +7309,29 @@ async function openConversationById(sessionId, timeoutMs) {
       continue;
     }
     reason = (res && res.reason) || 'no-result';
+    if (reason === 'no-list') {
+      // 「整个会话侧栏都没挂载」和「列表在、只是没看到那一行」是两码事：
+      // 前者去滚动一个不存在的列表毫无意义，而旧实现把两者塞进同一个滚动分支
+      // （scrollTop += 480，> 40000 就 break）⇒ 84 轮 ≈34s 就放弃，
+      // **把调用方给的 90s 预算丢掉一大半**（18:05 的 `用时=34027ms` 就是这么来的）。
+      // ⇒ no-list 改为「有节制地再唤醒 + 纯等待」，用满预算。
+      // 唤醒用 DOM 信号门控（btn 只会在收起态出现），所以成功展开后不会误点第二下。
+      noListRounds += 1;
+      if (sidebarWakeTries < 3 && Date.now() - sidebarWakeAt >= 2500) {
+        sidebarWakeTries += 1;
+        sidebarWakeAt = Date.now();
+        const again = await runCdpExpression(sidebarProbe(true), { awaitPromise: false }).catch(() => null);
+        log('[session-open] 侧栏仍未挂载，第 ' + sidebarWakeTries + ' 次尝试唤醒' +
+          JSON.stringify({ clicked: !!(again && again.clicked), listExists: again && again.listExists }));
+      }
+      if (Date.now() - lastNoListBeatAt >= 8000) {
+        lastNoListBeatAt = Date.now();
+        log('[session-open] 等待中 id=' + id + ' 已 ' + Math.round((Date.now() - startedAt) / 1000) +
+          's（会话侧栏未挂载，滚动无意义，正在等待/唤醒）行数=0');
+      }
+      await sleep(600);
+      continue;
+    }
     scrollTop += 480;
     if (scrollTop > 40000) break;
     await sleep(400);
@@ -7248,7 +7346,9 @@ async function openConversationById(sessionId, timeoutMs) {
     ' selected=' + String((diag && diag.selected) || '?').slice(0, 8) +
     ' controllers=[' + String((diag && diag.controllers) || '') + ']' +
     ' 行数=' + String((diag && diag.rows) != null ? diag.rows : '?') +
-    ' 点到=' + String((diag && diag.clicked) || '-'));
+    ' 点到=' + String((diag && diag.clicked) || '-') +
+    ' 无列表轮次=' + noListRounds +
+    ' 唤醒=' + sidebarWakeTries);
   return false;
 }
 /**
