@@ -27,7 +27,7 @@ const SUITES = [
   ['test-archive-isolation.js', 63],
   ['test-session-open.js', 87],   // v1.3.9/1.3.10：session.open 迷你 renderer 仿真；v1.3.13 加侧栏收起态
   ['test-copy-manifest.js', 95],  // v1.3.11：空间扫描 → 复制排队清单 → 排序
-  ['test-send-verify.js', 71],    // v1.3.12 草稿核验 / v1.3.14 composerSendExpr / v1.3.15 requireEmpty 放宽
+  ['test-send-verify.js', 81],    // v1.3.12 草稿核验 / 1.3.14 composerSendExpr / 1.3.15 草稿残留 / 1.3.16 busy 落定
 ];
 
 const out = [];

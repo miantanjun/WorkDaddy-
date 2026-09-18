@@ -75,6 +75,13 @@ function probeSessionReceipt() {
       complete:!!(last && (Object.prototype.hasOwnProperty.call(extra,'isRequestTerminal') ? extra.isRequestTerminal === true : last.complete === true)),
       cancelled:extra.isCancelled === true,
       error:!!(error && (error.error || error.hasError)),
+      // v1.3.16：把 busy 的构成拆开暴露。原先只有一个 busy（含 hydrating），
+      // 于是「历史还在 hydration」与「助手真的在回复」在日志里长得一样 ——
+      // 2026-09-18 20:43 的「目标会话正在运行」就分不清是哪一种。
+      // busy 本身保持原语义不变（waitAiIdle / receiptComplete 依赖它）。
+      hydrating:!!(session && session.isHydrating),
+      streaming:!!(state.streamingRequestId || state.streamingMessageId),
+      turnActive:!!(session && (session.isBusy || session.isRunActive || session.isTurnActive || session.isSending || session.isPending)),
       busy:!!(state.streamingRequestId || state.streamingMessageId || session && (session.isBusy || session.isRunActive || session.isTurnActive || session.isSending || session.isPending || session.isHydrating)),
     };
   } catch (_) { return null; }

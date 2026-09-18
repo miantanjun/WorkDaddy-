@@ -287,6 +287,22 @@ ok(/function fnv1a32\(input\)/.test(SRC) && /function composerDraftHash\(input\)
   ok(seg.indexOf('ownLeftover') > 0, 'F9 日志里带上 ownLeftover 结论');
 }
 
+console.log('== G 组 session.send 的 busy 闸门（v1.3.16：等会话落定，别一刀切） ==');
+{
+  const RT = norm(fs.readFileSync('D:/WorkDaddy/scripts/automation-runtime.js', 'utf8'));
+  ok(/hydrating:!!\(session && session\.isHydrating\)/.test(RT), 'G1 探针单独暴露 hydrating');
+  ok(/streaming:!!\(state\.streamingRequestId \|\| state\.streamingMessageId\)/.test(RT), 'G2 探针单独暴露 streaming');
+  ok(/turnActive:!!\(session && \(session\.isBusy/.test(RT), 'G3 探针单独暴露 turnActive');
+  ok(/busy:!!\(state\.streamingRequestId[\s\S]{0,240}session\.isHydrating\)/.test(RT),
+    'G4 busy 语义保持不变（waitAiIdle / receiptComplete 依赖它）');
+  ok(!/^\s*if \(before\.busy\) throw new Error\('目标会话正在运行'\);$/m.test(SRC), 'G5 一刀切 throw 已移除');
+  ok(/snap\.busy && !snap\.hydrating/.test(SRC), 'G6 只有「忙且不是 hydration」才算真的在跑');
+  ok(/session\.send: 等待目标会话落定/.test(SRC), 'G7 等待期记日志（含 busy/hydrating/streaming/turnActive）');
+  ok(/session\.send: 等会话状态可读/.test(SRC), 'G8 readSession 短暂 null 会重试，而不是当场判死');
+  ok(/const settleUntil = Date\.now\(\) \+ 30000;/.test(SRC), 'G9 落定等待上限 30s');
+  ok(/const untilReadable = Date\.now\(\) \+ 15000;/.test(SRC), 'G10 等会话状态可读上限 15s');
+}
+
 console.log('== D 组 与核验台账对齐 ==');ok(/run\.maybeSent = error && error\.maybeSent === true;/.test(SRC),
   'D1 run.maybeSent 仍只看 error.maybeSent（notSent 错误天然是 false）');
 ok(/maybeSent === true \? 'unknown' : 'not-sent'/.test(LSRC), 'D2 台账把 maybeSent=false 判成 not-sent');

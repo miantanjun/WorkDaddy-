@@ -410,13 +410,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
 //        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
 //        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
-const DAEMON_VERSION = '1.3.15';
+const DAEMON_VERSION = '1.3.16';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.15-20260918-draft-leftover';
+const DAEMON_BUILD_ID = 'release-1.3.16-20260918-busy-settle';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -4802,10 +4802,60 @@ function startAutomationRun(task, event = null) {
         if (!setResult || setResult.ok !== true) appendRunLog('session.create:setModel 失败，已按当前模型继续 ' + String(setResult && setResult.error || wantedModel));
       }
     }
-    const before = await readSession();
+    let before = await readSession();
     if (op === 'session.send') {
+      // v1.3.16（前置）：切号/reload 之后 readSession() 会**短暂返回 null** ——
+      // 干跑实测：触发后 217ms~2276ms 之间一直是 null（页面正在重载，控制器还没挂上），
+      // 2542ms 才读到 882c357a。原来这里当场抛「只能发送到已选中的指定会话」，
+      // 等于把「还没加载好」当成「选错了会话」。改为先给它最多 15s 把状态读出来。
+      if (!before || before.conversationId !== detail.conversationId) {
+        const untilReadable = Date.now() + 15000;
+        let readRounds = 0;
+        while (Date.now() < untilReadable) {
+          if (isCancelled()) throw new Error('任务已停止');
+          readRounds += 1;
+          await cancellableWait(300, isCancelled);
+          before = await readSession();
+          if (before && before.conversationId === detail.conversationId) break;
+        }
+        if (readRounds > 0) {
+          appendRunLog('session.send: 等会话状态可读 ' + JSON.stringify({ rounds: readRounds, readable: !!(before && before.conversationId === detail.conversationId) }));
+        }
+      }
       if (!detail.conversationId || !before || before.conversationId !== detail.conversationId) throw new Error('只能发送到已选中的指定会话');
-      if (before.busy) throw new Error('目标会话正在运行');
+      // v1.3.16：这里原来是「`if (before.busy) throw` —— 当场放弃、不留余地」。
+      // 但 probeSessionReceipt 的 busy 里**含 `session.isHydrating`**（历史正在加载）。
+      // 刚 open 完一个大会话（882c357a 有 212MB）时历史还在 hydration，于是 open 成功后
+      // 不到 1 秒就被判成「目标会话正在运行」直接失败 —— 2026-09-18 20:43 就是这么死的
+      // （`已打开 … 2273ms` 之后 0.8s 就 `目标会话正在运行`，字都没开始填）。
+      // 干跑实测坐实：切到 186 打开会话后 busy=true 但 streaming=false turnActive=false
+      // —— **纯粹是 hydrating**。改为「有界限地等会话落定」，hydration 单独看（它不算「在跑」）。
+      {
+        const settleUntil = Date.now() + 30000;
+        let snap = before;
+        let rounds = 0;
+        while (Date.now() < settleUntil) {
+          if (isCancelled()) throw new Error('任务已停止');
+          if (!snap.busy) break;
+          rounds += 1;
+          if (rounds % 10 === 1) {
+            appendRunLog('session.send: 等待目标会话落定 ' + JSON.stringify({
+              busy: snap.busy, hydrating: !!snap.hydrating, streaming: !!snap.streaming,
+              turnActive: !!snap.turnActive, rounds,
+            }));
+          }
+          await cancellableWait(300, isCancelled);
+          const next = await readSession();
+          if (!next || next.conversationId !== detail.conversationId) throw new Error('会话已变化，停止发送');
+          snap = next;
+        }
+        if (snap.busy && !snap.hydrating) {
+          throw new Error('目标会话正在运行' + JSON.stringify({
+            busy: snap.busy, hydrating: !!snap.hydrating, streaming: !!snap.streaming, turnActive: !!snap.turnActive, waitedMs: 30000,
+          }));
+        }
+        if (rounds > 0) appendRunLog('session.send: 会话已落定 ' + JSON.stringify({ rounds, hydrating: !!snap.hydrating, busy: !!snap.busy }));
+      }
       // The common sender checks the exact editor immediately before typing.
       // New Task surface discovery cannot identify a conversation composer.
     }
