@@ -214,8 +214,32 @@ ok(at(mouseSrc, 'options.remeasure') > at(mouseSrc, 'if (!options.skipMove) {'),
   'C13 remeasure 只在带悬停的那条路径里生效（skipMove 时不该等着重测）');
 ok(/x = fresh\.x; y = fresh\.y;/.test(mouseSrc), 'C14 坐标重测真的换了 x/y（不是只记日志）');
 
-console.log('== D 组 与核验台账对齐 ==');
-ok(/run\.maybeSent = error && error\.maybeSent === true;/.test(SRC),
+console.log('== E 组 composerSendExpr（v1.3.14：绕开按钮、直接 api.send） ==');
+const apiStart = SRC.indexOf('const composerSendExpr =');
+const apiSrc = apiStart < 0 ? '' : SRC.slice(apiStart, SRC.indexOf('`;', apiStart + 40) + 2);
+ok(/store\.api\.send\(\)/.test(apiSrc), 'E1 调的是 store.api.send()（与按钮走同一个 executeSend）');
+ok(/capabilities/.test(apiSrc) && /sendWired/.test(apiSrc), 'E2 读 capabilities.sendWired（onSend 到底接没接上）');
+ok(/'no-store'/.test(apiSrc), 'E3 找不到 store 时明确返回 no-store（供回落）');
+ok(/__reactFiber\$|__reactInternalInstance\$/.test(apiSrc), 'E4 通过 React fiber 找 store');
+ok(/memoizedValue/.test(apiSrc) && /firstContext/.test(apiSrc), 'E5 走 context 依赖链（真机实测在 up=22 的 firstContext#2 命中）');
+ok(/Promise\.race/.test(apiSrc), 'E6 页面内给 send() 的 await 封顶（不让 CDP 无限等）');
+ok(/gates\.ready =/.test(apiSrc) && /phase !== 'sending'/.test(apiSrc) && /hostDisabled/.test(apiSrc),
+  'E7 ready 判定含 phase / hostDisabled / sendWired / canSend');
+ok(/canSubmit/.test(apiSrc), 'E8 ready 里含 ui-docs-viewer 同款的 canSubmit 项');
+ok(/sessionMatches/.test(apiSrc) && /!want \|\| gates\.session === want/.test(apiSrc), 'E9 会话不匹配就不发（防发错会话）');
+ok(/composer:api-send/.test(sendSrc) && /composer:api-fallback/.test(sendSrc), 'E10 api 路径与回落都留日志');
+ok(/composer:store-gate/.test(sendSrc), 'E11 闸门没开时把现场记下来（下次失败可自证）');
+ok(/if \(!apiHandled\) \{/.test(sendSrc), 'E12 只有 api 没成功时才走点击路径');
+ok(/apiFallbackReason = 'api:'/.test(sendSrc), 'E13 接口明确拒绝且草稿原样 → 才回落（不会双发）');
+ok(sendSrc.indexOf('composer:api-fallback') > sendSrc.indexOf('composer:api-send'), 'E14 回落日志在 api 尝试之后');
+ok(/awaitPromise: true/.test(sendSrc) && /composerSendExpr\(record\.conversationId, true\)/.test(sendSrc),
+  'E15 调用时带目标会话 id 且等 promise');
+ok(/conversationId: op === 'session.send' \? detail\.conversationId : ''/.test(SRC),
+  'E16 sessionAction 把会话 id 透传给发送层（sessionMatches 守卫要用）');
+ok(/composer:verify/.test(sendSrc), 'E17 api 路径同样做「草稿被吃掉」核验');
+ok(/via: apiHandled \? 'api' : 'click'/.test(sendSrc), 'E18 结果里标出走的是哪条路径（可核对）');
+
+console.log('== D 组 与核验台账对齐 ==');ok(/run\.maybeSent = error && error\.maybeSent === true;/.test(SRC),
   'D1 run.maybeSent 仍只看 error.maybeSent（notSent 错误天然是 false）');
 ok(/maybeSent === true \? 'unknown' : 'not-sent'/.test(LSRC), 'D2 台账把 maybeSent=false 判成 not-sent');
 ok(/'not-sent': '定时任务没有发出去'/.test(LSRC) && /要补发/.test(LSRC),

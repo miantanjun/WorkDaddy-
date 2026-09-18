@@ -410,13 +410,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
 //        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
 //        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
-const DAEMON_VERSION = '1.3.13';
+const DAEMON_VERSION = '1.3.14';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.13-20260918-sidebar-wake';
+const DAEMON_BUILD_ID = 'release-1.3.14-20260918-composer-api-send';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -4810,7 +4810,7 @@ function startAutomationRun(task, event = null) {
       // New Task surface discovery cannot identify a conversation composer.
     }
     if (isCancelled() || (currentAccount() || {}).uid !== accountUid) throw new Error('发送前账号或运行状态已变化');
-    await withInput(() => acSendPhrase(String(detail.message || ''), { requireEmpty: true, isCancelled, guard: async () => {
+    await withInput(() => acSendPhrase(String(detail.message || ''), { requireEmpty: true, isCancelled, conversationId: op === 'session.send' ? detail.conversationId : '', guard: async () => {
       if (isCancelled() || (currentAccount() || {}).uid !== accountUid) throw new Error('账号或运行状态已变化，停止发送');
       const selected = await readSession();
       if (op === 'session.send' ? !selected || selected.conversationId !== detail.conversationId : selected && (!before || selected.conversationId !== before.conversationId)) throw new Error('会话已变化，停止发送');
@@ -9775,6 +9775,99 @@ function composerDraftConsumed(after, typedLen) {
   return after.len < Math.max(1, Math.floor(typedLen / 2));
 }
 
+/**
+ * 「直接调 composer store 的 api.send()」表达式 —— v1.3.14 起的**首选发送路径**。
+ *
+ * 为什么要绕开点按钮（2026-09-18 19:34 的失败形态）：
+ *   SendButtonImpl 的真实闸门是 React 的 `semanticDisabled`
+ *   （`!hasContent || hasProcessing || hostDisabled || !!externalSendDisabled`
+ *    + `loading` / `phase` / `isStreaming`），而
+ *   **`buttonDisabled = hasCustomContent ? false : semanticDisabled`**
+ *   ⇒ DOM 上完全可以「看着可点、`handleClick` 一声不吭 return」。
+ *   19:34 那次就是铁证：3 次点击（第 1 次 skipMove、后 2 次带悬停）
+ *   `preLen` / `afterLen` 全是 223 —— 草稿一个字没少，三次全被吞。
+ *
+ * 而 store 这层状态是**可读**的（WorkBuddy 官方的 `window.__wbsWorkBuddyCompat.isComposerStore`
+ * 自己就按这个形状判定：`store.api.{clear,setBlocks,getDraft}` + `store.getSnapshot()`）：
+ *   · `capabilities.sendWired` —— onSend 有没有接上（`createInitialState` 里初值就是 **false**，
+ *     由 `setOnSend` 点亮）。为 false 时 `executeSend` 直接 `{ok:false,reason:'not-wired'}` 返回，
+ *     **不清草稿、什么都不发** —— 与「草稿原样留着」完全吻合。
+ *   · `capabilities.canSend` / `status.{phase,disabled,hostDisabled}` / `ui.editorContentEmpty`。
+ * 所以：**先等闸门全开，再调 `store.api.send()`**；返回的 `{ok,reason}` 一并带回来，失败可自证。
+ * `api.send()` 与按钮走的是同一个 `executeSend`，因此「草稿被吃掉」这条判据依旧成立。
+ *
+ * 找不到 store（WorkBuddy 换实现）时返回 `reason:'no-store'`，由调用方**回落**到原有的点击路径。
+ * 只回传长度/块数，**不回传草稿内容**（沿用脱敏约定）。
+ */
+const composerSendExpr = (conversationId, doSend) => `(async function(){
+  try {
+    var want = ${JSON.stringify(String(conversationId || ''))};
+    var doSend = ${doSend ? 'true' : 'false'};
+    function fiberOf(el){
+      if (!el) return null;
+      var ks = Object.keys(el);
+      for (var i = 0; i < ks.length; i++) {
+        if (ks[i].indexOf('__reactFiber$') === 0 || ks[i].indexOf('__reactInternalInstance$') === 0) return el[ks[i]];
+      }
+      return null;
+    }
+    function isStore(o){
+      try {
+        return !!o && typeof o === 'object' && typeof o.getSnapshot === 'function' &&
+          o.api && typeof o.api.getDraft === 'function' && typeof o.api.setBlocks === 'function' &&
+          typeof o.api.clear === 'function';
+      } catch (e) { return false; }
+    }
+    var ed = document.querySelector('.cr-input-box [contenteditable="true"]') || document.querySelector('[contenteditable="true"]');
+    var f = ed ? fiberOf(ed) : null;
+    if (!f) return { ok: false, reason: 'no-editor' };
+    var store = null, up = 0;
+    while (f && up < 90 && !store) {
+      up++;
+      if (isStore(f.memoizedProps)) { store = f.memoizedProps; break; }
+      var h = f.memoizedState, hi = 0;
+      while (h && hi < 40 && !store) { hi++; if (isStore(h.memoizedState)) { store = h.memoizedState; break; } h = h.next; }
+      if (store) break;
+      try {
+        var d = f.dependencies && f.dependencies.firstContext, ci = 0;
+        while (d && ci < 40 && !store) { ci++; if (isStore(d.memoizedValue)) { store = d.memoizedValue; break; } d = d.next; }
+      } catch (e) {}
+      f = f.return;
+    }
+    if (!store) return { ok: false, reason: 'no-store' };
+    var s = store.getSnapshot() || {};
+    var cap = s.capabilities || {}, st = s.status || {}, ui = s.ui || {}, dr = s.draft || {};
+    var gates = {
+      session: String(s.activeSessionId || ''),
+      sendWired: !!cap.sendWired,
+      canSend: !!cap.canSend,
+      phase: String(st.phase || ''),
+      hostDisabled: !!st.hostDisabled,
+      disabled: !!st.disabled,
+      editorContentEmpty: ui.editorContentEmpty === undefined ? null : !!ui.editorContentEmpty,
+      contentLength: ui.contentLength === undefined ? null : Number(ui.contentLength),
+      blocks: ((dr.content && dr.content.blocks) || []).length,
+      refs: (dr.references || []).length,
+      hasSend: !!(store.api && typeof store.api.send === 'function'),
+      up: up
+    };
+    gates.sessionMatches = !want || gates.session === want;
+    // canSubmit 就是 ui-docs-viewer 里 sendDisabled 计算式里的那一项：
+    // 有就读真值，没有（换版本）就退化成 null，不因此判不 ready。
+    gates.canSubmit = (store.api && typeof store.api.canSubmit === 'function') ? !!store.api.canSubmit() : null;
+    gates.ready = gates.sendWired && gates.canSend && gates.canSubmit !== false &&
+      gates.editorContentEmpty === false && gates.phase !== 'sending' && !gates.hostDisabled &&
+      gates.sessionMatches && gates.hasSend;
+    if (!doSend || !gates.ready) return { ok: gates.ready, sent: false, gates: gates };
+    // 在页面内给 await 封顶，避免 CDP 侧无限等
+    var res = await Promise.race([
+      store.api.send(),
+      new Promise(function(r){ setTimeout(function(){ r({ ok: null, reason: 'timeout' }); }, 8000); })
+    ]);
+    return { ok: true, sent: true, result: res, gates: gates };
+  } catch (e) { return { ok: false, reason: 'throw', error: String((e && e.message) || e) }; }
+})()`;
+
 async function sendStashToComposer(record) {
   if (!cdp.connected) throw new Error('CDP 未连接，无法发送');
   log('[quick-phrase-diagnostics] composer:start ' + JSON.stringify({ targetUrl: cdp.targetUrl, itemCount: record && record.content && Array.isArray(record.content.items) ? record.content.items.length : 0 }));
@@ -10104,48 +10197,97 @@ async function sendStashToComposer(record) {
   const typedLen = typed ? typed.len : null;
   const draftConsumed = (v) => composerDraftConsumed(v, typedLen);
 
-  let swallowedLen = null;
-  for (let attempt = 1; attempt <= SEND_CLICK_ATTEMPTS; attempt++) {
-    if (record.guard) await record.guard();
-    const pre = await readDraft();
-    // 按钮坐标紧贴点击之前才测，尽量不给「测量→按下」之间留窗口。
-    const sv = await probeSendButton();
-    // 第 1 次跳过 mouseMoved：那条命令的 ACK 在渲染器不产帧时能卡 5 秒（本调用点实测
-    // 5 次里 3 次卡 5016 / 5129 / 5022ms，而全仓库其它 70 处点击都在 230ms 内），
-    // 而坐标恰恰是在卡顿**之前**测的 —— 卡完再按下就可能落在已经失效的位置上。
-    // 第 2 次起换回带悬停的路径，并在按下之前重新测量一次坐标（remeasure）：
-    // 两条路径都试过才认失败，避免「skipMove 在这个按钮上不成立」反而把成功变成失败。
-    await cdpMouseClick('automation:sendPhrase', sv.x, sv.y, { textLen: text.length, button: sv }, attempt === 1
-      ? { skipMove: true }
-      : { remeasure: async () => { const f = await probeSendButton(); return { x: f.x, y: f.y }; } });
-
-    // 点击后立刻回看草稿：被受理 → executeSend 已经 clear-draft；被静默吞掉 → 原样留着。
+  // 点击 / 接口调用之后统一的「草稿被吃掉了吗」等待（两条路径共用同一个判据）。
+  const awaitDraftConsumed = async (ms) => {
     let after = null;
-    const verifyDeadline = Date.now() + 2000;
+    const until = Date.now() + (Number(ms) || 2000);
     do {
       if (record.isCancelled && record.isCancelled()) throw new Error('任务已停止');
       await new Promise((resolve) => setTimeout(resolve, 250));
       after = await readDraft();
-    } while (!draftConsumed(after) && Date.now() < verifyDeadline);
-    log('[quick-phrase-diagnostics] composer:click-verify ' + JSON.stringify({
-      attempt, skipMove: attempt === 1, x: Math.round(sv.x), y: Math.round(sv.y),
-      typedLen, preLen: pre ? pre.len : null, afterLen: after ? after.len : null,
-    }));
-    // 探针本身读不到编辑器 → 不敢下结论，沿用老行为交给回执轮询，绝不冒重发风险。
-    if (!after) break;
-    if (draftConsumed(after)) { swallowedLen = null; break; }
-    swallowedLen = after.len;
+    } while (!draftConsumed(after) && Date.now() < until);
+    return after;
+  };
+
+  /* ---------- A. 首选：直接调 composer store 的 api.send() ----------
+   * 不走按钮 —— 按钮那层 semanticDisabled 在 DOM 上看不出来（见 composerSendExpr 的注释）。
+   * 先等闸门全开（sendWired / canSend / 非空 / phase!=='sending' / hostDisabled===false），
+   * 再调 api.send()；返回的 {ok,reason} 原样记日志，失败可自证。
+   * 只在「确实拿不到 store」或「闸门一直不开」时才回落到点击路径。 */
+  let apiHandled = false;
+  let apiFallbackReason = '';
+  if (record.skipComposerApi !== true) {
+    const apiDeadline = Date.now() + 20000;
+    let gateLogged = false;
+    while (Date.now() < apiDeadline) {
+      if (record.isCancelled && record.isCancelled()) throw new Error('任务已停止');
+      if (record.guard) await record.guard();
+      const raw = await guardedSend('Runtime.evaluate', {
+        expression: composerSendExpr(record.conversationId, true),
+        returnByValue: true, awaitPromise: true,
+      }).catch((e) => ({ __transportError: String((e && e.message) || e) }));
+      const av = raw && raw.result && raw.result.value;
+      if (!av) { apiFallbackReason = 'no-result'; break; }
+      if (av.reason === 'no-store' || av.reason === 'no-editor') { apiFallbackReason = av.reason; break; }
+      if (av.sent) {
+        const res = av.result || {};
+        log('[quick-phrase-diagnostics] composer:api-send ' + JSON.stringify({ ok: res.ok, reason: res.reason || '', gates: av.gates }));
+        // 「受理 = 清空草稿」这条判据对 api.send() 同样成立（走的是同一个 executeSend）。
+        const after = await awaitDraftConsumed(2500);
+        log('[quick-phrase-diagnostics] composer:verify ' + JSON.stringify({ via: 'api', typedLen, afterLen: after ? after.len : null }));
+        if (res.ok === true || draftConsumed(after)) { apiHandled = true; break; }
+        apiFallbackReason = 'api:' + String(res.reason || 'unknown');
+        break;
+      }
+      // 闸门没开：现场记一次就够，然后等它开（不再盲目点按钮）
+      if (!gateLogged) {
+        gateLogged = true;
+        log('[quick-phrase-diagnostics] composer:store-gate ' + JSON.stringify(av.gates || av));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    if (!apiHandled && !apiFallbackReason) apiFallbackReason = 'gate-timeout';
   }
-  if (swallowedLen !== null) {
-    // 试满次数之后草稿仍原样留着 ⇒ 按 renderer 的语义这几次点击都**没有被受理** ⇒ 确定没发出去。
-    // 打 notSent 而不是 maybeSent：核验台账会写成「定时任务没有发出去 / 要补发」，
-    // 而不是那句既不敢重发、又要用户自己去开会话核对的「结果不确定」。
-    // 这里也**不**自动补发 —— 判定权交回调度侧，避免任何双发风险。
-    // 顺带把 204 字还给用户：草稿仍在，任务重排后走的是同一段输入链路。
-    throw Object.assign(new Error('点击发送未生效（内容仍留在输入框，已按免悬停 / 带悬停两条路径重试 ' + SEND_CLICK_ATTEMPTS + ' 次），确认未发出'), { notSent: true });
+
+  let swallowedLen = null;
+  if (!apiHandled) {
+    // 走到这里说明「什么都没发出去」：store 拿不到，或闸门一直没开，或接口明确拒绝且草稿原样。
+    log('[quick-phrase-diagnostics] composer:api-fallback ' + JSON.stringify({ reason: apiFallbackReason }));
+    for (let attempt = 1; attempt <= SEND_CLICK_ATTEMPTS; attempt++) {
+      if (record.guard) await record.guard();
+      const pre = await readDraft();
+      // 按钮坐标紧贴点击之前才测，尽量不给「测量→按下」之间留窗口。
+      const sv = await probeSendButton();
+      // 第 1 次跳过 mouseMoved：那条命令的 ACK 在渲染器不产帧时能卡 5 秒（本调用点实测
+      // 5 次里 3 次卡 5016 / 5129 / 5022ms，而全仓库其它 70 处点击都在 230ms 内），
+      // 而坐标恰恰是在卡顿**之前**测的 —— 卡完再按下就可能落在已经失效的位置上。
+      // 第 2 次起换回带悬停的路径，并在按下之前重新测量一次坐标（remeasure）：
+      // 两条路径都试过才认失败，避免「skipMove 在这个按钮上不成立」反而把成功变成失败。
+      await cdpMouseClick('automation:sendPhrase', sv.x, sv.y, { textLen: text.length, button: sv }, attempt === 1
+        ? { skipMove: true }
+        : { remeasure: async () => { const f = await probeSendButton(); return { x: f.x, y: f.y }; } });
+
+      // 点击后立刻回看草稿：被受理 → executeSend 已经 clear-draft；被静默吞掉 → 原样留着。
+      const after = await awaitDraftConsumed(2000);
+      log('[quick-phrase-diagnostics] composer:click-verify ' + JSON.stringify({
+        attempt, skipMove: attempt === 1, x: Math.round(sv.x), y: Math.round(sv.y),
+        typedLen, preLen: pre ? pre.len : null, afterLen: after ? after.len : null,
+      }));
+      // 探针本身读不到编辑器 → 不敢下结论，沿用老行为交给回执轮询，绝不冒重发风险。
+      if (!after) break;
+      if (draftConsumed(after)) { swallowedLen = null; break; }
+      swallowedLen = after.len;
+    }
+    if (swallowedLen !== null) {
+      // 试满次数之后草稿仍原样留着 ⇒ 按 renderer 的语义这几次都**没有被受理** ⇒ 确定没发出去。
+      // 打 notSent 而不是 maybeSent：核验台账会写成「定时任务没有发出去 / 要补发」，
+      // 而不是那句既不敢重发、又要用户自己去开会话核对的「结果不确定」。
+      // 这里也**不**自动补发 —— 判定权交回调度侧，避免任何双发风险。
+      throw Object.assign(new Error('发送未生效（内容仍留在输入框；api.send 与点击两条路径都试过），确认未发出'), { notSent: true });
+    }
   }
-  const result = { sent: true, textLen: text.length, itemCount: allItems.length, imagesRestored, imagesFailed, blocksRestored, blocksFailed };
-  log('[quick-phrase-diagnostics] composer:finish ' + JSON.stringify({ ok: true, result: { sent: result.sent, textLen: result.textLen, itemCount: result.itemCount } }));
+  const result = { sent: true, via: apiHandled ? 'api' : 'click', textLen: text.length, itemCount: allItems.length, imagesRestored, imagesFailed, blocksRestored, blocksFailed };
+  log('[quick-phrase-diagnostics] composer:finish ' + JSON.stringify({ ok: true, result: { sent: result.sent, via: result.via, textLen: result.textLen, itemCount: result.itemCount } }));
   return result;
 }
 
