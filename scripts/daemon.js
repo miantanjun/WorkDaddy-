@@ -229,7 +229,7 @@ const acquireAutomationInput = createRendererGate();
 let automationInputActive = false;
 
 const { previewPackage, PACKAGE_FORMAT_VERSION } = require('./automation-packages.js');
-const { exportTasks, importTasks, readTransferBody } = require('./automation-transfer.js');
+const { exportTasks, previewImport, importTasks, readTransferBody } = require('./automation-transfer.js');
 const { createAutomationDiscovery } = require('./automation-discovery.js');
 
 const { createAutomationNotifier } = require('./toast-options.js');
@@ -11126,6 +11126,30 @@ async function refreshCreditRotationAccounts(currentUid, currentResult) {
   return refreshed;
 }
 
+function rememberCreditRotation(uid, result) {
+  const key = String(uid || '').trim();
+  if (!key || !result || !Array.isArray(result.segments)) return;
+  creditRotationCache.set(key, {
+    uid: key,
+    credits: result.credits,
+    segments: result.segments,
+    unlimited: !!result.unlimited,
+    fetchedAt: Date.now(),
+  });
+}
+
+function cachedCreditRotationAccounts() {
+  const names = new Map(listAccounts(DATA_DIR).map((account) => [String(account.uid), account.nickname || '']));
+  return Array.from(creditRotationCache.values()).map((entry) => ({
+    uid: entry.uid,
+    nickname: names.get(entry.uid) || '',
+    creditSegments: entry.segments,
+    credits: entry.credits,
+    creditUnlimited: entry.unlimited,
+    creditFetchedAt: entry.fetchedAt,
+  }));
+}
+
 async function listDailyUsage(accounts, date = todayStr()) {
   const list = Array.isArray(accounts) ? accounts : [];
   if (!list.length) return {};
@@ -11249,6 +11273,16 @@ function handleApi(req, res) {
   if (req.method === 'POST' && p === '/api/automations/export') {
     return readTransferBody(req).then(body => {
       return exportTasks(readAutomations(DATA_DIR), body && body.ids);
+    }).then(result => json(res, 200, { ok: true, ...result }))
+      .catch(error => json(res, 400, { ok: false, error: error.message }));
+  }
+
+  // 本地任务文件导入（JSON / ZIP）：上游 1.2.3 未含此路由，合并时被其 export 块挤掉，此处恢复。
+  if (req.method === 'POST' && ['/api/automations/import/preview', '/api/automations/import'].includes(p)) {
+    return readTransferBody(req).then(body => {
+      const runtime = { version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform };
+      if (p === '/api/automations/import/preview') return previewImport(body, readAutomations(DATA_DIR), runtime);
+      return importTasks(DATA_DIR, body, runtime);
     }).then(result => json(res, 200, { ok: true, ...result }))
       .catch(error => json(res, 400, { ok: false, error: error.message }));
   }
@@ -12110,6 +12144,7 @@ function handleApi(req, res) {
           unlimited: !!r.unlimited,
           cycleResetTime: r.cycleResetTime || null,
         };
+        rememberCreditRotation(uid, r);
         if (usage.synced) payload.todayUsage = usage.value;
         return json(res, 200, payload);
       } catch (e) {
@@ -14355,11 +14390,6 @@ for (const preset of ['close-buddy-popups.json', ...(PROFILE.capabilities.accoun
     if (result && result.status === 'upgraded') log(`[automation] 内置任务已升级: ${preset} (revision ${result.revision})`);
   }
   catch (_) { log('[automation] 初始化内置任务失败: ' + preset); }
-}
-if (PROFILE.capabilities.accounts && PROFILE.capabilities.checkin !== false) {
-  try { installBuiltinTask(DATA_DIR, path.join(__dirname, 'builtin/automations/daily-account-checkin.json')); }
-  catch (_) { log('[automation] 初始化签到任务失败'); }
-  initializeCheckinConsent(DATA_DIR);
 }
 // 限流自动切号续跑：先「认领」用户机器上已存在的同名任务（只在内容一致时），
 // 再走正常的内置安装/升级路径 —— 这样它才有「内置」角标、才能跟随内置定义升级。

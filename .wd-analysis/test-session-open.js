@@ -61,12 +61,19 @@ const NEWFN = sliceFn(SRC, 'openConversationById');
 let OLDFN = null;
 let OLDREF = null;
 try {
-  const shas = execFileSync(GIT, ['-C', 'D:/WorkDaddy', 'log', '--format=%H', '-n', '40', '--', 'scripts/daemon.js'],
+  const shas = execFileSync(GIT, ['-C', 'D:/WorkDaddy', 'log', '--format=%H', '-n', '120', '--', 'scripts/daemon.js'],
     { maxBuffer: 8 * 1024 * 1024 }).toString('utf8').trim().split('\n').filter(Boolean);
   for (const sha of shas) {
     const src = norm(execFileSync(GIT, ['-C', 'D:/WorkDaddy', 'show', sha + ':scripts/daemon.js'],
       { maxBuffer: 64 * 1024 * 1024 }).toString('utf8'));
-    if (!src.includes('waitOnly')) { OLDFN = sliceFn(src, 'openConversationById'); OLDREF = sha.slice(0, 8); break; }
+    // 必须「同时」满足：① 这份 daemon.js 里真有 openConversationById；② 它还没有 waitOnly。
+    // 只判 waitOnly 会合并后被上游分支的提交骗到 —— 上游 1.2.3 的提交也满足「没有 waitOnly」，
+    // 但它压根没有这个函数，sliceFn 直接抛 ⇒ 整组对照被静默跳过（2026-09-19 踩过）。
+    if (src.includes('waitOnly') || !src.includes('openConversationById')) continue;
+    let fn = null;
+    try { fn = sliceFn(src, 'openConversationById'); } catch (_) { fn = null; }
+    if (!fn) continue;
+    OLDFN = fn; OLDREF = sha.slice(0, 8); break;
   }
 } catch (e) { OLDFN = null; }
 console.log('\n[基线] 修复前实现取自 ' + (OLDREF || '(取不到，相关对照将跳过)') +

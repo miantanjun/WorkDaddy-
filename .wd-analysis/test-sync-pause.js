@@ -399,7 +399,9 @@ function waitSettled(jobs, ms) {
     // 自建构建」就算通过 —— 前缀 + 日期形态 + 不是引入本功能之前的那个即可。
     // 2026-09-17: 原来的 /^…-1\.3\.0-/ 在 daemon 升到 1.3.1 后就一直误报 D0（存量问题）。
     // 放宽到 1.3.x：只要前缀/日期形态对、且不是「引入本功能之前」的那个构建就算通过。
-    const BUILD_RE = /^(selfhost|release)-1\.3\.[0-9]+-\d{8}-/;
+    // 2026-09-19: 1.3.x 仍是钉死小版本 —— 融合上游升到 1.4.0 后立刻误报。改成「自建构建前缀 + 日期形态」，
+    // 与 test-limit-switchback 的 W16n 同口径：只要求「跑的是自建构建」，不要求某个具体版本。
+    const BUILD_RE = /^(selfhost|release)-\d+\.\d+\.\d+-\d{8}-/;
     ok(BUILD_RE.test(live) && live !== 'release-1.3.0-20260914-failover-continue',
       'D0 daemon 已加载本阶段（或更晚）的构建', live);
 

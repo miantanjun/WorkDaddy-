@@ -7118,11 +7118,70 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           toast('任务导出成功', false, root);
         }).catch(function (error) { toast(error.message || '导出失败', true, root); }).finally(function () { automationState.exporting = false; syncBatchControls(); });
       }
+      function importIssueLabel(entry) {
+        if (entry.existing) return '已存在，将跳过';
+        if (entry.compatible) return '可导入';
+        var codes = (entry.issues || []).map(function (issue) { return issue.code; });
+        if (codes.indexOf('input_required') >= 0) return '缺少必填参数';
+        if (codes.indexOf('workdaddy_version') >= 0) return '需要更新 WorkDaddy';
+        if (codes.indexOf('profile') >= 0 || codes.indexOf('platform') >= 0) return '不支持当前客户端或系统';
+        if (codes.indexOf('invalid_document') >= 0) return '文件不是自动化任务 JSON';
+        return '任务格式或能力不受支持';
+      }
+      function showTaskImport(payload, filename, preview) {
+        closePanelModal((panel || root).querySelector('#wbs-auto-import-mask'));
+        var mask = document.createElement('div'); mask.id = 'wbs-auto-import-mask'; mask.className = 'wbs-modal-mask wbs-modal-mask-panel wbs-auto-dialog-mask';
+        mask.innerHTML = '<div class="wbs-modal wbs-auto-import-modal" role="dialog" aria-modal="true" aria-labelledby="wbs-auto-import-title"><div class="wbs-modal-title" id="wbs-auto-import-title">导入任务</div><div class="wbs-auto-import-file" data-wbs-i18n-skip="1"></div><p class="wbs-auto-agent-intro">导入后保持停用，可在任务列表中启用。相同 ID 的任务会跳过。</p><div class="wbs-auto-import-list"></div><div class="wbs-auto-import-error" role="alert"></div><div class="wbs-modal-actions"><span class="wbs-auto-import-count"></span><button class="wbs-modal-btn" data-auto-close type="button">取消</button><button class="wbs-modal-btn wbs-modal-ok" data-auto-import-confirm type="button">导入</button></div></div>';
+        mask.querySelector('.wbs-auto-import-file').textContent = filename;
+        var list = mask.querySelector('.wbs-auto-import-list');
+        preview.entries.forEach(function (entry) {
+          var row = document.createElement('label'); row.className = 'wbs-auto-import-item';
+          var available = entry.compatible && !entry.existing;
+          row.innerHTML = '<span class="wbs-auto-check"><input type="checkbox" data-import-key="' + escAttr(entry.key) + '"' + (available ? ' checked' : ' disabled') + '></span><span class="wbs-auto-import-info"><span class="wbs-auto-import-name" data-wbs-i18n-skip="1"></span><span class="wbs-auto-import-status"></span></span>';
+          row.querySelector('.wbs-auto-import-name').textContent = entry.name;
+          row.querySelector('.wbs-auto-import-status').textContent = importIssueLabel(entry);
+          list.appendChild(row);
+        });
+        mountAutomationModal(mask);
+        var confirm = mask.querySelector('[data-auto-import-confirm]'), error = mask.querySelector('.wbs-auto-import-error');
+        function selected() { return Array.from(list.querySelectorAll('input:checked:not(:disabled)')).map(function (input) { return input.dataset.importKey; }); }
+        function syncSelection() { var count = selected().length; confirm.disabled = !count; mask.querySelector('.wbs-auto-import-count').textContent = WBS_LANGUAGE === 'en' ? 'Selected ' + count : '已选 ' + count; }
+        list.addEventListener('change', syncSelection); syncSelection();
+        confirm.addEventListener('click', function () {
+          var keys = selected(); if (!keys.length) return;
+          confirm.disabled = true; confirm.textContent = WBS_LANGUAGE === 'en' ? 'Importing…' : '导入中…'; error.textContent = '';
+          list.querySelectorAll('input').forEach(function (input) { input.disabled = true; });
+          api('/api/automations/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({}, payload, { selected: keys })) }).then(function (result) {
+            closePanelModal(mask);
+            toast(WBS_LANGUAGE === 'en' ? 'Imported ' + result.imported + ' task(s)' + (result.skipped ? '; skipped ' + result.skipped : '') : '已导入 ' + result.imported + ' 个任务' + (result.skipped ? '，跳过 ' + result.skipped + ' 个' : ''), false, root);
+            return load();
+          }).catch(function (err) {
+            error.textContent = err.message || '导入失败';
+            preview.entries.forEach(function (entry) { list.querySelector('[data-import-key="' + entry.key + '"]').disabled = !entry.compatible || entry.existing; });
+            confirm.textContent = WBS_LANGUAGE === 'en' ? 'Import' : '导入'; syncSelection();
+          });
+        });
+      }
+      function readAutomationImport(event) {
+        var file = event.target.files && event.target.files[0]; event.target.value = '';
+        if (!file) return;
+        if (file.size > 8 * 1024 * 1024) { toast('任务文件不能超过 8 MiB', true, root); return; }
+        var button = automationPane.querySelector('#wbs-auto-import'); button.disabled = true;
+        var reader = new FileReader();
+        reader.onerror = function () { button.disabled = false; toast('读取文件失败', true, root); };
+        reader.onload = function () {
+          var payload = { content: String(reader.result || '').split(',')[1] || '', encoding: 'base64' };
+          api('/api/automations/import/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).then(function (preview) {
+            showTaskImport(payload, file.name, preview);
+          }).catch(function (err) { toast(err.message || '导入失败', true, root); }).finally(function () { button.disabled = false; });
+        };
+        reader.readAsDataURL(file);
+      }
       function startPicker() {
         if (typeof window.__wbsStartAutomationPicker === 'function') window.__wbsStartAutomationPicker();
         else toast('元素拾取器尚未加载', true, root);
       }
-      automationPane.innerHTML = '<div class="wbs-pcard wbs-auto-card"><div class="wbs-auto-toolbar"><div class="wbs-pcard-title">自动化<span class="wbs-pcard-sub" id="wbs-auto-count"></span></div><button type="button" class="wbs-auto-textbtn" id="wbs-auto-cap">查看接口说明</button><div class="wbs-auto-toolbar-actions"><div class="wbs-auto-normal-actions" id="wbs-auto-normal-actions"><button class="wbs-sess-bbtn wbs-auto-pick-btn" type="button" id="wbs-auto-pick">' + AUTO_PICK_SVG + '<span>拾取元素</span></button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-create">让 WorkBuddy 帮我创建</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-new">新建任务</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-sched">定时发送</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-import" title="选择 JSON 或 ZIP 任务文件">' + IMPORT_ICON + '<span>导入</span></button><input type="file" id="wbs-auto-import-file" accept=".json,.zip,application/json,application/zip" hidden><button class="wbs-sess-bbtn" type="button" id="wbs-auto-batch">批量操作</button></div><div class="wbs-auto-batch-actions" id="wbs-auto-batch-actions" style="display:none"><span class="wbs-auto-batch-count" id="wbs-auto-batch-count">已选 0</span><button class="wbs-sess-bbtn" type="button" id="wbs-auto-select-all">全选</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-export" disabled>' + EXPORT_ICON + '<span>导出</span></button><button class="wbs-sess-bbtn wbs-sess-delbtn" type="button" id="wbs-auto-batch-apply">' + TRASH_SVG + '<span>删除选中</span></button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-batch-cancel">取消</button></div></div></div><div class="wbs-auto-list" id="wbs-auto-list"></div></div>';
+      automationPane.innerHTML = '<div class="wbs-pcard wbs-auto-card"><div class="wbs-auto-toolbar"><div class="wbs-pcard-title">自动化<span class="wbs-pcard-sub" id="wbs-auto-count"></span></div><button type="button" class="wbs-auto-textbtn" id="wbs-auto-cap">查看接口说明</button><div class="wbs-auto-toolbar-actions"><div class="wbs-auto-normal-actions" id="wbs-auto-normal-actions"><button class="wbs-sess-bbtn wbs-auto-pick-btn is-loading" type="button" id="wbs-auto-discover" disabled>' + AUTO_DISCOVER_SVG + '<span>正在发现…</span></button><button class="wbs-sess-bbtn wbs-auto-pick-btn" type="button" id="wbs-auto-pick">' + AUTO_PICK_SVG + '<span>拾取元素</span></button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-create">让 WorkBuddy 帮我创建</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-new">新建任务</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-sched">定时发送</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-import" title="选择 JSON 或 ZIP 任务文件">' + IMPORT_ICON + '<span>导入</span></button><input type="file" id="wbs-auto-import-file" accept=".json,.zip,application/json,application/zip" hidden><button class="wbs-sess-bbtn" type="button" id="wbs-auto-batch">批量操作</button></div><div class="wbs-auto-batch-actions" id="wbs-auto-batch-actions" style="display:none"><span class="wbs-auto-batch-count" id="wbs-auto-batch-count">已选 0</span><button class="wbs-sess-bbtn" type="button" id="wbs-auto-select-all">全选</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-export" disabled>' + EXPORT_ICON + '<span>导出</span></button><button class="wbs-sess-bbtn wbs-sess-delbtn" type="button" id="wbs-auto-batch-apply">' + TRASH_SVG + '<span>删除选中</span></button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-batch-cancel">取消</button></div></div></div><div class="wbs-auto-list" id="wbs-auto-list"></div></div>';
       automationPane.querySelector('#wbs-auto-import').addEventListener('click', function () { automationPane.querySelector('#wbs-auto-import-file').click(); });
       automationPane.querySelector('#wbs-auto-import-file').addEventListener('change', readAutomationImport);
       automationPane.querySelector('#wbs-auto-export').addEventListener('click', exportAutomationTasks);
