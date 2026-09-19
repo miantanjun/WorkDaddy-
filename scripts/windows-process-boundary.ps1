@@ -1,4 +1,4 @@
-function ConvertTo-WindowsCommandLineArgs {
+﻿function ConvertTo-WindowsCommandLineArgs {
   param([Parameter(Mandatory = $true)][string]$CommandLine)
   if ([string]::IsNullOrWhiteSpace($CommandLine) -or
       $CommandLine.IndexOfAny([char[]]@([char]0, [char]10, [char]13)) -ge 0) {

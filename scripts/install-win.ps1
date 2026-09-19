@@ -1,4 +1,4 @@
-# WorkDaddy Windows 安装脚本（install.sh 的 Windows 对应物）
+﻿# WorkDaddy Windows 安装脚本（install.sh 的 Windows 对应物）
 # 用法：双击 install-win.cmd，或 powershell -ExecutionPolicy Bypass -File install-win.ps1
 # 作用：复制到安装目录 → 初始化数据目录 → 清理旧登录自启 → 启动 launcher（WorkBuddy 已运行时提示退出）
 # 全程用户态，无需管理员权限。

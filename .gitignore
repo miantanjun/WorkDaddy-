@@ -1,6 +1,32 @@
-# 本机数据与构建产物，不入库
-_backup/
-scripts/runtime/
-unins000.dat
-卸载 WorkDaddy.dat
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+npm-debug.log*
+
+# 构建产物与安装包
+WorkDaddy.app
+/release/**/*.dmg
+/release/**/*.exe
+/release/**/*.zip
+/release/**/*.pkg
+/release/**/*.tar.gz
+/release/**/*.deb
+
+# 本地运行数据与日志
 *.log
+daemon.log
+
+# 内部调试模块（元素检查/DevTools 实现，不公开入库；他人环境点按钮报错属预期）
+scripts/picker-internal.js
+
+# 工作区元数据（WorkBuddy 项目数据，不入库）
+.workbuddy/
+.workbuddy-ai/
+
+# 本地维护文档与排查记录
+/.private-docs/
+
+# 构建缓存(安装器临时产物)
+release/.cache/

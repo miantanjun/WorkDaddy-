@@ -1,4 +1,4 @@
-# WorkDaddy Windows 卸载脚本（uninstall.sh 的 Windows 对应物）
+﻿# WorkDaddy Windows 卸载脚本（uninstall.sh 的 Windows 对应物）
 # 用法：powershell -ExecutionPolicy Bypass -File uninstall-win.ps1
 # 默认保留备份数据（%APPDATA%\WorkDaddy）；加 -RemoveData 一并删除。
 param(

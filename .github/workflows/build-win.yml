@@ -1,0 +1,151 @@
+name: Build & Verify Windows Setup
+
+# 触发方式（任选其一都会跑这套打包+验证）：
+#   - 推 v* 标签（正式发版）
+#   - 手动触发（workflow_dispatch，可传版本号）
+#   - 推 master/main（可选，防回归）
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 1.0.4），留空则从代码读取'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-verify:
+    name: Build Setup.exe + verify
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 安装固定 Go 工具链
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.0'
+          cache: false
+
+      - name: 校验 CRLF（cmd 必须 CRLF，否则 cmd.exe 解析括号块会失败）
+        shell: bash
+        run: |
+          for f in scripts/*.cmd; do
+            if ! grep -q $'\r' "$f"; then
+              echo "::error::$f 不是 CRLF，无法在 Windows 使用，请转换"
+              exit 1
+            fi
+          done
+          echo "所有 .cmd 均为 CRLF ✓"
+
+      - name: 解析版本号
+        id: ver
+        shell: bash
+        run: |
+          VER="${{ github.event.inputs.version }}"
+          if [ -z "$VER" ]; then
+            VER=$(grep -o "DAEMON_VERSION = '[^']*'" scripts/daemon.js | head -1 | cut -d"'" -f2)
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "检测到版本: $VER"
+
+      - name: 校验内置资产 builtin（Windows 安装包必须包含）
+        shell: bash
+        run: |
+          SRC="scripts/builtin"
+          if [ ! -f "$SRC/nebula/theme.json" ] || [ ! -d "$SRC/wallpapers" ]; then
+            echo "::error::缺少内置资产 $SRC（需要 nebula/theme.json 和 wallpapers/）"
+            exit 1
+          fi
+          COUNT=$(find "$SRC/wallpapers" -maxdepth 1 -type f -iname '*.webp' | wc -l | tr -d ' ')
+          if [ "$COUNT" -lt 1 ]; then
+            echo "::error::内置资产没有任何官方壁纸"
+            exit 1
+          fi
+          echo "已校验 builtin 资产：$COUNT 张壁纸"
+
+      - name: 生成 Windows 安装暂存包（仅供 Inno Setup 使用）
+        shell: bash
+        env:
+          WORKDADDY_BUILD_VERSION: ${{ steps.ver.outputs.version }}
+        run: bash scripts/build-win-zip.sh
+
+      - name: 安装 Inno Setup
+        shell: pwsh
+        run: |
+          choco upgrade innosetup --version=6.7.1 --allow-downgrade --no-progress --yes
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup installation failed with exit code $LASTEXITCODE" }
+
+      - name: 生成 Setup.exe（用户态 Inno Setup 安装包）
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path scripts\daemon.js -Pattern "const DAEMON_VERSION = '([^']+)'" ).Matches[0].Groups[1].Value
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned `
+            -File .\scripts\build-win-installer.ps1 -IsccPath $iscc -Profile workbuddy-cn -Version ${{ steps.ver.outputs.version }}
+          if ($LASTEXITCODE -ne 0) { throw "WorkDaddy Setup build failed with exit code $LASTEXITCODE" }
+          powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned `
+            -File .\scripts\build-win-installer.ps1 -IsccPath $iscc -Profile workbuddy-ai -Version ${{ steps.ver.outputs.version }}
+          if ($LASTEXITCODE -ne 0) { throw "WorkDaddy AI Setup build failed with exit code $LASTEXITCODE" }
+
+      - name: 确认 Setup.exe + 便携版产物齐备
+        shell: pwsh
+        run: |
+          $version = '${{ steps.ver.outputs.version }}'
+          $expected = @(
+            "WorkDaddy-Setup-$version.exe", "WorkDaddy-AI-Setup-$version.exe",
+            "WorkDaddy-Portable-$version.zip", "WorkDaddy-AI-Portable-$version.zip"
+          )
+          $actual = @(Get-ChildItem -LiteralPath release\windows -File | ForEach-Object Name)
+          if (@(Compare-Object $expected $actual).Count -ne 0) { throw "Windows 发行产物不匹配: $($actual -join ', ')" }
+          foreach ($profile in @('workbuddy-cn', 'workbuddy-ai')) {
+            $name = if ($profile -eq 'workbuddy-ai') { 'WorkDaddy-AI' } else { 'WorkDaddy' }
+            $extract = Join-Path $env:RUNNER_TEMP ("portable-$profile")
+            Expand-Archive -LiteralPath "release\windows\$name-Portable-$version.zip" -DestinationPath $extract -Force
+            foreach ($file in @('WorkDaddy.portable', 'Start-WorkDaddy.cmd', 'Stop-WorkDaddy.cmd', 'WorkDaddyLauncher.exe', 'scripts\runtime\node\node.exe')) {
+              if (-not (Test-Path -LiteralPath (Join-Path $extract $file) -PathType Leaf)) { throw "$name ZIP 缺少 $file" }
+            }
+            if ((Get-Content -LiteralPath (Join-Path $extract 'scripts\profile-id.txt') -Raw).Trim() -ne $profile) { throw "$name ZIP profile 错误" }
+            $daemon = Get-Content -LiteralPath (Join-Path $extract 'scripts\daemon.js') -Raw
+            if ($daemon -notmatch "const DAEMON_VERSION = '$([regex]::Escape($version))'") { throw "$name ZIP daemon 版本错误" }
+            if (Test-Path -LiteralPath (Join-Path $extract 'Install-WorkDaddy.cmd')) { throw "$name ZIP 包含安装入口" }
+            if (Test-Path -LiteralPath (Join-Path $extract 'Uninstall-WorkDaddy.cmd')) { throw "$name ZIP 包含卸载入口" }
+            if (@(Get-ChildItem -LiteralPath $extract -Recurse -File | Where-Object Name -eq '安装失败自主解决提示词.txt').Count) { throw "$name ZIP 包含修复提示词" }
+          }
+
+      - name: 列出产物
+        shell: bash
+        run: ls -lh release/windows/
+
+      - name: 产物完整性自检（verify-win.cmd，纯只读）
+        shell: cmd
+        run: |
+          call scripts\verify-win.cmd
+
+      - name: 上传产物（Setup.exe + 便携版 ZIP）
+        uses: actions/upload-artifact@v4
+        with:
+          name: workdaddy-win64
+          path: |
+            release/windows/WorkDaddy-Setup-*.exe
+            release/windows/WorkDaddy-AI-Setup-*.exe
+            release/windows/WorkDaddy-Portable-*.zip
+            release/windows/WorkDaddy-AI-Portable-*.zip
+
+      # ---- 只有打 tag 时才顺手挂到 GitHub Release ----
+      - name: 发布到 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/windows/WorkDaddy-Setup-*.exe
+            release/windows/WorkDaddy-AI-Setup-*.exe
+            release/windows/WorkDaddy-Portable-*.zip
+            release/windows/WorkDaddy-AI-Portable-*.zip
+            release/*.dmg
+          generate_release_notes: true
