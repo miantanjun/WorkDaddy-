@@ -144,6 +144,20 @@ check('E1', 'parseSha256 支持 `SHA256 (文件名): <hex>` 多资产写法', ()
   must(/SHA256 \(\$\(\$_\.Name\)\)/.test(workflow), 'CI 未按 `SHA256 (文件名):` 格式写入 Release 说明');
   return `${callers.length} 处调用全部按文件名匹配，CI 说明格式一致`;
 });
+check('E2', '下载前置校验不可豁免：拿不到 SHA-256 必须停在 preflight', () => {
+  must(/if \(!expectSha\) \{[\s\S]{0,500}?return Promise\.reject\(error\);/.test(daemon),
+    'downloadUpdate 缺少 `!expectSha` 的 preflight 拒绝（拿不到摘要还继续下载 = 装未校验的包）');
+  must(!/expectSha[^\n]*!==\s*'gitee'/.test(daemon), '又出现「按更新源豁免完整性校验」的分支');
+  must(!/download-skip-sha256/.test(daemon), '又出现「跳过完整性校验」的日志/分支');
+  return 'preflight 拒绝在位，无按源豁免';
+});
+check('E3', 'UPDATE_SOURCES 只含 github（E2 豁免分支之所以不可达的前提）', () => {
+  const m = pick(daemon, /const UPDATE_SOURCES = \[([\s\S]*?)\n\];/, 'UPDATE_SOURCES 定义');
+  const ids = m[1].match(/id:\s*'([^']+)'/g) || [];
+  must(ids.length === 1 && /'github'/.test(ids[0]),
+    `UPDATE_SOURCES 有 ${ids.length} 个源（${ids.join(' / ') || '无'}）—— 每新增一个源都必须重新评估「拿不到 SHA-256 怎么办」`);
+  return ids[0];
+});
 
 // ---------- F. CI 与自建发行 ----------
 check('F1', 'CI 在打包前把 .cmd 规范化为 CRLF，并用字节校验（不依赖 grep）', () => {

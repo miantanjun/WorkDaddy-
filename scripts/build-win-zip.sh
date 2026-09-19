@@ -94,11 +94,25 @@ if [ "$NODE_ACTUAL_SHA256" != "$NODE_SHA256" ]; then
 fi
 echo "==> Node.js 运行时校验通过: ${NODE_ARCHIVE}"
 
-# 1) 内置 ws（面板 DevTools 代理需要）；已存在则跳过
+# 1) 内置 ws（面板 DevTools 代理需要）；已存在则跳过。
+#    ⚠️ 版本由 scripts/package.json + scripts/package-lock.json 钉死，用 `npm ci` 安装。
+#    旧写法是 `npm install ws` —— 解析结果由**构建当天的 registry** 决定：ws 一发主版本，
+#    同一次发版在不同日子构建出来的安装包里跑的就是不同代码，发行物不可复现，
+#    也没法审计「用户装到的到底是哪一版」。`npm ci` 只认 lock 里的精确版本 + integrity
+#    哈希，解析结果不可能漂移；lock 与 manifest 不一致时它会直接失败而不是悄悄装别的版本。
 if [ ! -d scripts/node_modules/ws ]; then
-  echo "==> 生成 node_modules/ws（DevTools 代理依赖）"
+  echo "==> 生成 node_modules/ws（DevTools 代理依赖，按 scripts/package-lock.json 钉版本）"
+  if [ ! -f scripts/package.json ] || [ ! -f scripts/package-lock.json ]; then
+    echo "错误：缺少 scripts/package.json 或 scripts/package-lock.json（ws 版本清单/锁）" >&2
+    exit 2
+  fi
   TMPNODE="$(mktemp -d)"
-  (cd "$TMPNODE" && npm init -y >/dev/null 2>&1 && npm install ws --no-audit --no-fund >/dev/null 2>&1)
+  cp scripts/package.json scripts/package-lock.json "$TMPNODE/"
+  # --ignore-scripts：ws 是纯 JS 包，不需要任何 install/postinstall 钩子；
+  # 显式关掉可以堵死「依赖被投毒后靠安装脚本执行代码」这条供应链路径。
+  # --prefer-offline：缓存里已有就不要再打 registry（CI 冷缓存照样回源）。
+  # 用缓存不削弱上面的保证 —— 包仍要过 lock 里的 integrity 哈希校验。
+  (cd "$TMPNODE" && npm ci --prefer-offline --no-fund --ignore-scripts >/dev/null 2>&1)
   mkdir -p scripts/node_modules
   rm -rf scripts/node_modules/ws
   mv "$TMPNODE/node_modules/ws" scripts/node_modules/ws
@@ -216,6 +230,7 @@ echo "==> 内置 Node.js: scripts/runtime/node/node.exe"
 #          $Profile -eq '__WBS_DEFAULT_PROFILE__' 会被替换成 $Profile -eq 'workbuddy-ai'，
 #          让 AI 包默认 profile 自身触发"回退到 workbuddy-cn"，桌面快捷方式名/安装目录全部错乱。
 PROFILE="$PROFILE" BUILD_VERSION="$VERSION" "$PYTHON_BIN" - "$(winpath "$STAGE/scripts")" <<'PY'
+import json
 import os
 import re
 import sys
@@ -263,14 +278,27 @@ if not re.search(r"const DAEMON_VERSION = '" + re.escape(build_version) + r"';",
 if not re.search(r"const DAEMON_BUILD_ID = 'release-" + re.escape(build_version) + r"(?:-[^']*)?';", s):
     raise SystemExit('staged daemon.js DAEMON_BUILD_ID 与包版本不一致')
 
-# 同步可选 package.json 的版本元数据，避免旧壳版本覆盖关于页展示。
-package_json = os.path.join(scripts, 'package.json')
-if build_version and os.path.exists(package_json):
-    with open(package_json, encoding='utf-8') as f:
-        s = f.read()
-    s = re.sub(r'("version"\s*:\s*")[^"]+(")', r'\g<1>' + build_version + r'\g<2>', s, count=1)
-    with open(package_json, 'w', encoding='utf-8', newline='') as f:
-        f.write(s)
+# 同步可选 package.json / package-lock.json 的版本元数据，避免旧壳版本覆盖关于页展示。
+# 用 json 读写而不是正则：锁文件里 "version" 有**两处**是根包版本（顶层一处、
+# packages[""] 一处），正则 count=1 只能可靠地打中第一处，第二处留 1.4.1 就会出现
+# 「包内 package.json 说 9.9.9、lock 说 1.4.1」的互相矛盾 —— 而且正则一改就可能
+# 误伤 node_modules/ws 自己的版本（那才是真正要紧的钉版本值）。
+if build_version:
+    for package_name in ('package.json', 'package-lock.json'):
+        package_path = os.path.join(scripts, package_name)
+        if not os.path.exists(package_path):
+            continue
+        with open(package_path, encoding='utf-8') as f:
+            document = json.load(f)
+        # 只改原有字段，不给没有 version 的文件硬塞一个（那会改变旧壳的语义）。
+        if isinstance(document, dict) and 'version' in document:
+            document['version'] = build_version
+        root_entry = document.get('packages', {}).get('') if isinstance(document, dict) else None
+        if isinstance(root_entry, dict) and 'version' in root_entry:
+            root_entry['version'] = build_version
+        with open(package_path, 'w', encoding='utf-8', newline='') as f:
+            json.dump(document, f, indent=2, ensure_ascii=False)
+            f.write('\n')
 
 # 三个 ps1：只替换 param 默认值（[string]$Profile = '__WBS_DEFAULT_PROFILE__'）。
 # 写回必须用 utf-8-sig（保留 UTF-8 BOM）：源 ps1 带 BOM，Windows PowerShell/ISE 依赖

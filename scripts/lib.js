@@ -550,13 +550,18 @@ function ensureAutoCopyMeta(meta) {
     if (!current.suppressed || typeof current.suppressed !== 'object' || Array.isArray(current.suppressed)) {
       current.suppressed = {};
     }
+    // 血缘级「最近共同快照」时刻（2026-09-19 新增）：冲突判据的唯一标尺，
+    // 语义见 daemon.js syncAutoCopyLineage 里的注释。同样只补字段、结构判据一律不动。
+    if (!current.syncedAt || typeof current.syncedAt !== 'object' || Array.isArray(current.syncedAt)) {
+      current.syncedAt = {};
+    }
     return current;
   }
 
   // 1.0.15 stored rules under sourceUid. Convert them once to global session lineages
   // and global workspace paths so a migration/copy keeps the same shared identity.
   const legacy = current && typeof current === 'object' && !Array.isArray(current) ? current : {};
-  const next = { version: 2, allSessions: false, sessions: {}, sessionIndex: {}, workspaces: {}, copies: {}, suppressed: {} };
+  const next = { version: 2, allSessions: false, sessions: {}, sessionIndex: {}, workspaces: {}, copies: {}, suppressed: {}, syncedAt: {} };
   const legacySessions = legacy.sessions && typeof legacy.sessions === 'object' ? legacy.sessions : {};
   for (const sourceUid of Object.keys(legacySessions)) {
     const bucket = legacySessions[sourceUid];
@@ -606,6 +611,9 @@ function readAutoCopyConfig(dataDir) {
     copies: autoCopy.copies,
     suppressed: autoCopy.suppressed && typeof autoCopy.suppressed === 'object' && !Array.isArray(autoCopy.suppressed)
       ? autoCopy.suppressed
+      : {},
+    syncedAt: autoCopy.syncedAt && typeof autoCopy.syncedAt === 'object' && !Array.isArray(autoCopy.syncedAt)
+      ? autoCopy.syncedAt
       : {},
   };
 }
@@ -1397,6 +1405,47 @@ function deleteAutoCopyMapping(dataDir, lineageOrUid, targetUid, maybeSessionId)
   delete config.copies[autoCopyRuleKey(lineageId, targetUid)];
   writeMeta(dataDir, meta);
 }
+
+/**
+ * 血缘级「最近共同快照」时刻（2026-09-19 新增）。
+ *
+ * 冲突判据要回答的是「**这条血缘**上一次整体对齐是什么时候」。原先拿
+ * `copies[[lineageId, 当前目标 uid]].updatedAt` 当标尺，但 `syncAutoCopyLineage`
+ * 是把内容写给**全部**成员、只给**当前 targetUid** 记基线 ⇒ 其余成员的基线
+ * 天然滞后于它们磁盘上的内容。下一次以它们为目标时，「有几个成员比基线新」
+ * 会把早已同步齐的成员全部数进去 ⇒ 假冲突；又因冲突分支提前 return 不推进
+ * 基线 ⇒ 永久自锁（每次切号都报同一条）。详见 daemon.js syncAutoCopyLineage。
+ */
+function getAutoCopyLineageSyncedAt(dataDir, lineageId) {
+  const id = String(lineageId || '').trim();
+  if (!id) return 0;
+  const config = readAutoCopyConfig(dataDir);
+  const explicit = Number((config.syncedAt || {})[id]) || 0;
+  if (explicit) return explicit;
+  // 回退（只为兼容存量数据）：该血缘**所有**目标里最近的一次成功同步时刻。
+  // 取 max 而不是「当前目标」那一个 —— 后者正是假冲突的来源。首次成功 fan-out
+  // 会写上显式 watermark，此回退只用于让存量假冲突能自愈一次。
+  let latest = 0;
+  for (const key of Object.keys(config.copies || {})) {
+    let parts;
+    try { parts = JSON.parse(key); } catch (_) { continue; }
+    if (!Array.isArray(parts) || parts.length !== 2 || String(parts[0]) !== id) continue;
+    latest = Math.max(latest, Number((config.copies[key] || {}).updatedAt) || 0);
+  }
+  return latest;
+}
+
+function setAutoCopyLineageSyncedAt(dataDir, lineageId, at) {
+  const id = String(lineageId || '').trim();
+  if (!id) return 0;
+  const meta = readMeta(dataDir);
+  const config = ensureAutoCopyMeta(meta);
+  if (!config.syncedAt || typeof config.syncedAt !== 'object' || Array.isArray(config.syncedAt)) config.syncedAt = {};
+  const value = Number(at) > 0 ? Number(at) : Date.now();
+  config.syncedAt[id] = value;
+  writeMeta(dataDir, meta);
+  return value;
+}
 function logFile(dataDir) {
   return path.join(dataDir, 'daemon.log');
 }
@@ -1916,6 +1965,8 @@ module.exports = {
   getAutoCopyMapping,
   setAutoCopyMapping,
   deleteAutoCopyMapping,
+  getAutoCopyLineageSyncedAt,
+  setAutoCopyLineageSyncedAt,
   backupCurrent,
   listAccounts,
   switchTo,

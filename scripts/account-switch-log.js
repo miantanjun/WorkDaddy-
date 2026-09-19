@@ -201,6 +201,8 @@ function buildTriggerReport(t) {
 const FAILURE_REASONS = {
   'no-task-text': '当前会话里没有可以重发的用户消息（可能是刚新建的空会话）。',
   'no-usable-target': '其他账号都没能顶上来 —— 要么也在限流窗口里，要么 20 秒内没看到正常回复。',
+  'all-blocked': '其他账号全都还在限流窗口里，这一轮没有可以试的账号。',
+  'no-others': '账号列表里只有这一个账号，没有别的账号可以接管。',
 };
 
 /**
@@ -212,8 +214,14 @@ function buildFailureReport(f) {
   const out = [RULE, '【' + formatClock(d.at) + '】模型限流，但没能自动换账号续跑', ''];
   out.push(line('什么情况', '账号「' + accountLabel(d.fromUid, d.fromNickname) + '」被限流了。'));
   const reason = String(d.reason || '');
-  const why = FAILURE_REASONS[reason] ||
+  let why = FAILURE_REASONS[reason] ||
     (reason === 'no-task-text' && d.noTaskText ? String(d.noTaskText) : (reason || '没有可用的备用账号。'));
+  // 「全在限流窗口里」时把最早可重试的时刻补进正文：只说「都不行」，用户没法决定
+  // 是等两分钟再发一次，还是今天就不折腾了。
+  const recoveryAt = Number(d.earliestRecovery) || 0;
+  if (reason === 'all-blocked' && recoveryAt > 0) {
+    why += '最早 ' + formatClock(recoveryAt) + ' 之后可以再试一次。';
+  }
   out.push(line('卡在哪', why));
   const tried = Array.isArray(d.triedLabels) ? d.triedLabels.filter(Boolean) : [];
   if (tried.length) out.push(line('试过的账号', tried.join('、')));

@@ -241,17 +241,71 @@ function normalizeState(state) {
   return state && typeof state === 'object' && !Array.isArray(state) ? state : {};
 }
 
+/**
+ * 「记录时刻比现在还晚」的容差上限。超过这个量就认定记录不可信（见 entryBlockedUntil）。
+ *
+ * 取值是一整个限流窗口，理由是能反推：markAccountBlocked 写的永远是**当时的当下**，
+ * 所以任何一条记录，只要它的 blockedAt 比「现在」还晚了不止一个窗口，就不可能是真实观测 ——
+ * 只能是写完记录之后系统时钟被往回拨过。窗口以内的回拨（< 10 分钟）只会让账号多等
+ * 一小会儿，与窗口本身同量级，不值得为它引入额外的不确定性。
+ */
+const BLOCKED_AT_FUTURE_TOLERANCE_MS = LIMIT_FAILOVER_WINDOW_MS;
+
+/**
+ * 一条限流记录的「解除时刻」（绝对时间戳 ms）。没有可用记录 / 记录不可信 → 0。
+ *
+ * 优先取记录里**在标记当时**算好的绝对时刻 `blockedUntil`；只有 `blockedAt` 的老记录
+ * （v1.4.1 之前落盘的状态文件都长这样）才现算 `blockedAt + window`：两代格式必须都能读。
+ *
+ * ⚠️ 判据以绝对时刻为准，而不是每次现算「相对窗口」。同一份状态文件被
+ * isAccountBlocked（选备选账号）与 daemon 的 limitFailoverBlockedUntil（等主账号窗口）
+ * 两处读，两边现算就会有各算各的空间；存下来则只有一份真相。
+ *
+ * @param {object} entry 状态文件里的一条记录 {blockedAt, blockedUntil?, reason?}
+ * @param {number} [windowMs] 只有老记录（无 blockedUntil）才用得到
+ * @param {number} [now] 提供时做时钟回拨校验，见 BLOCKED_AT_FUTURE_TOLERANCE_MS
+ */
+function entryBlockedUntil(entry, windowMs, now) {
+  const e = entry && typeof entry === 'object' ? entry : null;
+  if (!e) return 0;
+  const at = Number(e.blockedAt);
+  const hasAt = Number.isFinite(at) && at > 0;
+  const ref = Number(now);
+  if (hasAt && Number.isFinite(ref) && at > ref + BLOCKED_AT_FUTURE_TOLERANCE_MS) return 0;
+  const until = Number(e.blockedUntil);
+  if (Number.isFinite(until) && until > 0) return until;
+  if (!hasAt) return 0;
+  return at + (Number(windowMs) || LIMIT_FAILOVER_WINDOW_MS);
+}
+
+/**
+ * 账号是否还在限流窗口内。判据是**绝对时刻** `now < blockedUntil`。
+ *
+ * 存绝对时刻还顺带解掉一个只在时钟回拨时才现形的坑：旧写法每次都用「现在」重算
+ * `blockedAt + window`，若写记录之后时钟被往回拨了一大截，`blockedUntil` 会落在
+ * 「（错误时钟下的）未来」，该账号就要多等「回拨量 + 窗口」才可能被重新选中；
+ * 极端情况下（虚拟机快照恢复、RTC 走错）等于把备用账号静默废掉。
+ * entryBlockedUntil 会把这种记录判为不可信并直接放行，代价只是多试一次
+ * （真被限流的话 waitLimitVerdict 会当场看到横幅，再用一个正常时间戳记回来）。
+ */
 function isAccountBlocked(state, uid, now, windowMs) {
   const entry = normalizeState(state)[String(uid || '')];
   if (!entry) return false;
-  const at = Number(entry.blockedAt || 0);
-  if (!Number.isFinite(at) || at <= 0) return false;
-  return Number(now) - at < (Number(windowMs) || LIMIT_FAILOVER_WINDOW_MS);
+  const ref = Number(now);
+  const until = entryBlockedUntil(entry, windowMs, ref);
+  if (!until) return false;
+  return (Number.isFinite(ref) ? ref : Date.now()) < until;
 }
 
-function markAccountBlocked(state, uid, now, reason) {
+/**
+ * 记录一次限流。同时写 `blockedAt`（人看的「什么时候被判的」）与
+ * `blockedUntil`（判据用的绝对解除时刻）—— 判据不再依赖读取时的 windowMs。
+ */
+function markAccountBlocked(state, uid, now, reason, windowMs) {
+  const at = Number(now) || Date.now();
+  const window = Number(windowMs) || LIMIT_FAILOVER_WINDOW_MS;
   const next = { ...normalizeState(state) };
-  next[String(uid || '')] = { blockedAt: Number(now) || Date.now(), reason: String(reason || 'limit') };
+  next[String(uid || '')] = { blockedAt: at, blockedUntil: at + window, reason: String(reason || 'limit') };
   return next;
 }
 
@@ -271,10 +325,26 @@ function pickFailoverTarget(accounts, currentUid, state, now, options = {}) {
   const at = Number(now) || Date.now();
   const list = (Array.isArray(accounts) ? accounts : []).filter((a) => a && String(a.uid || ''));
   const others = list.filter((a) => String(a.uid) !== String(currentUid || ''));
-  if (!others.length) return null;
+  // 选不出账号时**不再返回 null**：调用方原来只能看到「没得选」，于是
+  // 「压根没有别的账号」和「别的账号全在限流窗口里、最早 X 点才能重试」在日志与
+  // 用户提示里长得一模一样（审查 P1-7）。返回带 reason 的对象，两种情形才分得开。
+  if (!others.length) {
+    return { account: null, reason: 'no-others', candidates: [], blocked: [], earliestRecovery: 0 };
+  }
   const fresh = others.filter((a) => !isAccountBlocked(state, a.uid, at, windowMs));
-  const pool = fresh.length ? fresh : [];
-  if (!pool.length) return null;
+  if (!fresh.length) {
+    const blocked = others
+      .map((a) => ({ uid: String(a.uid), until: entryBlockedUntil(normalizeState(state)[String(a.uid)], windowMs, at) }))
+      .filter((item) => item.until > at);
+    return {
+      account: null,
+      reason: 'all-blocked',
+      candidates: [],
+      blocked,
+      earliestRecovery: blocked.length ? Math.min(...blocked.map((item) => item.until)) : 0,
+    };
+  }
+  const pool = fresh;
 
   const withCredit = pool
     .map((account) => ({ account, segment: nearestCreditSegment(account, at) }))
@@ -286,7 +356,14 @@ function pickFailoverTarget(accounts, currentUid, state, now, options = {}) {
       return b.segment.remaining - a.segment.remaining;
     });
   const chosen = (withCredit[0] && withCredit[0].account) || pool[0];
-  return { account: chosen, reason: withCredit.length ? 'credit' : 'order', candidates: pool.map((a) => a.uid) };
+  // 成功分支也带上 blocked/earliestRecovery，返回形状与失败分支一致（消费方不必判字段在不在）。
+  return {
+    account: chosen,
+    reason: withCredit.length ? 'credit' : 'order',
+    candidates: pool.map((a) => a.uid),
+    blocked: [],
+    earliestRecovery: 0,
+  };
 }
 
 function nearestCreditSegment(account, now) {
@@ -327,6 +404,8 @@ module.exports = {
   sessionSnapshotExpression,
   normalizeSnapshot,
   compareSnapshot,
+  BLOCKED_AT_FUTURE_TOLERANCE_MS,
+  entryBlockedUntil,
   isAccountBlocked,
   markAccountBlocked,
   clearAccountBlocked,

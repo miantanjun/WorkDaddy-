@@ -23,6 +23,21 @@ function validIdentity(value, label) {
   return text;
 }
 
+/**
+ * 数值兜底：只接受 number 或数字字符串，其余（null / undefined / 布尔 / 对象 / 数组 / 空串）
+ * 一律返回 null，由调用方决定是否拒绝该条。
+ * 必要性见 saveRecords：NaN 会被 SQLite 当成 NULL 绑进 NOT NULL 列，整批 transaction 回滚。
+ * 刻意不用裸 `Number(value)` —— 它对 `[]` 得 0、对 `true` 得 1，会把垃圾当合法用量入库。
+ */
+function finiteNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text) return null;
+  const num = Number(text);
+  return Number.isFinite(num) ? num : null;
+}
+
 function localDayRange(date) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(date || ''));
   if (!match) throw new Error('用量日期无效');
@@ -47,6 +62,7 @@ function createCreditUsageStore(options = {}) {
   const dbPath = path.resolve(String(options.dbPath || ''));
   const profileId = validIdentity(options.profileId, 'profile id');
   const db = options.adapter || createSessionDb({ dbPath });
+  const onSkip = typeof options.onSkip === 'function' ? options.onSkip : null;
   let initPromise = null;
 
   function initialize() {
@@ -128,23 +144,43 @@ function createCreditUsageStore(options = {}) {
 
   async function saveRecords(accountUid, records) {
     const list = Array.isArray(records) ? records : [];
+    let saved = 0;
+    let skipped = 0;
     for (let offset = 0; offset < list.length; offset += 200) {
-      const statements = list.slice(offset, offset + 200).map((record) => ({
-        sql: INSERT_USAGE_SQL,
-        params: [
-          profileId,
-          accountUid,
-          validIdentity(record.requestId, 'request id'),
-          Number(record.requestTime),
-          String(record.usageDate || ''),
-          Number(record.credit),
-          String(record.model || ''),
-          String(record.client || ''),
-          String(record.agentPurpose || ''),
-        ],
-      }));
+      const statements = [];
+      for (const record of list.slice(offset, offset + 200)) {
+        // 远端记录缺字段时 Number() 得 NaN；NaN 绑进 NOT NULL 的 INTEGER/REAL 列会被 SQLite
+        // 当成 NULL（实测 ERR_SQLITE_ERROR / NOT NULL constraint failed）⇒ 整个 transaction
+        // 回滚、该账号这一批用量全部丢失，而且同步锚点不会推进 ⇒ 下次重放同一条继续失败。
+        // 所以逐条校验：坏的只丢这一条，绝不拖垮整批。
+        const requestTime = finiteNumber(record && record.requestTime);
+        const credit = finiteNumber(record && record.credit);
+        if (requestTime === null || credit === null) {
+          skipped++;
+          continue;
+        }
+        statements.push({
+          sql: INSERT_USAGE_SQL,
+          params: [
+            profileId,
+            accountUid,
+            validIdentity(record.requestId, 'request id'),
+            requestTime,
+            String(record.usageDate || ''),
+            credit,
+            String(record.model || ''),
+            String(record.client || ''),
+            String(record.agentPurpose || ''),
+          ],
+        });
+        saved++;
+      }
       if (statements.length) await db.transaction(statements);
     }
+    if (skipped && onSkip) {
+      try { onSkip({ uid: accountUid, skipped, total: list.length }); } catch (_) {}
+    }
+    return { saved, skipped };
   }
 
   async function saveHistoryUsage({ uid, records, from, to, syncedAt }) {

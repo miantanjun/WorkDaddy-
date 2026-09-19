@@ -29,6 +29,13 @@ const SUITES = [
   ['test-copy-manifest.js', 96],  // v1.3.11：空间扫描 → 复制排队清单 → 排序；H4/H4b 拆开新鲜度口径
   ['test-send-verify.js', 81],    // v1.3.12 草稿核验 / 1.3.14 composerSendExpr / 1.3.15 草稿残留 / 1.3.16 busy 落定
   ['test-switch-settle.js', 42],  // v1.3.17 切号闸门：还原因定时任务切走的账号前，先等在飞的回合跑完
+  ['test-autocopy-conflict-baseline.js', 35],  // v1.4.1 会话同步「假冲突 + 自锁」：血缘级 watermark 标尺 + 正文 mtime 收窄
+  ['test-automations-guard.js', 41],  // v1.4.1 P0：读失败不得折成空集合（静默清空全部任务）+ 写侧骤减守卫 + 路由级兜底
+  ['test-daemon-http.js', 22],  // v1.4.1 §9-3：HTTP 入口层（readBody 一定 settle / 有界 / 解析失败 reject）+ 鉴权契约
+  ['test-usage-attribution-guard.js', 32],  // v1.4.1 §9-6：空间归属解析（裸前缀错归）+ 用量入库（NaN 拖垮整批）
+  ['test-watchdog-backoff.js', 16],  // v1.4.1 §9-4：watchdog 退避复位判据（存活超 60s）+ 熔断
+  ['test-failover-clock.js', 42],  // v1.4.1 §9-7：限流窗口绝对到期时刻 + 时钟回拨不可信 + 结构化「选不出账号」
+  ['test-build-pin.js', 27],  // v1.4.1 §9-5：ws 钉版本（manifest+lock+npm ci）+ 真跑 vendoring 与内嵌 Python 块
 ];
 
 const out = [];

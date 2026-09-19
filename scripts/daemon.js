@@ -134,6 +134,8 @@ const {
   getAutoCopyMapping,
   setAutoCopyMapping,
   deleteAutoCopyMapping,
+  getAutoCopyLineageSyncedAt,
+  setAutoCopyLineageSyncedAt,
   workbuddyModelsFile,
   listOfficialModels,
   readOfficialModel,
@@ -221,6 +223,35 @@ const {
 } = require('./automation.js');
 const scheduledSend = require('./scheduled-send.js');
 const scheduleLedger = require('./schedule-ledger.js');
+
+/**
+ * 纯读取路径用的「容错读」。
+ *
+ * `readAutomations` 在读失败（EBUSY/EPERM 等瞬时故障、内容损坏）时会**抛错**，
+ * 以避免下游「读-改-写」把用户全部任务静默清空（2026-09-19 审查报告 P0）。
+ * 但「事件分发 / 定时拍子 / 恢复导航」这些调用点**只读不写**，
+ * 在那里抛出去会打断 CDP 事件链，甚至冒到进程级 `uncaughtException`
+ * —— 那个 handler 会在 5.5 秒后 **退出 daemon**（见文件末尾的启动段）。
+ *
+ * 所以这些位置降级成「本次跳过」，并用返回值 `null` 与「确实没有任务」(`[]`) 区分开。
+ * 同一原因 60 秒只记一条日志，避免 1 秒一拍的定时器刷爆 daemon.log。
+ */
+let automationReadFailureKey = '';
+let automationReadFailureAt = 0;
+function readAutomationsTolerant(reason) {
+  try {
+    return readAutomations(DATA_DIR);
+  } catch (error) {
+    const key = String((error && error.message) || error);
+    const now = Date.now();
+    if (key !== automationReadFailureKey || now - automationReadFailureAt >= 60000) {
+      automationReadFailureKey = key;
+      automationReadFailureAt = now;
+      log('[automation] 读取任务列表失败（' + reason + '），本次跳过: ' + key);
+    }
+    return null;
+  }
+}
 
 const { assertAccountRequestUrl, createTaskState, cancellableWait, createRendererGate, probeSessionReceipt, receiptComplete } = require('./automation-runtime.js');
 const { normalizeAutomationModelId, selectAutomationModel, verifyAutomationModel, restoreNewTaskModelPreference } = require('./automation-model.js');
@@ -424,13 +455,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        会话复制冲突登记（血缘两边都改过时不覆盖任何一边，只登记待用户处理）、
 //        更新源降级链与便携版 ZIP 发行；上游「签到不再作为内置任务」一并落地
 //        （checkin-consent 模块删除、注入侧弹窗与接口随之下线）。本地 1.3.x 增强全部保留。
-const DAEMON_VERSION = '1.4.0';
+const DAEMON_VERSION = '1.4.1';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.3';
 // 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.3）。
 // 本机 fork 用自己的修改版版本号（1.4.x = 上游 1.2.3 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.4.0-20260919-upstream-merge';
+const DAEMON_BUILD_ID = 'release-1.4.1-20260920-failover-clock-and-build-pin';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -463,7 +494,13 @@ const BACKGROUND_BLUR_FILE = path.join(DATA_DIR, 'background-blur.json');
 const themeTextShadow = require('./theme-text-shadow.js').createThemeTextShadow(path.join(DATA_DIR, 'theme-text-shadow.json'));
 const MAX_BACKGROUND_BLUR_PX = 32;
 const CREDIT_USAGE_DB_FILE = path.join(DATA_DIR, 'credit-usage.db');
-const CREDIT_USAGE_STORE = createCreditUsageStore({ dbPath: CREDIT_USAGE_DB_FILE, profileId: PROFILE.id });
+const CREDIT_USAGE_STORE = createCreditUsageStore({
+  dbPath: CREDIT_USAGE_DB_FILE,
+  profileId: PROFILE.id,
+  // 坏记录被跳过时必须留痕：否则面板上的用量「变少 / 消失」会被当成数据错误，却无从查起。
+  // 同步节奏是「按账号 + 刷新间隔」，量很小，不需要节流。
+  onSkip: (info) => log(`[credit-usage] ${info.uid} 跳过 ${info.skipped}/${info.total} 条无效记录（requestTime / credit 无法解析为有限数）`),
+});
 const creditHistorySync = createCreditHistorySync({
   cacheFile: path.join(DATA_DIR, 'credit-stats-cache.json'),
   apiHost: PROFILE.apiHost,
@@ -823,7 +860,7 @@ const updateState = {
   checkedVia: null,
   // 仓库存在但一个 Release 都没有（尚未成功构建发布）
   selfReleaseMissing: false,
-  source: null, // 本次/上次检查成功的更新源（github | gitee），用于粘性优先与面板展示
+  source: null, // 本次/上次检查成功的更新源（现仅 github），用于粘性优先与面板展示
 };
 // 上游基线版本状态（只读对照，不参与下载/安装）
 const upstreamUpdateState = {
@@ -1118,7 +1155,7 @@ function checkUpdate(force) {
       updateState.latest = latest;
       updateState.hasUpdate = semverCompare(latest, DAEMON_VERSION) > 0;
       updateState.source = source.id;
-      updateState.releaseUrl = rel.html_url || (source.id === 'gitee' ? `https://gitee.com/${UPDATE_REPO}/releases` : null);
+      updateState.releaseUrl = rel.html_url || null;
       updateState.notes = (rel.body || '').slice(0, 2000);
       // 资产按平台选取：macOS 找 .dmg；Windows 新版本优先同 profile 的 Setup.exe，
       // 旧版本仍只识别 ZIP，因此没有 EXE 时回退到对应的 -win64.zip。
@@ -1376,19 +1413,16 @@ function downloadUpdateInternal() {
     expectedSha256: expectSha,
     expectedSize: updateState.dmgSize,
   });
-  if (!expectSha && updateState.source !== 'gitee') {
+  // 校验不可豁免：`UPDATE_SOURCES` 现为 github 单源，历史上的 `updateState.source !== 'gitee'`
+  // 免校验放行分支已删除 —— 既拿不到 Release 的 digest、notes 里也没有该资产的 SHA-256，
+  // 就停在这里。绝不为可用性牺牲完整性校验。
+  if (!expectSha) {
     const error = new Error('发布未提供可信的 SHA-256，已停止更新');
     updateState.status = 'error';
     updateState.error = error.message;
     updateState.message = '安装包缺少完整性校验，已停止更新';
     updateDebug('download-error', { stage: 'preflight', error: error.message, target: path.basename(target) });
     return Promise.reject(error);
-  }
-  if (!expectSha) {
-    // Gitee 镜像无 digest、notes 也不强制维护哈希：来源已被白名单限定为
-    // gitee.com/babygoton/WorkDaddy，跳过完整性校验（notes 里有哈希时仍会校验）。
-    log('[update] Gitee 镜像未提供 SHA-256，跳过完整性校验（下载源已限定白名单）');
-    updateDebug('download-skip-sha256', { source: updateState.source, latest: updateState.latest, target: path.basename(target) });
   }
   if (fs.existsSync(target)) {
     const checked = validateUpdateArtifact(target, expectSha);
@@ -2557,7 +2591,10 @@ function dispatchAutomationEvent(type, detail = {}) {
     automationEventKeys.add(key);
     while (automationEventKeys.size > 40) automationEventKeys.delete(automationEventKeys.values().next().value);
   }
-  const tasks = readAutomations(DATA_DIR).filter((task) => taskMatchesEvent(task, canonicalType, detail));
+  // 读失败只丢这一次事件，绝不外抛（这里是 CDP 事件链）；见 readAutomationsTolerant 的说明。
+  const allTasks = readAutomationsTolerant('事件分发');
+  if (!allTasks) return;
+  const tasks = allTasks.filter((task) => taskMatchesEvent(task, canonicalType, detail));
   if (!tasks.length) return;
   const account = detail.account || currentAccount();
   tasks.forEach((task) => {
@@ -4223,12 +4260,18 @@ async function runLimitFailoverCore(detail, ports) {
     ports.log('limit-failover:start ' + JSON.stringify({ fromUid: current.uid, modelId, taskSource, textLength: taskText.length, requireSyncedContent, hasSourceAnchor: !!(sourceSnapshot && sourceSnapshot.anchor), sourceCount: (sourceSnapshot && sourceSnapshot.count) || 0, at: new Date(now).toISOString() }));
     const tried = [];
     let lastError = '';
+    // 最后一轮「为什么选不出账号」的结构化原因（limit-failover.js 的 pickFailoverTarget）。
+    // 收尾提示要区分「没有别的账号」与「别的账号全在限流窗口里」，见下面。
+    let emptyPick = null;
     // 「刚刚离开的账号」每轮都会变：第 1 轮离开的是最初那个限流账号，第 2 轮离开的是上一轮的候选。
     // 复制任务的源必须用它 —— 传 current.uid 会让第二轮把「早就不在用的账号」当源。
     let liveUid = current.uid;
     for (let round = 0; round < 6; round++) {
       const pick = limitFailover.pickFailoverTarget(limitFailoverAccounts(), current.uid, readLimitFailoverState(), Date.now());
-      if (!pick || tried.includes(pick.account.uid)) break;
+      // pickFailoverTarget 现在**永远返回对象**：account 为 null 时带 reason，
+      // 所以这里必须先判 account 再判「这个账号是不是已经试过了」。
+      if (!pick || !pick.account) { emptyPick = pick || null; break; }
+      if (tried.includes(pick.account.uid)) break;
       const target = pick.account;
       tried.push(target.uid);
       ports.log('limit-failover:try ' + JSON.stringify({ uid: target.uid, nickname: target.nickname || '', reason: pick.reason }));
@@ -4329,9 +4372,30 @@ async function runLimitFailoverCore(detail, ports) {
       }
     }
 
-    await ports.notify('error', '其他账号都无法接管本次任务，已停止自动切号');
-    ports.log('limit-failover:exhausted ' + JSON.stringify({ tried, lastError }));
-    return { ok: false, reason: 'no-usable-target', tried, error: lastError, modelId, fromUid: current.uid };
+    // 三种「没能换号」必须分开说（审查 P1-7：它们以前共用同一句话，用户分不出是哪种）：
+    //   all-blocked —— 别的账号都在限流窗口里 → 要告诉用户**什么时候能重试**；
+    //   no-others   —— 压根没有别的账号    → 要告诉用户**为什么没得换**（账号列表里就一个）；
+    //   其余        —— 试过的都没顶上来    → 沿用原来的提示。
+    // 已经在别的账号上试过（tried 非空）时，最后这一轮「全被限流」是**试出来的结果**，
+    // 不是「一开始就没得选」—— 两者的提示不一样，必须用 tried 分开：
+    //   · tried 为空 + all-blocked → 一开始就全在窗口里、一个都没试 → 报「最早几点可重试」；
+    //   · tried 非空               → 试过的都没顶上来 → 沿用原文案（桌面日志会附上试过谁）。
+    const nothingToTry = tried.length === 0;
+    const allBlocked = nothingToTry && !!(emptyPick && emptyPick.reason === 'all-blocked');
+    const noOthers = nothingToTry && !!(emptyPick && emptyPick.reason === 'no-others');
+    const failReason = allBlocked ? 'all-blocked' : (noOthers ? 'no-others' : 'no-usable-target');
+    const recoveryAt = allBlocked ? Number(emptyPick.earliestRecovery || 0) : 0;
+    const recoveryClock = recoveryAt > 0
+      ? String(new Date(recoveryAt).getHours()).padStart(2, '0') + ':' +
+        String(new Date(recoveryAt).getMinutes()).padStart(2, '0')
+      : '';
+    await ports.notify('error', allBlocked
+      ? '其他账号都在限流窗口内' + (recoveryClock ? '（最早 ' + recoveryClock + ' 后可重试）' : '') + '，已停止自动切号'
+      : noOthers
+        ? '没有别的账号可以接管本次任务（账号列表里只有这一个账号），已停止自动切号'
+        : '其他账号都无法接管本次任务，已停止自动切号');
+    ports.log('limit-failover:exhausted ' + JSON.stringify({ tried, lastError, reason: failReason, earliestRecovery: recoveryAt || 0 }));
+    return { ok: false, reason: failReason, tried, error: lastError, modelId, fromUid: current.uid, earliestRecovery: recoveryAt || null };
   } finally {
     try { if (restorePanelTo) await ports.setPanelOpen(true); } catch (_) {}
     resolveInFlight();
@@ -4414,12 +4478,13 @@ function limitFailoverPrimaryUid() {
   try { return String(primaryAccountStore.get() || '').trim(); } catch (_) { return ''; }
 }
 
-// 该账号的限流窗口什么时候结束（没记录 → 0）
+// 该账号的限流窗口什么时候结束（没记录 / 记录不可信 → 0）。
+// 判据只有一份，在 limit-failover.js：优先记录里标记当时算好的绝对时刻 blockedUntil，
+// 老格式（只有 blockedAt）才现算。以前这里自己算一遍、isAccountBlocked 又算一遍，
+// 两处一旦口径分叉，「选备选账号」与「等主账号窗口」就会各按各的时间走。
 function limitFailoverBlockedUntil(uid) {
   const entry = readLimitFailoverState()[String(uid || '')];
-  const at = Number(entry && entry.blockedAt || 0);
-  if (!Number.isFinite(at) || at <= 0) return 0;
-  return at + limitFailover.LIMIT_FAILOVER_WINDOW_MS;
+  return limitFailover.entryBlockedUntil(entry, limitFailover.LIMIT_FAILOVER_WINDOW_MS, Date.now());
 }
 
 // 当前账号相对这次切号计划的状态：target(还在续跑账号) / primary(已经回到主账号) / other / unknown
@@ -4674,6 +4739,8 @@ function handleLimitFailoverOutcome(result, context) {
     fromNickname,
     reason: String(result.reason || ''),
     error: String(result.error || ''),
+    // 「全在限流窗口里」时用来渲染「最早几点可重试」（buildFailureReport 里消费）
+    earliestRecovery: Number(result.earliestRecovery) || 0,
     triedLabels: Array.isArray(result.tried) ? result.tried.map((uid) => accountSwitchLog.accountLabel(uid, '')) : [],
   }), at);
   return result;
@@ -5293,7 +5360,10 @@ function resumeAutomationAfterNavigation(run) {
   const next = run.pendingEvent;
   run.pendingEvent = null;
   if (!next || next.navigationSerial !== mainFrameNavigationSerial || next.pageSessionId !== cdpPageSessionId) return;
-  const task = readAutomations(DATA_DIR).find((item) => item.id === run.taskId && item.enabled && item.trigger.restartOnNavigation);
+  // 调用点在 finally 里，抛出去会冒到进程级并触发 daemon 退出；这里降级为「本次不恢复」。
+  const tasks = readAutomationsTolerant('恢复导航后的自动化');
+  if (!tasks) return;
+  const task = tasks.find((item) => item.id === run.taskId && item.enabled && item.trigger.restartOnNavigation);
   if (task) startAutomationRun(task, next);
 }
 
@@ -5935,6 +6005,37 @@ async function copySessionFiles(wbHome, oldId, newId, lineageIds = [], options =
   return result;
 }
 
+/**
+ * 会话**正文**（消息文件）的最近修改时刻 —— 只认 `projects/<proj>/<id>.jsonl`。
+ *
+ * 为什么不复用 sessionContentMtime（2026-09-19，判据收窄）：
+ * 那个函数取 6 条路径的最大 mtime，其中 `workspace/sessions/<id>/` 装的是 agent 侧的
+ * 文件备份/产物（`.modify_backup_meta/<hash>.<文件名>` 等），**任何一次文件写操作都会
+ * 把它顶到现在**，与「这个账号上的人有没有改这段对话」无关。实测样本：某账号副本的
+ * jsonl 仍停在 22:58:44，却因为当场创建测试文件时 WorkBuddy 记下的一个 modify 备份而被
+ * 判成「这一侧也改过」⇒ 假冲突 ⇒ 最新账号的内容始终下发不出去。
+ *
+ * 冲突判据要回答的正是「这段**对话**有没有被两边各自改过」，所以只看正文。
+ * 产物/空间的分歧不参与冲突判定 —— 它们由产物阶段自己的「目标侧不落后才跳过」口径兜底
+ * （copySessionWorkspacePayload），不会因为这里收窄就被盲目覆盖。
+ */
+function sessionBodyMtime(wbHome, sessionId) {
+  const id = String(sessionId || '').trim();
+  if (!id) return 0;
+  let latest = 0;
+  const projects = path.join(wbHome, 'projects');
+  try {
+    for (const entry of fs.readdirSync(projects, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      let stat;
+      try { stat = fs.lstatSync(path.join(projects, entry.name, id + '.jsonl')); } catch (_) { continue; }
+      if (!stat.isFile()) continue;
+      latest = Math.max(latest, Number(stat.mtimeMs || 0));
+    }
+  } catch (_) {}
+  return latest;
+}
+
 function sessionContentMtime(wbHome, sessionId) {
   const id = String(sessionId || '').trim();
   if (!id) return 0;
@@ -6344,7 +6445,23 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   const targetMapping = typeof getAutoCopyMapping === 'function'
     ? getAutoCopyMapping(DATA_DIR, lineageId, targetUid)
     : null;
-  const baselineAt = Number(targetMapping && targetMapping.updatedAt) || 0;
+  // 冲突判据的标尺 = 「**整条血缘**最近一次共同快照」的时刻，而不是「当前目标账号」的
+  // copies 基线。二者不等价，而这个差别曾造成一类顽固的假冲突（2026-09-19 修复）：
+  //
+  //   syncAutoCopyLineage 会把内容写给 **全部** 成员（下面的 for (const target of live)），
+  //   却只在收尾时给**当前 targetUid** 记 copies 基线。于是其余成员的基线天然滞后于
+  //   它们磁盘上的内容；下一次以它们为目标时，「有几个成员比基线新」会把早已同步齐的
+  //   成员全部数进去 ⇒ ≥2 ⇒ 假冲突。又因为冲突分支在写盘之前 return（下不推进基线），
+  //   这个假冲突会**永久自锁**：每次切号都报同一条，且最新内容再也下发不出去。
+  //   实测样本：三份副本的 jsonl/artifact-index mtime 完全相同、sha256 也完全相同，
+  //   却被判冲突。
+  //
+  // 取值：血缘级 watermark（由本函数成功 fan-out 后写入）→ 回退到该血缘所有目标里最近的
+  // updatedAt（兼容存量数据，让旧假冲突能自愈一次）→ 再回退当前目标的基线。
+  const lineageSyncedAt = typeof getAutoCopyLineageSyncedAt === 'function'
+    ? getAutoCopyLineageSyncedAt(DATA_DIR, lineageId)
+    : 0;
+  const baselineAt = lineageSyncedAt || Number(targetMapping && targetMapping.updatedAt) || 0;
   const live = [];
   for (const member of records) {
     await yieldAutoCopyToRenderer();
@@ -6355,7 +6472,12 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
     if (!rows.length) continue;
     live.push(Object.assign({}, member, {
       row: rows[0],
-      contentMtime: sessionContentMtime(PROFILE.dataRoot, member.id),
+      // ⚠️ 用「正文 mtime」而不是 sessionContentMtime：后者的信号面含
+      //    workspace/sessions/<id>/（agent 侧 modify 备份/产物），任何文件写操作都会把
+      //    它顶到现在，与「对话有没有被编辑」无关 ⇒ 假冲突。详见 sessionBodyMtime 注释。
+      //    同一份值同时喂给下面的冲突判据和 selectLatestAutoCopyMember —— 两处必须同源：
+      //    若判据看正文、选「最新」却看宽信号，就会出现「按正文判不冲突，却选了错的那份去覆盖」。
+      contentMtime: sessionBodyMtime(PROFILE.dataRoot, member.id),
       updatedAt: Number(rows[0].updated_at || rows[0].last_activity_at || rows[0].created_at || 0),
     }));
   }
@@ -6421,6 +6543,12 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
     } catch (error) {
       log(`[sessions-auto-copy] 同步会话元数据失败 ${target.uid}/${target.id}: ${error.message}`);
     }
+  }
+  // 本次 fan-out 已把**全部**成员拉到同一份内容 ⇒ 这就是新的「共同快照」时刻，
+  // 记下来给下一次的冲突判据当标尺（见函数上方关于假冲突自锁的说明）。
+  // 只有「无失败文件」才算数：有失败时成员并未全部对齐，推进标尺会让判据偏松。
+  if (!failedFiles && typeof setAutoCopyLineageSyncedAt === 'function') {
+    setAutoCopyLineageSyncedAt(DATA_DIR, lineageId, Date.now());
   }
   if (!failedFiles && targetUid !== undefined && typeof setAutoCopyMapping === 'function') {
     const targetMember = live.find((member) => member.uid === String(targetUid || '').trim());
@@ -8305,10 +8433,15 @@ async function buildSpaceScanResolvers() {
     resolveAccountName: (name) => {
       const base = String(name || '').replace(/^user-/, '');
       if (!base) return null;
+      // 前缀必须落在 '-' 分隔符上：旧写法 `base.startsWith(uid)` 会让 uid `abc` 吞掉 `abcd`
+      // 的目录（返回哪个取决于 uids 的顺序）。`<uid>` 与 `<uid>-<suffix>` 两种形态都要认；
+      // uid 互为前缀时可能出现多个候选，取最长者 ⇒ 结果与 uids 顺序无关。
+      let matched = null;
       for (const uid of uids) {
-        if (base === uid || base.startsWith(uid)) return uid;
+        if (base !== uid && !base.startsWith(uid + '-')) continue;
+        if (!matched || uid.length > matched.length) matched = uid;
       }
-      return null;
+      return matched;
     },
     resolveSpaceSlug: (slug) => cwdBySlug.get(String(slug)) || null,
   };
@@ -8629,17 +8762,97 @@ function isAllowedDevtoolsOrigin(origin, upstreamPort) {
   }
 }
 
-function readBody(req) {
-  return new Promise((resolve) => {
+// 请求体上限的默认值（唯一入口 `readBody` 用）。
+// 约束只是把「无界读取」变成「有界读取」，不是限流：最大的一类合法请求是图片 dataURL
+// （/api/custom-wallpapers、/api/theme-image 自身把图片限在 10 MB，base64 后约 13.4 MB），
+// 64 MiB 留足余量；其余路由的 JSON 实测都在 1 MB 以内。
+const READ_BODY_LIMIT = 64 * 1024 * 1024;
+
+/**
+ * 读取并解析 JSON 请求体 —— 85 条 POST 路由共用的**唯一**请求体入口
+ * （2026-09-19 审查报告 P1-1：一条函数的缺陷面 = 全站）。
+ *
+ * 三条不变式，缺一条都会出真问题：
+ *
+ * ① **一定会 settle**。旧实现只监听 `end`；客户端发半截 body 后 RST 时，
+ *    Node 22 **只会 emit `aborted`、不会 emit 未捕获的 `error`**（实测复刻过），
+ *    于是 `end` 永不到来、Promise 永久挂起 —— 实测 300 次「半截 body + RST」后
+ *    服务端 pending 计数从 20 涨到 320，且没有任何报错。
+ *    所以这里 `end` / `error` / `aborted` / `close` 四条路径都接，
+ *    用 `settled` 旗标保证恰好 settle 一次（`cleanup()` 先摘监听再销毁连接，避免重入）。
+ *
+ * ② **有界**。累计字节超过 `limit` 立即 reject（`statusCode = 413`），
+ *    余下数据 `resume()` 排空丢弃 —— 不累积进内存，也不 `destroy()` 连接
+ *    （销毁连接会让 413 响应根本发不出去，客户端只看到空响应）。
+ *
+ * ③ **空 body 仍是 `{}`**（大量路由靠「无 body 的 POST」触发，例如 /api/inject），
+ *    但**非空且解析失败必须 reject**（`statusCode = 400`）。
+ *    旧实现把损坏的请求体折成 `{}`，等于把「客户端发错了东西」当成「请求本来就是空的」，
+ *    调用方照着空请求继续往下做 —— 与 readAutomations 把读失败折成空集合是同一类病。
+ */
+function readBody(req, limit = READ_BODY_LIMIT) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
     let data = '';
-    req.on('data', (c) => (data += c));
-    req.on('end', () => {
-      try {
-        resolve(data ? JSON.parse(data) : {});
-      } catch (_) {
-        resolve({});
+    let size = 0;
+    const ignoreLateError = () => {};
+    const cleanup = () => {
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('aborted', onIncomplete);
+      req.removeListener('close', onIncomplete);
+      // `error` 换成空监听而不是摘掉：settle 之后才到达的 error 若没人接，
+      // EventEmitter 会直接抛出去（冒到进程级 uncaughtException）。
+      req.removeListener('error', onError);
+      req.on('error', ignoreLateError);
+    };
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(value);
+    };
+    function fail(message, statusCode) {
+      const error = new Error(message);
+      error.statusCode = statusCode;
+      finish(reject, error);
+      return error;
+    }
+    function onData(chunk) {
+      if (settled) return;
+      size += chunk.length;
+      if (size > limit) {
+        fail('请求体过大（超过 ' + Math.round(limit / 1024 / 1024) + ' MiB）', 413);
+        // 先 settle（并摘掉监听），再 `resume()` 把余下的数据流排空丢弃：
+        // 不 continue 累积、也不 `destroy()` —— 销毁连接会让 413 响应根本发不出去
+        // （实测：直接 destroy 时客户端拿到的是空响应，看不到原因）。
+        try { req.resume(); } catch (_) {}
+        return;
       }
-    });
+      data += chunk;
+    }
+    function onEnd() {
+      if (!data) return finish(resolve, {});
+      let parsed;
+      try {
+        parsed = JSON.parse(data);
+      } catch (_) {
+        fail('请求体不是合法 JSON', 400);
+        return;
+      }
+      finish(resolve, parsed);
+    }
+    function onError(error) {
+      fail('读取请求体失败（' + ((error && error.code) || (error && error.message) || 'unknown') + '）', 400);
+    }
+    function onIncomplete() {
+      fail('请求被客户端中断，未能读到完整请求体', 400);
+    }
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+    req.on('aborted', onIncomplete);
+    req.on('close', onIncomplete);
   });
 }
 
@@ -11215,7 +11428,7 @@ function decryptLegacyExport(b64, password) {
   return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }
 
-function handleApi(req, res) {
+function handleApiRoute(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || HOST}`);
   const p = url.pathname;
   const origin = String(req.headers.origin || '');
@@ -11649,7 +11862,8 @@ function handleApi(req, res) {
         const selected = tasks.filter((task) => ids.includes(task.id));
         if (!selected.length) return json(res, 400, { ok: false, error: '未选择自动化任务' });
         if (action === 'delete') {
-          writeAutomations(DATA_DIR, tasks.filter((task) => !ids.includes(task.id)));
+          // 显式删除：允许清空（上面 `!selected.length` 已保证至少命中一条任务）。
+          writeAutomations(DATA_DIR, tasks.filter((task) => !ids.includes(task.id)), { allowEmpty: true });
         } else if (action === 'enable' || action === 'disable') {
           if (selected.some(task => !isTaskCompatible(task))) throw new Error('任务使用更新的协议，请升级 WorkDaddy 后再编辑');
           selected.forEach((task) => { task.enabled = action === 'enable'; task.updatedAt = Date.now(); });
@@ -13141,7 +13355,9 @@ function handleApi(req, res) {
           const payload = await readSessionTransfer(body.file, body.password, path.join(directory, 'staged'));
           result = await importSessionArchives(payload, body.targetUid, true);
         } else {
-          const body = await readBody(req);
+          // 旧格式（v2/v3）的 JSON 导入：`content` 是整份会话归档的 base64，
+          // 100 个会话可以到几十 MB，因此显式放宽到 256 MiB（仍然是有界的）。
+          const body = await readBody(req, 256 * 1024 * 1024);
           result = await importSessions(body && body.content, body && body.password, body && body.targetUid);
         }
         log(`[sessions-import] 已导入 ${result.imported.length} 个会话，失败 ${result.failed} 个`);
@@ -14080,6 +14296,39 @@ function handleApi(req, res) {
   return json(res, 404, { ok: false, error: 'not found' });
 }
 
+/**
+ * 路由级兜底（2026-09-19 审查报告 P1-8 的收口）。
+ *
+ * `http.createServer` 的回调里**同步抛出的异常没有任何 try 包裹**，会直接走
+ * `process.on('uncaughtException')`，而那个 handler 会在 5.5 秒后 `process.exit(1)`
+ * —— 也就是说「一次瞬时文件读失败」会变成「一次 daemon 重启」；
+ * 若失败是持续性的（例如 `automations.json` 内容损坏），用户每刷一次面板就重启一次 daemon。
+ *
+ * 这里统一折成 500 + 可读原因（响应已发出的情况由 `json()` 自己判 `writableEnded` 兜住）。
+ */
+function handleApi(req, res) {
+  const failure = (error) => {
+    const message = String((error && error.message) || error || '未知错误');
+    // 路由（或 readBody）可以自带 `statusCode` 表达「这是客户端的错」：400 非法请求体 / 413 过大。
+    // 没标注的按 500 记（那才是真正的服务端异常，才值得上报）。
+    const status = Number(error && error.statusCode) || 500;
+    log('[api] 路由处理异常(' + status + '): ' + message);
+    if (status >= 500) {
+      try { const reported = captureException(error, { stage: 'daemon-api-route' }); if (reported && reported.catch) reported.catch(() => {}); } catch (_) {}
+    }
+    try { json(res, status, { ok: false, error: message }); } catch (_) {}
+    return false;
+  };
+  try {
+    const pending = handleApiRoute(req, res);
+    // 部分路由返回 Promise（readBody().then(...)）：异步分支里的抛错同样不能冒到进程级。
+    if (pending && typeof pending.then === 'function') return pending.catch(failure);
+    return pending;
+  } catch (error) {
+    return failure(error);
+  }
+}
+
 
 // ===== 电脑休眠控制（三模式：allow/keep/until-done + 显示器开关 + 立即休眠 pmset sleepnow）=====
 // mode: 'allow' 允许电脑休眠（默认）| 'keep' 持续禁止休眠 | 'until-done' 所有任务结束后允许休眠
@@ -14410,7 +14659,10 @@ cdpLoop();
 // All automatic check-in entry points are owned by the visible automation task.
 const tickAutomationSchedules = createScheduleTicker(DATA_DIR, { onSlot: noteScheduleSlot });
 function runAutomationSchedules() {
-  tickAutomationSchedules(readAutomations(DATA_DIR), startAutomationRun,
+  // 1 秒一拍：读失败不能让异常冒到 timer 回调外（外层没有 try，会走 uncaughtException → 5.5 秒后退出 daemon）。
+  const tasks = readAutomationsTolerant('定时调度');
+  if (!tasks) return;
+  tickAutomationSchedules(tasks, startAutomationRun,
     (id) => Array.from(automationRuns.values()).some((run) => run.taskId === id && run.status === 'running'));
 }
 runAutomationSchedules();

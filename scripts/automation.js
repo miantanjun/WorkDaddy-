@@ -105,19 +105,62 @@ function safeId(value) {
   return /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(id) ? id : '';
 }
 
+// 写入守卫阈值：磁盘上条目数 ≥ 此值、而本次要写入 0 条时，视为「疑似读取失败」并拒绝。
+const WIPE_GUARD_MIN = 3;
+
+/**
+ * 读取自动化任务集合。
+ *
+ * ⚠️ **只有「文件确实不存在」才等价于空集合**。其余读取失败（Windows 上杀软实时扫描、
+ * 备份软件/编辑器占用文件抛的 `EBUSY` / `EPERM` / `EACCES`，都是瞬时且可恢复的）
+ * **必须上抛**：本模块与 `daemon.js` 里绝大多数调用点都是「读 → 改 → 写」，
+ * 一旦把读失败折成 `[]`，紧接着的写回就会把用户全部自动化任务静默清空
+ * （无 `.bak`、无轮转、无回滚 API —— 2026-09-19 代码审查唯一 P0）。
+ *
+ * 纯读取路径（拿到结果只用于展示/判断，不回写）请改用 `daemon.js` 的 `readAutomationsTolerant()`。
+ */
 function readAutomations(dataDir) {
+  const file = storePath(dataDir);
+  let text;
   try {
-    const raw = JSON.parse(fs.readFileSync(storePath(dataDir), 'utf8'));
-    const list = Array.isArray(raw) ? raw : raw && Array.isArray(raw.items) ? raw.items : [];
-    return list.filter(Boolean).map((item) => isSupportedTaskSchema(item) ? normalizeTask(item) : clone(item));
-  } catch (_) { return []; }
+    text = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return [];
+    throw new Error('读取自动化任务失败（' + ((error && error.code) || (error && error.message) || 'unknown') +
+      '）。为避免覆盖现有任务，本次操作已中止，请稍后重试。');
+  }
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (_) {
+    throw new Error('自动化任务文件内容已损坏，无法解析。为避免覆盖现有任务，本次操作已中止；' +
+      '请从备份恢复 automations.json 后重试。');
+  }
+  const list = Array.isArray(raw) ? raw : raw && Array.isArray(raw.items) ? raw.items : [];
+  return list.filter(Boolean).map((item) => isSupportedTaskSchema(item) ? normalizeTask(item) : clone(item));
 }
 
-function writeAutomations(dataDir, items) {
-  fs.mkdirSync(dataDir, { recursive: true });
+/** 只读探测磁盘上的条目数；读不到时返回 `null`（表示「未知」，**不是** 0）。 */
+function countAutomationsOnDisk(dataDir) {
+  try { return readAutomations(dataDir).length; } catch (_) { return null; }
+}
+
+function writeAutomations(dataDir, items, options = {}) {
+  const list = Array.isArray(items) ? items : [];
   const file = storePath(dataDir);
+  // 独立守卫：兜住「内容可解析但条目骤减」这一类残余风险（例如某个调用点把读失败当成了空集合）。
+  // 只有调用方**显式**声明这是删除操作（`options.allowEmpty`）时才放行。
+  if (!options.allowEmpty && list.length === 0 && fs.existsSync(file)) {
+    const previous = countAutomationsOnDisk(dataDir);
+    // previous === null 表示「文件在、但读不出来」—— 同样绝不能被当成「0 条」。
+    if (previous === null || previous >= WIPE_GUARD_MIN) {
+      throw new Error('拒绝写入：自动化任务将从 ' + (previous === null ? '未知条数' : previous + ' 条') +
+        '变为 0 条，疑似读取失败导致，已保护现有任务。如确认要删除全部任务，请使用「删除」入口。');
+    }
+  }
+  fs.mkdirSync(dataDir, { recursive: true });
   const tmp = file + '.tmp-' + process.pid;
-  fs.writeFileSync(tmp, JSON.stringify(items, null, 2) + '\n', { mode: 0o600 });
+  fs.writeFileSync(tmp, JSON.stringify(list, null, 2) + '\n', { mode: 0o600 });
   fs.renameSync(tmp, file);
 }
 
@@ -310,11 +353,21 @@ function installBuiltinTask(dataDir, file) {
   const task = validateTask(JSON.parse(fs.readFileSync(file, 'utf8')));
   const markerFile = path.join(dataDir, 'automation-builtins.json');
   let markers = {};
-  try { markers = JSON.parse(fs.readFileSync(markerFile, 'utf8')); } catch (_) {}
+  let markersReadable = true;
+  try { markers = JSON.parse(fs.readFileSync(markerFile, 'utf8')); }
+  catch (error) {
+    // 只有「标记文件确实不存在」才等价于「还没有任何内置标记」。
+    // 读失败（含内容损坏）时若继续走下去，下面那条 writeMarker({managed:false})
+    // 会把一个内置任务**永久**标记成「用户自有」，此后它再也收不到内置升级。
+    if (!error || error.code !== 'ENOENT') markersReadable = false;
+    markers = {};
+  }
   const previous = markers[task.id];
   const tasks = readAutomations(dataDir);
   const index = tasks.findIndex((item) => item && item.id === task.id);
   const revision = Number.isInteger(task.revision) && task.revision > 0 ? task.revision : 0;
+  // 读不到标记就什么都不做：既不改任务，也不覆盖标记文件（覆盖会丢掉其它任务的标记）。
+  if (!markersReadable) return { status: 'skipped', revision };
   const writeMarker = (value) => atomicWriteText(markerFile, JSON.stringify({ ...markers, [task.id]: value }) + '\n');
   const managedMarker = () => ({ managed: true, revision: revision || 1, contentHash: builtinContentHash(task) });
 
@@ -375,7 +428,11 @@ function adoptBuiltinTask(dataDir, file) {
   const revision = Number.isInteger(task.revision) && task.revision > 0 ? task.revision : 1;
   const markerFile = path.join(dataDir, 'automation-builtins.json');
   let markers = {};
-  try { markers = JSON.parse(fs.readFileSync(markerFile, 'utf8')); } catch (_) {}
+  try { markers = JSON.parse(fs.readFileSync(markerFile, 'utf8')); }
+  catch (error) {
+    // 读不到标记（不是「文件不存在」）时不认领：认领会整体重写标记文件，把其它任务的标记弄丢。
+    if (!error || error.code !== 'ENOENT') return { status: 'skipped', revision };
+  }
   const previous = markers[task.id];
   if (previous === true || (previous && typeof previous === 'object' && previous.managed === true)) {
     return { status: 'already-managed', revision };

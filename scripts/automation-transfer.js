@@ -82,7 +82,7 @@ function readTransferBody(req) {
     req.on('data', chunk => {
       if (failed) return;
       size += chunk.length;
-      if (size > 12 * 1024 * 1024) { failed = true; chunks.length = 0; reject(new Error('任务文件不能超过 8 MiB')); return; }
+      if (size > 12 * 1024 * 1024) { failed = true; chunks.length = 0; reject(new Error('任务文件不能超过 12 MiB')); return; }
       chunks.push(Buffer.from(chunk));
     });
     req.on('error', reject);
