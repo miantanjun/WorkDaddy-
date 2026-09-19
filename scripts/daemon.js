@@ -156,7 +156,6 @@ const { fetchUsageSinceAnchor, startOfLocalDay } = require('./credit-request-usa
 const { createCreditHistorySync, historyRange } = require('./credit-history-sync.js');
 const { createCreditUsageStore } = require('./credit-usage-store.js');
 const { scanTokenStatsCached, tokenStatsCacheReady } = require('./token-stats.js');
-const { initializeCheckinConsent, readCheckinConsent, decideCheckinConsent } = require('./checkin-consent.js');
 const { classifyCheckinResult, checkinEndpointsForToken } = require('./checkin-result.js');
 const {
   DAY_MS: TOKEN_REFRESH_DAY_MS,
@@ -166,6 +165,10 @@ const {
 } = require('./token-refresh.js');
 const { fetchGrowthTodayActive, activateGrowthAccount, fetchGrowthStreak, createGrowthStreakCache } = require('./growth-active.js');
 const {
+  createDailyProgressCache,
+  fetchDailyProgress,
+} = require('./growth-daily.js');
+const {
   captureException,
   captureMessage,
   setTelemetryEnabled,
@@ -174,6 +177,7 @@ const {
 } = require('./sentry-report.js');
 const { createUsageReporter } = require('./usage-report.js');
 const { getProfile, profileDataDir, listInstalledModelSources } = require('./profiles.js');
+const plat = require('./platform.js');
 const { readWorkBuddyTarget } = require('./workbuddy-target.js');
 const { classifyTarget, looksLikeWbFamilyTarget, isTargetForProfile } = require('./cdp-targets.js');
 const { createSessionDb, normalizeSessionIdBatch, parameterCount } = require('./session-db.js');
@@ -185,11 +189,13 @@ const {
   resolveArchiveTarget,
 } = require('./secure-transfer.js');
 const { writeSessionTransfer, readSessionTransfer, receiveSessionUpload } = require('./session-transfer.js');
+const { forkedTitle, planForkAtMessage } = require('./session-fork.js');
 const { pipeline: transferPipeline } = require('node:stream/promises');
 const { replaceFileWithRetry } = require('./atomic-file-write.js');
 const { parseUiPortState, profileUiPortCandidates } = require('./ui-port.js');
 const {
   CAPABILITIES: AUTOMATION_CAPABILITIES,
+  SCHEMA_VERSION: AUTOMATION_SCHEMA_VERSION,
   AGENT_EXAMPLES: AUTOMATION_AGENT_EXAMPLES,
   capabilityText: automationCapabilityText,
   agentBridgePaths,
@@ -199,6 +205,7 @@ const {
   readAutomations,
   writeAutomations,
   validateTask,
+  createSafetyReviewTask,
   executeTask,
   canManuallyRunTask,
   taskMatchesEvent,
@@ -216,12 +223,14 @@ const scheduledSend = require('./scheduled-send.js');
 const scheduleLedger = require('./schedule-ledger.js');
 
 const { assertAccountRequestUrl, createTaskState, cancellableWait, createRendererGate, probeSessionReceipt, receiptComplete } = require('./automation-runtime.js');
+const { normalizeAutomationModelId, selectAutomationModel, verifyAutomationModel, restoreNewTaskModelPreference } = require('./automation-model.js');
 const acquireAutomationRenderer = createRendererGate();
 const acquireAutomationInput = createRendererGate();
 let automationInputActive = false;
 
 const { previewPackage, PACKAGE_FORMAT_VERSION } = require('./automation-packages.js');
-const { exportTasks, previewImport, importTasks, readTransferBody } = require('./automation-transfer.js');
+const { exportTasks, importTasks, readTransferBody } = require('./automation-transfer.js');
+const { createAutomationDiscovery } = require('./automation-discovery.js');
 
 const { createAutomationNotifier } = require('./toast-options.js');
 const { runCompletionReport, probeAccountCompletion } = require('./completion-report.js');
@@ -410,22 +419,36 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
 //        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
 //        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
-const DAEMON_VERSION = '1.3.17';
+// 1.4.0：合并上游 1.2.3（上游 1.2.43–1.2.59）——自动化任务可从 GitHub/Gitee 发现与导入、
+//        自动化协议 V2 运行上下文、账号页每日三环进度、成长圆环与猫咪液位徽章、用量统计改版、
+//        会话复制冲突登记（血缘两边都改过时不覆盖任何一边，只登记待用户处理）、
+//        更新源降级链与便携版 ZIP 发行；上游「签到不再作为内置任务」一并落地
+//        （checkin-consent 模块删除、注入侧弹窗与接口随之下线）。本地 1.3.x 增强全部保留。
+const DAEMON_VERSION = '1.4.0';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
-const UPSTREAM_VERSION = '1.2.2';
-// 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
-// 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.17-20260919-switch-settle-gate';
+const UPSTREAM_VERSION = '1.2.3';
+// 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.3）。
+// 本机 fork 用自己的修改版版本号（1.4.x = 上游 1.2.3 基线 + 本地增强），否则更新检查会误判。
+const DAEMON_BUILD_ID = 'release-1.4.0-20260919-upstream-1.2.3-merge';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
+const automationDiscovery = createAutomationDiscovery({
+  dataDir: DATA_DIR,
+  runtime: { version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform },
+});
 const HOST = '127.0.0.1';
-const IS_WIN = process.platform === 'win32'; // Windows 移植：平台分支开关（macOS 行为保持不变）
+// 平台分支开关。上游历史代码把「非 Windows」一律当 macOS，Linux 适配时拆成
+// IS_MAC / IS_LINUX 两个显式常量，避免 Linux 走进 /Applications、osascript 等分支。
+const IS_WIN = process.platform === 'win32';
+const IS_MAC = process.platform === 'darwin';
+const IS_LINUX = process.platform === 'linux';
 // Windows 安装目录（install.ps1 铺、launcher 用、更新替换目标），对应 macOS 的 /Applications/WorkDaddy.app
 const WORKDADDY_INSTALL_NAME = PROFILE.id === 'workbuddy-ai' ? 'WorkDaddy AI' : 'WorkDaddy';
 // 仅用于界面展示的品牌名。与 WORKDADDY_INSTALL_NAME（macOS .app 包名 / 更新路径，不可改）严格分离。
 const WORKDADDY_DISPLAY_NAME = PROFILE.id === 'workbuddy-ai' ? 'WorkBuddy 助手 AI' : 'WorkBuddy 助手';
 const WORKDADDY_DIR_WIN = process.env.WBSWITCH_APP_DIR || path.resolve(__dirname, '..');
+const IS_PORTABLE_WIN = IS_WIN && fs.existsSync(path.join(WORKDADDY_DIR_WIN, 'WorkDaddy.portable'));
 const UI_PORT_BASE = parseInt(process.env.WBSWITCH_PORT || String(profileUiPortCandidates(PROFILE.id)[0]), 10);
 const ALLOW_UI_PORT_FALLBACK = !process.env.WBSWITCH_PORT;
 let ACTUAL_PORT = UI_PORT_BASE; // 实际监听端口（可能回退到当前 profile 的备用端口）
@@ -761,6 +784,12 @@ async function selectCdpPort(logFn = log) {
  */
 const UPDATE_REPO = process.env.WBSWITCH_UPDATE_REPO || 'miantanjun/WorkDaddy-';
 const UPDATE_API = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
+// 更新源清单（本地 fork 只有一个源：修改版发布在自建仓库的 GitHub Releases）。
+// 刻意不引入上游的 Gitee 镜像 —— 该镜像指向上游仓库，装上去会把界面与更新源退回官方状态。
+// 字段形状与上游保持一致：checkUpdate 按 source.id / source.api / source.downloadRoot 取用。
+const UPDATE_SOURCES = [
+  { id: 'github', api: UPDATE_API, downloadRoot: `https://github.com/${UPDATE_REPO}/releases/download` },
+];
 // 上游（原作者）仓库：只用于「版本对照 + 后台提示」。上游官方安装包不含本修改版补丁，
 // 直接安装会把界面与更新源退回官方状态（等于丢掉本地增强），因此上游更新不自动安装。
 const UPSTREAM_REPO = process.env.WBSWITCH_UPSTREAM_REPO || 'babygoton/WorkDaddy';
@@ -794,6 +823,7 @@ const updateState = {
   checkedVia: null,
   // 仓库存在但一个 Release 都没有（尚未成功构建发布）
   selfReleaseMissing: false,
+  source: null, // 本次/上次检查成功的更新源（github | gitee），用于粘性优先与面板展示
 };
 // 上游基线版本状态（只读对照，不参与下载/安装）
 const upstreamUpdateState = {
@@ -808,6 +838,18 @@ const upstreamUpdateState = {
 };
 let updateTimer = null;
 let updateDownloadPromise = null;
+
+// 启动时读取上次成功的更新源（粘性源）：下次检查优先用它，避免 GitHub 不通时每次都白等一次超时。
+try {
+  const c = JSON.parse(fs.readFileSync(UPDATE_CHECK_CACHE, 'utf8'));
+  if (c && UPDATE_SOURCES.some((s) => s.id === c.source)) updateState.source = c.source;
+} catch (_) {}
+
+// 源尝试顺序：粘性源优先，其余按 UPDATE_SOURCES 定义顺序补齐
+function updateSourceOrder() {
+  const head = UPDATE_SOURCES.find((s) => s.id === updateState.source);
+  return head ? [head, ...UPDATE_SOURCES.filter((s) => s !== head)] : UPDATE_SOURCES;
+}
 
 function updateDebug(stage, details) {
   const scrub = (value, key = '') => {
@@ -1023,6 +1065,18 @@ function parseSha256(body, assetName) {
   return m ? m[1].toLowerCase() : null;
 }
 
+// 从 Release body 解析逐文件 SHA-256（sha256sum 格式行：`<hex64>  <文件名>`）。
+// Gitee 镜像没有 asset.digest 字段，多资产发布必须在 notes 里逐文件给哈希。
+function parseSha256Map(body) {
+  const map = {};
+  if (!body) return map;
+  for (const line of String(body).split('\n')) {
+    const m = line.match(/^\s*([a-fA-F0-9]{64})\s+\*?(\S+)\s*$/);
+    if (m) map[m[2]] = m[1].toLowerCase();
+  }
+  return map;
+}
+
 function normalizeAssetSha256(value) {
   const text = String(value || '').trim().replace(/^sha256:/i, '');
   return /^[a-fA-F0-9]{64}$/.test(text) ? text.toLowerCase() : null;
@@ -1032,8 +1086,18 @@ function expectedUpdateSha256() {
   return updateState.dmgSha256 || parseSha256(updateState.notes, updateState.assetName);
 }
 
-// 检查更新：请求 Releases API，比对版本，结果写缓存（内存 + 文件）
+// 检查更新：按源降级链请求 Releases API（GitHub 失败自动降级 Gitee），比对版本，结果写缓存（内存 + 文件）
 function checkUpdate(force) {
+  // Linux 暂不提供自动更新。直接返回「无更新」，避免误下载 macOS 的 dmg。
+  if (IS_LINUX) {
+    updateState.status = 'idle';
+    updateState.hasUpdate = false;
+    updateState.latest = DAEMON_VERSION;
+    updateState.message = '当前平台（Linux）暂不支持自动更新，请安装新版 .deb';
+    updateState.checkedAt = Date.now();
+    return Promise.resolve(updateState);
+  }
+  if (IS_PORTABLE_WIN) return Promise.resolve(updateState);
   if (!force && updateTimer) {
     // 有缓存且未过期且非强制 → 直接返回缓存（面板高频打开不重复请求）
     if (Date.now() - updateState.checkedAt < UPDATE_CHECK_INTERVAL && updateState.latest) {
@@ -1049,14 +1113,21 @@ function checkUpdate(force) {
         throw new Error('Releases API ' + status + (status === 404 ? '（仓库暂无 Release）' : ''));
       }
       const rel = JSON.parse(body);
+      const source = UPDATE_SOURCES[0]; // 单源：自建仓库（多源降级链未采纳）
       const latest = String(rel.tag_name || '').replace(/^v/, '');
       updateState.latest = latest;
       updateState.hasUpdate = semverCompare(latest, DAEMON_VERSION) > 0;
-      updateState.releaseUrl = rel.html_url || null;
+      updateState.source = source.id;
+      updateState.releaseUrl = rel.html_url || (source.id === 'gitee' ? `https://gitee.com/${UPDATE_REPO}/releases` : null);
       updateState.notes = (rel.body || '').slice(0, 2000);
       // 资产按平台选取：macOS 找 .dmg；Windows 新版本优先同 profile 的 Setup.exe，
       // 旧版本仍只识别 ZIP，因此没有 EXE 时回退到对应的 -win64.zip。
-      const assets = rel.assets || [];
+      // Gitee 会把源码包（/archive/ 路径）混进 assets，且下载 URL 只信白名单 origin
+      // 的 /releases/download/ 路径，防止响应里的任意地址被当作安装包来源。
+      const assets = (rel.assets || []).filter((a) =>
+        a && typeof a.name === 'string' &&
+        typeof a.browser_download_url === 'string' &&
+        a.browser_download_url.startsWith(source.downloadRoot + '/'));
       const profileAsset = PROFILE.id === 'workbuddy-ai'
         ? /^(?:WorkDaddy-AI-Setup-|WorkDaddy-AI-).*\.(?:exe|zip|dmg)$/i
         : /^WorkDaddy-(?!AI-)(?:Setup-|).*\.(?:exe|zip|dmg)$/i;
@@ -1272,6 +1343,7 @@ function versionCheckPayload() {
 // 下载安装包（macOS .dmg / Windows Setup.exe 或旧 ZIP），流式写文件更新 progress，带 SHA-256 校验
 // 同一 daemon 内只允许一个下载流程，避免并发请求互相删除/覆盖固定目标文件。
 function downloadUpdate() {
+  if (IS_PORTABLE_WIN) return Promise.reject(new Error('便携版请从发布页手动下载新版 ZIP'));
   if (updateDownloadPromise) return updateDownloadPromise;
   updateDownloadPromise = Promise.resolve()
     .then(() => downloadUpdateInternal())
@@ -1304,13 +1376,19 @@ function downloadUpdateInternal() {
     expectedSha256: expectSha,
     expectedSize: updateState.dmgSize,
   });
-  if (!expectSha) {
+  if (!expectSha && updateState.source !== 'gitee') {
     const error = new Error('发布未提供可信的 SHA-256，已停止更新');
     updateState.status = 'error';
     updateState.error = error.message;
     updateState.message = '安装包缺少完整性校验，已停止更新';
     updateDebug('download-error', { stage: 'preflight', error: error.message, target: path.basename(target) });
     return Promise.reject(error);
+  }
+  if (!expectSha) {
+    // Gitee 镜像无 digest、notes 也不强制维护哈希：来源已被白名单限定为
+    // gitee.com/babygoton/WorkDaddy，跳过完整性校验（notes 里有哈希时仍会校验）。
+    log('[update] Gitee 镜像未提供 SHA-256，跳过完整性校验（下载源已限定白名单）');
+    updateDebug('download-skip-sha256', { source: updateState.source, latest: updateState.latest, target: path.basename(target) });
   }
   if (fs.existsSync(target)) {
     const checked = validateUpdateArtifact(target, expectSha);
@@ -1359,7 +1437,7 @@ function downloadUpdateInternal() {
         return;
       }
       const contentType = String(res.headers['content-type'] || '').toLowerCase();
-      if (!IS_WIN && /text\/html|application\/json/.test(contentType)) {
+      if (IS_MAC && /text\/html|application\/json/.test(contentType)) {
         res.resume();
         return failDownload(new Error(`下载响应不是 DMG (content-type=${contentType})`));
       }
@@ -1468,7 +1546,7 @@ function validateUpdateArtifact(file, expectSha = null) {
   if (updateState.dmgSize > 0 && stat.size !== updateState.dmgSize) {
     return { ok: false, reason: `安装包大小不匹配 (${stat.size} != ${updateState.dmgSize})` };
   }
-  if (!IS_WIN) {
+  if (IS_MAC) {
     let probe;
     try {
       probe = spawnSync('hdiutil', ['imageinfo', file], {
@@ -1743,6 +1821,7 @@ function extractAppFromDmg(dmgPath) {
 // 安装：macOS 继续使用 apply-update.sh；Windows 打开已校验的可见 Setup.exe，
 // 由 Inno Setup 确认 WorkBuddy 已退出、替换文件并启动新版。
 function applyUpdate() {
+  if (IS_PORTABLE_WIN) return Promise.reject(new Error('便携版不能运行安装式更新，请手动下载新版 ZIP'));
   if (!updateState.downloaded) {
     updateDebug('apply-error', { stage: 'preflight', error: '尚未下载完成', latest: updateState.latest });
     return Promise.reject(new Error('尚未下载完成'));
@@ -2174,7 +2253,13 @@ function runPendingReloadInjection(reason, executionContextId) {
 async function findCdpEndpoint() {
   // profile 已由启动器绑定时不能扫描其他产品的端口；CodeBuddy Agents/Editor
   // 共用 Browser 标识，跨 profile 扫描会把注入发到另一端。
-  const ports = process.env.WBSWITCH_PROFILE
+  //
+  // Linux 例外：端口常被其他服务占用（本机 9222 就被别的进程占着），
+  // 启动脚本会把 App 改派到 9223/9224…，此时若只盯 profile 默认端口就会
+  // 连到兄弟实例的页面上。因此 Linux 允许扫描候选端口，但归属判定仍是严格
+  // profile 匹配（页面 URL 必须命中本 profile 的安装目录/登录域名），
+  // 不会退化成「只看标题」的猜测，也就不会误连兄弟端。
+  const ports = (process.env.WBSWITCH_PROFILE && !IS_LINUX)
     ? [CDP_PORT_HINT, readCdpPortFile()].filter((p, i, a) => validCdpPort(p) && a.indexOf(p) === i)
     : cdpPortCandidates();
   for (const p of ports) {
@@ -2187,7 +2272,7 @@ async function findCdpEndpoint() {
       const list = await listRes.json();
       const targets = Array.isArray(list) ? list : [];
       const browserInfo = [version.Browser, version['User-Agent']].filter(Boolean).join(' ');
-      const belongsToWorkBuddy = /workbuddy|codebuddy/i.test(browserInfo);
+      const belongsToWorkBuddy = /workbuddy|codebuddy/i.test(browserInfo) || (IS_LINUX && targetsBelongToProfile(targets));
       if (belongsToWorkBuddy && targets.some(isWorkBuddyCdpTarget)) {
         if (readCdpPortFile() !== p) writeCdpPortFile(p);
         return p;
@@ -2200,6 +2285,33 @@ async function findCdpEndpoint() {
     }
   }
   return null;
+}
+
+/**
+ * Linux 兜底：Electron 的 /json/version 里 Browser 字段固定是 "Chrome/xxx"，
+ * 应用名只出现在 User-Agent（且部分打包方式会省略）。因此额外接受
+ * 「页面 URL 命中当前 profile 的强信号」作为归属证据 —— classifyTarget 只认
+ * 应用安装路径（/opt/WorkBuddy/、workbuddy-ai/）与登录域名，不会退化成裸标题猜测，
+ * 所以不会误连其他 Chromium 应用。
+ */
+function targetsBelongToProfile(targets) {
+  const installRoot = WORKBUDDY_APP ? path.resolve(WORKBUDDY_APP) : '';
+  const prefix = installRoot && (installRoot.endsWith('/') ? installRoot : installRoot + '/');
+  return targets.some((target) => {
+    if (!target || target.type !== 'page') return false;
+    if (classifyTarget(target.url, target.title, target.description) === PROFILE.id) return true;
+    // 安装目录包裹：企业版/自定义安装路径下，页面 URL 里可能不含 workbuddy 字样，
+    // 只要 file:// 页面确实来自当前 profile 可执行文件所在目录，即认定归属。
+    if (!prefix) return false;
+    const url = String(target.url || '');
+    if (!/^file:/i.test(url)) return false;
+    try {
+      const pagePath = decodeURIComponent(new URL(url).pathname);
+      return pagePath === installRoot || pagePath.startsWith(prefix);
+    } catch (_) {
+      return false;
+    }
+  });
 }
 
 function isWorkBuddyCdpTarget(target) {
@@ -2703,11 +2815,26 @@ function autoFocusSessionByTitle(sourceTitle, logFn) {
 }
 
 const WORKBUDDY_TARGET = IS_WIN ? null : readWorkBuddyTarget({ dataDir: DATA_DIR, profileId: PROFILE.id });
-const WORKBUDDY_APP = IS_WIN ? '' : (WORKBUDDY_TARGET.binary
-  ? path.resolve(WORKBUDDY_TARGET.binary, '../../..')
-  : PROFILE.appPath);
-const WORKBUDDY_BINARY = IS_WIN ? '' : `${WORKBUDDY_APP}/Contents/MacOS/Electron`;
-const WORKBUDDY_APP_NAME = path.basename(WORKBUDDY_APP).replace(/\.app$/i, '');
+// 三平台的应用标识（WORKBUDDY_BINARY 用于 pgrep/pkill 精确匹配与直接启动）：
+//   macOS  : 二进制在 <X.app>/Contents/MacOS/Electron，WORKBUDDY_APP 是 .app 包路径
+//   Linux  : 没有 .app 包，二进制就是安装目录里的 Electron 主程序（实测 /opt/WorkBuddy/workbuddy），
+//            WORKBUDDY_APP 取所在目录
+//   Windows: 由 resolveWorkBuddyBinary() 动态解析（安装盘可自定义），此处保持空串
+const WORKBUDDY_APP = IS_WIN
+  ? ''
+  : IS_LINUX
+    ? path.dirname(WORKBUDDY_TARGET.binary || PROFILE.appPath)
+    : (WORKBUDDY_TARGET.binary ? path.resolve(WORKBUDDY_TARGET.binary, '../../..') : PROFILE.appPath);
+const WORKBUDDY_BINARY = IS_WIN
+  ? ''
+  : IS_LINUX
+    ? (WORKBUDDY_TARGET.binary || PROFILE.appPath)
+    : `${WORKBUDDY_APP}/Contents/MacOS/Electron`;
+const WORKBUDDY_APP_NAME = IS_WIN
+  ? ''
+  : IS_LINUX
+    ? path.basename(WORKBUDDY_BINARY)
+    : path.basename(WORKBUDDY_APP).replace(/\.app$/i, '');
 
 // Windows：解析 WorkBuddy 可执行文件真实路径（安装盘可自定义，必须动态查）
 // 优先级：WBSWITCH_WORKBUDDY_BIN > 运行进程 Path > 注册表卸载项 > 常见路径
@@ -2922,10 +3049,43 @@ function revalidateWindowsWorkBuddyProcess(original, binary) {
   return assertSameProcessIdentity(original, current);
 }
 
+/**
+ * Linux：枚举 WorkBuddy 进程 PID。
+ * 直接扫描 /proc/<pid>/cmdline 比较 argv[0]（含 realpath 归一），
+ * 不用 pgrep -f —— 后者把路径当扩展正则，路径里的 `.` 会变成通配符，
+ * 容易把无关进程（如 xlocal/share/...）误判成 WorkBuddy。
+ */
+function linuxWorkBuddyPids(binary = WORKBUDDY_BINARY) {
+  const target = String(binary || '').trim();
+  if (!target) return [];
+  let canonical = target;
+  try { canonical = fs.realpathSync(target); } catch (_) {}
+  let entries = [];
+  try { entries = fs.readdirSync('/proc'); } catch (_) { return []; }
+  const pids = [];
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    let raw = '';
+    try { raw = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8'); } catch (_) { continue; }
+    const argv0 = raw.split('\0')[0];
+    if (!argv0) continue;
+    if (argv0 === target) { pids.push(Number(entry)); continue; }
+    try {
+      if (fs.realpathSync(argv0) === canonical) pids.push(Number(entry));
+    } catch (_) {
+      /* 进程已退出或权限不足：忽略 */
+    }
+  }
+  return pids;
+}
+
 function workBuddyRunning(binary = null) {
   try {
     if (IS_WIN) {
       return verifiedWindowsWorkBuddyProcesses(binary || resolveWorkBuddyBinary()).length > 0;
+    }
+    if (IS_LINUX) {
+      return linuxWorkBuddyPids(binary || WORKBUDDY_BINARY).length > 0;
     }
     const r = spawnSync('pgrep', ['-f', WORKBUDDY_APP], { stdio: 'ignore', timeout: 5000 });
     return r.status === 0;
@@ -3016,6 +3176,20 @@ async function quitWorkBuddy() {
 
   if (!workBuddyRunning()) return true;
 
+  // Linux：无 osascript，直接向精确匹配到的 PID 发信号。
+  // 先 SIGTERM 让 Electron 走正常关闭流程（保存会话、落盘），超时再 SIGKILL。
+  if (IS_LINUX) {
+    for (const pid of linuxWorkBuddyPids()) {
+      try { process.kill(pid, 'SIGTERM'); } catch (_) {}
+    }
+    if (await waitForWorkBuddyExit(4000)) return true;
+    for (const pid of linuxWorkBuddyPids()) {
+      try { process.kill(pid, 'SIGKILL'); } catch (_) {}
+    }
+    if (await waitForWorkBuddyExit(3000)) return true;
+    throw new Error('无法确认 WorkBuddy 已退出');
+  }
+
   // 先尝试正常退出（给 Electron 一次处理机会），再强制 kill 并验证。
   await runCommand('osascript', ['-e', `tell application "${WORKBUDDY_APP_NAME}" to quit`]);
   if (await waitForWorkBuddyExit(2500)) return true;
@@ -3028,7 +3202,7 @@ async function quitWorkBuddy() {
 
 /** 探测 WorkDaddy.app 位置（macOS 专用：退出登录后打开它，由其 launcher 以 CDP 模式重启 WorkBuddy 并注入组件） */
 function findWorkDaddyApp() {
-  if (IS_WIN) return null;
+  if (!IS_MAC) return null;
   const appPackageName = WORKDADDY_INSTALL_NAME + '.app';
   const cands = [
     path.join('/Applications', appPackageName),
@@ -3046,24 +3220,77 @@ function findWorkDaddyApp() {
   return null;
 }
 
+/**
+ * 登录用户的「真实家目录」。
+ * 隔离 HOME 场景（海外版）下 os.homedir() 是隔离 HOME，不是真实家目录，
+ * 而启动器是用 $HOME 反推真实家目录的 —— 传错会让它把隔离 HOME 当真实家目录，
+ * 进而把 $ISOHOME/.config/mimeapps.list 覆盖成自指死链，
+ * 最终 xdg-open 把 https 交给 ChatGPT 之类的错误应用（真实踩过）。
+ */
+function resolveLauncherHome(launcherPath) {
+  return plat.launcherHomeFor(launcherPath, process.env.WBSWITCH_LAUNCH_HOME);
+}
+
+/**
+ * Linux：决定用什么重启 WorkBuddy。
+ * 优先用用户自己的启动器（WBSWITCH_WORKBUDDY_LAUNCHER）——它负责设置隔离 HOME、
+ * --user-data-dir、免代理环境等。直接 exec 应用二进制会丢掉这些配置，
+ * 导致应用以错误的 userData 目录启动、甚至要求重新登录。
+ */
+function resolveLinuxLaunchTarget() {
+  const launcher = String(process.env.WBSWITCH_WORKBUDDY_LAUNCHER || '').trim();
+  if (launcher) {
+    try {
+      fs.accessSync(launcher, fs.constants.X_OK);
+      return { command: launcher, viaLauncher: true };
+    } catch (_) {
+      log(`[logout] 启动器不可用，回退直接启动应用: ${launcher}`);
+    }
+  }
+  const bin = resolveWorkBuddyBinary();
+  return bin ? { command: bin, viaLauncher: false } : null;
+}
+
 /** 重新启动 WorkBuddy：macOS 优先走 WorkDaddy.app launcher；Windows 直接带 CDP 参数重启 exe */
 function relaunchWorkBuddy() {
   return (async () => {
     const port = await selectCdpPort(log);
-    if (IS_WIN) {
-      const bin = resolveWorkBuddyBinary();
-      if (!bin) throw new Error('未找到 WorkBuddy.exe（可用环境变量 WBSWITCH_WORKBUDDY_BIN 指定）');
+    // Linux 与 Windows 都支持「直接带 --remote-debugging-port 启动主程序」；
+    // 只有 macOS 因为 .app 包与登录自启的限制才需要绕道 WorkDaddy.app launcher。
+    if (IS_WIN || IS_LINUX) {
       const environmentMode = !!(PROFILE.cdp && PROFILE.cdp.mode === 'environment');
-      log(`[logout] 以 ${environmentMode ? '环境变量' : '命令行参数'} CDP=${port} 重启 WorkBuddy: ${bin}`);
-      const child = spawn(bin, environmentMode ? [] : [`--remote-debugging-port=${port}`], {
-        detached: true, stdio: 'ignore', windowsHide: true,
-        env: environmentMode ? { ...process.env, WORKBUDDY_REMOTE_DEBUGGING_PORT: String(port) } : process.env,
+      let command = '';
+      let viaLauncher = false;
+      if (IS_LINUX) {
+        const target = resolveLinuxLaunchTarget();
+        if (!target) throw new Error('未找到 WorkBuddy 可执行文件（可用环境变量 WBSWITCH_WORKBUDDY_BIN 指定）');
+        command = target.command;
+        viaLauncher = target.viaLauncher;
+      } else {
+        command = resolveWorkBuddyBinary();
+        if (!command) throw new Error('未找到 WorkBuddy 可执行文件（WorkBuddy.exe）（可用环境变量 WBSWITCH_WORKBUDDY_BIN 指定）');
+      }
+      // 日志用 ASCII 标记（非用户可见文案，无需进 i18n 词典）
+      log(`[logout] 以 ${environmentMode ? '环境变量' : '命令行参数'} CDP=${port} 重启 WorkBuddy: ${command}${viaLauncher ? ' [via launcher]' : ''}`);
+      const childEnv = { ...process.env };
+      if (environmentMode) childEnv.WORKBUDDY_REMOTE_DEBUGGING_PORT = String(port);
+      if (viaLauncher) {
+        // 关键：启动器要用它自己环境的 $HOME 反推真实家目录，必须还原真实 HOME
+        const launcherHome = resolveLauncherHome(command);
+        if (launcherHome) childEnv.HOME = launcherHome;
+      }
+      const child = spawn(command, environmentMode ? [] : [`--remote-debugging-port=${port}`], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        env: childEnv,
       });
       await new Promise((resolve, reject) => {
         child.once('error', reject);
         child.once('spawn', resolve);
       });
       child.unref();
+      if (!IS_WIN) return;
       // 窗口创建可能晚于 CDP/进程就绪，重复几次恢复，仍不影响重启流程本身。
       for (let attempt = 0; attempt < 5; attempt++) {
         await sleep(1000);
@@ -3232,6 +3459,13 @@ const growthStreakCache = createGrowthStreakCache(async (uid) => {
   const auth = raw && raw.auth || {};
   return fetchGrowthStreak(auth.accessToken || auth.access_token || auth.token, { apiHost: PROFILE.apiHost });
 });
+const dailyProgressCache = createDailyProgressCache(async (uid) => {
+  const raw = JSON.parse(fs.readFileSync(accountBackupFile(uid), 'utf8'));
+  const auth = raw && raw.auth || {};
+  const token = auth.accessToken || auth.access_token || auth.token;
+  if (!token) throw new Error('备份中无 accessToken');
+  return fetchDailyProgress(token, { apiHost: PROFILE.apiHost });
+});
 const automationRuns = new Map();
 let completionReportRunning = false;
 const automationStateFile = () => path.join(DATA_DIR, 'automation-state.json');
@@ -3397,7 +3631,7 @@ async function automationHttpRequest(request, account) {
     return { ok: response.ok, status: response.status, headers: { 'content-type': response.headers.get('content-type') || '' }, text, json: jsonBody };
   } catch (e) { if (request.isCancelled && request.isCancelled()) throw new Error('任务已停止'); if (e && e.name === 'AbortError') throw new Error('HTTP 请求超时'); throw new Error(e && e.message === 'HTTP 响应超过 1 MiB' ? e.message : 'HTTP 请求失败'); } finally { clearTimeout(timer); clearInterval(cancelTimer); }
 }
-function automationPublicRun(run) { return { id: run.id, taskId: run.taskId, status: run.status, phase: run.phase || 'executing', startedAt: run.startedAt, finishedAt: run.finishedAt || 0, error: run.error || '', logs: run.logs.slice(-80), result: run.result || null }; }
+function automationPublicRun(run) { return { id: run.id, taskId: run.taskId, status: run.status, phase: run.phase || 'executing', startedAt: run.startedAt, finishedAt: run.finishedAt || 0, error: run.error || '', logs: run.logs, result: run.result || null }; }
 
 // 自动化运行前收拢 WorkDaddy 面板「窗口」，避免其 contenteditable/悬浮层与 WorkBuddy 原生
 // composer 抢焦点或遮挡，导致任务把提示词键入到 WorkDaddy 面板输入框 / 点不到官方发送按钮
@@ -4770,7 +5004,6 @@ function startAutomationRun(task, event = null) {
   log('[automation-focus-diagnostics] automation:start ' + JSON.stringify({ runId: id, taskId: task.id, source: event && event.source || '', account: event && event.account || null, cdpTargetUrl: cdp.targetUrl, cdpTargetTitle: cdp.targetTitle }));
   const appendRunLog = (message) => {
     run.logs.push({ at: Date.now(), message: String(message || '').slice(0, 300) });
-    if (run.logs.length > 200) run.logs.splice(0, run.logs.length - 200);
   };
   automationRuns.set(id, run);
   run.wasPanelOpen = false;
@@ -4948,7 +5181,6 @@ function startAutomationRun(task, event = null) {
         lastReceipt = {ok:true,accountUid,conversationId:snapshot.conversationId,userMessageId:snapshot.userMessageId,requestId:snapshot.requestId,baselineAssistantId:before && before.conversationId===snapshot.conversationId ? before.assistantId : ''};
         return lastReceipt;
       }
-      await cancellableWait(100,isCancelled);
     }
     throw unconfirmedSendError('未确认会话发送回执，请检查 WorkBuddy；不会自动重发');
   };
@@ -4994,7 +5226,7 @@ function startAutomationRun(task, event = null) {
     }
     return result;
   };
-  const runDeps = { sessionAction: sessionActionWithReceipt, primaryAccount: async () => publicAccounts().find(a=>a.isPrimary) || null, dismissToast: runNotifier.dismiss, completionReport, event, listAccounts: async () => publicAccounts(), currentAccount: publicCurrent, accountSwitch: (account, detail) => withInput(() => automationAccountSwitchGuarded(account, detail), !!(detail && detail.restore)), accountStatus: automationAccountStatus, accountCheckin: async (account) => {
+  const runDeps = { runId: id, sessionAction: sessionActionWithReceipt, primaryAccount: async () => publicAccounts().find(a=>a.isPrimary) || null, dismissToast: runNotifier.dismiss, completionReport, event, listAccounts: async () => publicAccounts(), currentAccount: publicCurrent, accountSwitch: (account, detail) => withInput(() => automationAccountSwitchGuarded(account, detail), !!(detail && detail.restore)), accountStatus: automationAccountStatus, accountCheckin: async (account) => {
     if (!account || !account.uid) throw new Error('没有可用账号');
     const result = await claimDailyForUid(account.uid);
     appendRunLog('account:checkin:' + (result.skipped ? 'skipped' : result.ok ? 'success' : 'failed'));
@@ -5372,6 +5604,7 @@ function buildInjectScript() {
     .replace(/__WBS_CAPS__/g, JSON.stringify(PROFILE.capabilities))
     .replace(/__WBS_AVATAR_LOGO__/g, 'data:image/svg+xml;base64,' + fs.readFileSync(path.join(__dirname, 'assets', 'workdaddy-app-icon-source.svg')).toString('base64'))
     .replace(/__WBS_LOGO__/g, 'data:image/svg+xml;base64,' + fs.readFileSync(path.join(__dirname, 'assets', 'workdaddy-logo.svg')).toString('base64'))
+    .replace(/__WBS_BUDDY_MARK__/g, 'data:image/svg+xml;base64,' + fs.readFileSync(path.join(__dirname, 'assets', 'workbuddy-buddy-mark.svg')).toString('base64'))
     .replace(/__WBS_PLATFORM__/g, JSON.stringify(process.platform));
 }
 
@@ -6108,6 +6341,10 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   if (!lineageId || PROFILE.kind !== 'workbuddy') return { members: 0, synced: 0, failedFiles: 0, targetIds: [], targetPresent: false };
   const records = getAutoCopySessionMemberRecords(DATA_DIR, lineageId);
   if (!records.length) return { members: 0, synced: 0, failedFiles: 0, targetIds: [], targetPresent: false };
+  const targetMapping = typeof getAutoCopyMapping === 'function'
+    ? getAutoCopyMapping(DATA_DIR, lineageId, targetUid)
+    : null;
+  const baselineAt = Number(targetMapping && targetMapping.updatedAt) || 0;
   const live = [];
   for (const member of records) {
     await yieldAutoCopyToRenderer();
@@ -6125,6 +6362,29 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   const targetIds = live.map((member) => member.id);
   const targetPresent = targetUid === undefined || live.some((member) => member.uid === String(targetUid || '').trim());
   if (live.length < 2) return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent };
+  // Once a lineage has been synchronized, a changed file on each side means
+  // both accounts wrote new content since the last common snapshot. Do not
+  // pick one side by mtime and silently overwrite the other; surface a
+  // conflict for the user after the progress bar completes.
+  const changedSinceBaseline = baselineAt > 0
+    ? live.filter((member) => Number(member.contentMtime || 0) > baselineAt)
+    : [];
+  if (changedSinceBaseline.length >= 2) {
+    return {
+      members: live.length,
+      synced: 0,
+      failedFiles: 0,
+      targetIds,
+      targetPresent,
+      conflict: true,
+      conflicts: 1,
+    };
+  }
+  // The lineage already has the target member and neither side changed since
+  // the last successful sync. Avoid a full overwrite of an unchanged session.
+  if (targetPresent && baselineAt > 0 && changedSinceBaseline.length === 0) {
+    return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent, unchanged: true };
+  }
   const latest = selectLatestAutoCopyMember(live);
   if (!latest) return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent };
   const sourceRow = latest.row;
@@ -6160,6 +6420,17 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
       );
     } catch (error) {
       log(`[sessions-auto-copy] 同步会话元数据失败 ${target.uid}/${target.id}: ${error.message}`);
+    }
+  }
+  if (!failedFiles && targetUid !== undefined && typeof setAutoCopyMapping === 'function') {
+    const targetMember = live.find((member) => member.uid === String(targetUid || '').trim());
+    if (targetMember) {
+      setAutoCopyMapping(DATA_DIR, lineageId, targetUid, {
+        ...(targetMapping || {}),
+        targetId: targetMember.id,
+        status: 'copied',
+        failedFiles: 0,
+      });
     }
   }
   return { members: live.length, synced, failedFiles, sourceId: latest.id, targetIds, targetPresent, payloadTargets };
@@ -6792,6 +7063,39 @@ async function insertCopiedSession(src, targetUid, newId) {
   );
 }
 
+async function createForkSession(src, selection) {
+  const root = PROFILE.dataRoot;
+  const sourceFiles = collectSessionArchiveFiles(root, src.id).filter((entry) => {
+    const parts = entry.path.split('/');
+    return parts.length === 3 && parts[0] === 'projects' && parts[2] === src.id + '.jsonl';
+  });
+  if (sourceFiles.length !== 1) throw new Error('无法唯一定位源会话记录');
+  const source = sourceFiles[0].source;
+  const stat = await fs.promises.lstat(source);
+  if (!stat.isFile() || stat.size > 64 * 1024 * 1024) throw new Error('源会话记录不可读取');
+  const contents = await fs.promises.readFile(source, 'utf8');
+  if (Buffer.byteLength(contents) !== stat.size) throw new Error('源会话记录已变化，请重试');
+  const plan = planForkAtMessage(contents, selection);
+  if (!plan.ok) throw new Error(plan.reason);
+
+  const id = crypto.randomUUID();
+  const target = path.join(path.dirname(source), id + '.jsonl');
+  ensureArchiveParentNoFollow(root, target);
+  await fs.promises.writeFile(target, plan.text, { flag: 'wx', mode: 0o600 });
+  try {
+    const now = Date.now();
+    const title = forkedTitle(src.custom_title || src.title);
+    await insertCopiedSession(Object.assign({}, src, {
+      title, custom_title: title, status: 'Pending', is_background_automation: 0,
+      created_at: now, updated_at: now, last_activity_at: now,
+    }), src.user_id, id);
+  } catch (error) {
+    await fs.promises.unlink(target).catch(() => {});
+    throw error;
+  }
+  return { id, sourceId: src.id, keptMessages: plan.keep, droppedMessages: plan.drop };
+}
+
 async function exportSessions(ids, password) {
   const selectedIds = normalizeSessionIdBatch(ids);
   if (!selectedIds.length) throw new Error('未选择会话');
@@ -6935,7 +7239,7 @@ async function copySessionRecord(src, targetUid, options = {}) {
     return { status: 'suppressed', sourceId: src.id, targetId: null, failedFiles: 0, suppressed: true };
   }
   const perform = async () => {
-  const ownerIds = lineageId ? getAutoCopySessionMemberRecords(DATA_DIR, lineageId).map((member) => member.id) : [];
+  let ownerIds = lineageId ? getAutoCopySessionMemberRecords(DATA_DIR, lineageId).map((member) => member.id) : [];
   if (sourceUid && lineageId) {
     const mapping = getAutoCopyMapping(DATA_DIR, lineageId, targetUid);
     if (mapping && mapping.targetId) {
@@ -7129,7 +7433,7 @@ function hasPendingAutoCopyTo(uid) {
 
 function pruneAutoCopyJobs() {
   const completed = Array.from(autoCopyJobs.values())
-    .filter((job) => job.status === 'done' || job.status === 'partial' || job.status === 'error' || job.status === 'paused')
+    .filter((job) => job.status === 'done' || job.status === 'partial' || job.status === 'conflict' || 'error' || job.status === 'paused')
     .sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0));
   while (completed.length > 100) {
     const oldest = completed.shift();
@@ -7580,11 +7884,14 @@ async function prepareFailoverContinuation(ctx) {
 
 function startAutoCopyJob(sourceUid, targetUid, plan) {
   const id = crypto.randomUUID();
+  const accountLabels = labels && typeof labels === 'object' ? labels : {};
   const job = {
     id,
     status: 'queued',
     sourceUid,
     targetUid,
+    sourceName: String(accountLabels.sourceName || ''),
+    targetName: String(accountLabels.targetName || ''),
     plan: Array.isArray(plan) ? plan : [],
     total: Array.isArray(plan) ? plan.length : 0,
     processed: 0,
@@ -7618,6 +7925,9 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
     // 当前会话的文件级进度（32 万文件的目录只靠字节量看不出是否还在动）
     payloadFileTotal: 0,
     payloadFileProcessed: 0,
+    conflicts: 0,
+    failedItems: 0,
+    details: [],
     error: null,
     // 暂停：UI 点「暂停同步」置 true，worker 在下一个检查点收尾并置 status='paused'。
     // 「继续同步」不是恢复这个 job，而是按同样的 source/target 起一个新 job ——
@@ -7688,6 +7998,13 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
       job.currentBytes = Number(src.sizeBytes || 0);
       job.updatedAt = Date.now();
       log(`[sessions-auto-copy] (${index + 1}/${job.total}) 复制 ${job.currentLabel} [${formatByteSize(job.currentBytes)}]`);
+      const detail = {
+        id: String(src.id || ''),
+        label: job.currentLabel,
+        status: 'running',
+        failedFiles: 0,
+        conflicts: 0,
+      };
       await yieldAutoCopyToRenderer();
       // 检查点：每个会话开始前查一次暂停。已完成的行已落库，重跑时按 mapping 判 skipped，
       // 所以这里中断不会留下半截状态。
@@ -7715,8 +8032,13 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
           };
           const synced = await syncAutoCopyLineage(src.lineageId, targetUid, syncOptions);
           enqueuePayload(synced.payloadTargets);
-          if (synced.targetPresent) {
-            result = { status: synced.failedFiles ? 'partial' : 'skipped', failedFiles: synced.failedFiles };
+          if (synced.conflict) {
+            result = { status: 'conflict', conflicts: synced.conflicts || 1, failedFiles: 0 };
+          } else if (synced.targetPresent) {
+            result = {
+              status: synced.failedFiles ? 'partial' : (synced.synced ? 'copied' : 'skipped'),
+              failedFiles: synced.failedFiles,
+            };
           } else {
             result = await copySessionRecord(src, targetUid, {
               sourceUid,
@@ -7725,14 +8047,22 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
             });
             const synced = await syncAutoCopyLineage(src.lineageId, targetUid, syncOptions);
             enqueuePayload(synced.payloadTargets);
+            if (synced.conflict) result.status = 'conflict';
+            result.conflicts = synced.conflicts || 0;
             result.failedFiles = (result.failedFiles || 0) + synced.failedFiles;
             if (synced.failedFiles) result.status = 'partial';
           }
         } else {
           result = await copySessionRecord(src, targetUid, { sourceUid, auto: true });
         }
+        detail.status = result.status === 'partial' ? 'partial'
+          : result.status === 'conflict' ? 'conflict'
+          : result.status === 'skipped' ? 'skipped' : 'copied';
+        detail.failedFiles = Number(result.failedFiles) || 0;
+        detail.conflicts = Number(result.conflicts) || 0;
         if (result.status === 'skipped') job.skipped++;
-        else if (result.status === 'partial') job.partial++;
+        else if (result.status === 'partial') { job.partial++; job.failedItems++; }
+        else if (result.status === 'conflict') job.conflicts += Number(result.conflicts) || 1;
         else job.copied++;
         if (result.failedFiles) job.failed += result.failedFiles;
         // 产物目录留到第二阶段（体积大），此处只登记待办。
@@ -7748,77 +8078,23 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
       } catch (e) {
         if (isAutoCopyPausedError(e)) { finishPaused(); return; }
         job.failed++;
+        job.failedItems++;
+        detail.status = 'failed';
+        detail.error = String(e.message || e).slice(0, 240);
         log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 会话 ${src.id} 失败: ${e.message}`);
       }
+      if (job.details.length < 500) job.details.push(detail);
       job.processed++;
       job.processedBytes += job.currentBytes;
       job.updatedAt = Date.now();
     }
-
-    // 第二阶段：产物目录。体积从几十 MB 到数百 MB 不等，与正文分开推进，
-    // 这样进度条能先如实报出「正文 N/N」，再去慢慢搬产物。
-    job.phase = payloadQueue.length ? 'payload' : 'done';
-    job.payloadTotal = payloadQueue.length;
-    job.payloadBytes = payloadQueue.reduce((sum, item) => sum + (item.bytes || 0), 0);
-    if (payloadQueue.length) {
-      log(`[sessions-auto-copy] 正文完成 ${job.processed}/${job.total}，开始复制 ${job.payloadTotal} 个会话的产物（合计 ${formatByteSize(job.payloadBytes)}）`);
-    }
-    for (let index = 0; index < payloadQueue.length; index++) {
-      const item = payloadQueue[index];
-      job.currentIndex = index + 1;
-      job.currentId = item.sourceId;
-      job.currentLabel = item.label;
-      job.currentBytes = item.bytes;
-      job.payloadFileTotal = item.files || 0;
-      job.payloadFileProcessed = 0;
-      job.updatedAt = Date.now();
-      const linkedBase = job.payloadLinked;
-      const linkedBytesBase = job.payloadLinkedBytes;
-      log(`[sessions-auto-copy] 产物 (${index + 1}/${job.payloadTotal}) ${item.label} [${formatByteSize(item.bytes)} / ${item.files || 0} 文件]`);
-      await yieldAutoCopyToRenderer();
-      // 检查点：每个产物目录开始前查一次暂停。
-      if (job.cancelRequested) { finishPaused(); return; }
-      try {
-        const result = await copySessionWorkspacePayload(wbHome, item.sourceId, item.targetId, {
-          // 每处理一个文件回写一次：32 万文件的目录只靠字节量看不出是否还在动
-          onFile: (counters) => {
-            // 再查一次暂停：单个产物目录可能有 32 万文件，只靠外层循环的检查点，
-            // 用户点暂停后仍要等整棵树搬完才停得下来。这里抛哨兵异常，把控制流从
-            // 目录递归里立即弹出，交给下面的 catch 收尾成 paused。
-            if (job.cancelRequested) throw new AutoCopyPausedError();
-            job.payloadFileProcessed = counters.files;
-            job.payloadLinked = linkedBase + counters.linked;
-            job.payloadLinkedBytes = linkedBytesBase + counters.linkedBytes;
-            job.updatedAt = Date.now();
-          },
-        });
-        if (result.outcome === 'copied') job.payloadCopied++;
-        else if (result.outcome === 'failed') job.payloadFailed++;
-        else job.payloadSkipped++;
-        job.payloadLinked = linkedBase + (result.linked || 0);
-        job.payloadLinkedBytes = linkedBytesBase + (result.linkedBytes || 0);
-        job.payloadCopiedFiles += result.copied || 0;
-        job.payloadSkippedFiles += result.skipped || 0;
-        job.payloadFailedFiles += result.failed || 0;
-      } catch (e) {
-        // 暂停是用户主动行为，不是失败：收尾成 paused 而不是记一次 payloadFailed。
-        if (isAutoCopyPausedError(e)) { finishPaused(); return; }
-        job.payloadFailed++;
-        log(`[sessions-auto-copy] 产物处理失败 ${item.sourceId}: ${e.message}`);
-      }
-      job.payloadProcessed++;
-      job.payloadProcessedBytes += item.bytes || 0;
-      job.updatedAt = Date.now();
-    }
-
-    job.status = (job.failed || job.partial || job.payloadFailed) ? 'partial' : 'done';
-    job.phase = 'done';
+    job.status = job.conflicts ? 'conflict' : (job.failed || job.partial ? 'partial' : 'done');
     job.finishedAt = Date.now();
     job.updatedAt = job.finishedAt;
     job.currentId = null;
     job.currentLabel = '';
     job.currentBytes = 0;
-    log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 完成 total=${job.total} copied=${job.copied} skipped=${job.skipped} partial=${job.partial} failed=${job.failed} 产物=${job.payloadCopied}/${job.payloadTotal}(跳过 ${job.payloadSkipped} 失败 ${job.payloadFailed}) 硬链接=${job.payloadLinked}个/省${formatByteSize(job.payloadLinkedBytes)}(复制${job.payloadCopiedFiles} 跳过${job.payloadSkippedFiles} 失败${job.payloadFailedFiles}) 用时 ${((job.finishedAt - job.startedAt) / 1000).toFixed(1)}s`);
+    log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 完成 total=${job.total} copied=${job.copied} skipped=${job.skipped} partial=${job.partial} conflicts=${job.conflicts} failed=${job.failed} 产物=${job.payloadCopied}/${job.payloadTotal}(跳过 ${job.payloadSkipped} 失败 ${job.payloadFailed}) 硬链接=${job.payloadLinked}个/省${formatByteSize(job.payloadLinkedBytes)}(复制${job.payloadCopiedFiles} 跳过${job.payloadSkippedFiles} 失败${job.payloadFailedFiles}) 用时 ${((job.finishedAt - job.startedAt) / 1000).toFixed(1)}s`);
     const cleanup = setTimeout(() => autoCopyJobs.delete(id), 30 * 60 * 1000);
     if (cleanup.unref) cleanup.unref();
     pruneAutoCopyJobs();
@@ -7891,7 +8167,17 @@ function publicAutoCopyJob(job) {
     updatedAt: job.updatedAt || startedAt,
     finishedAt: job.finishedAt || null,
     elapsedMs: startedAt ? ((job.finishedAt || Date.now()) - startedAt) : 0,
+    failedItems: job.failedItems,
+    conflicts: job.conflicts,
+    details: Array.isArray(job.details) ? job.details.slice(0, 500) : [],
     error: job.error,
+    sourceUid: job.sourceUid,
+    targetUid: job.targetUid,
+    sourceName: job.sourceName,
+    targetName: job.targetName,
+    currentLabel: job.currentLabel,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
   };
 }
 
@@ -8814,6 +9100,35 @@ async function acSendPhrase(text, options = {}) {
   // 新版 toolbar 的 Enter 行为会受输入法/多行模式影响；复用快捷短语的完整
   // Slate 输入链路，并在提交阶段优先点击官方 cr-send-button。
   return sendStashToComposer({ content: { text: message, items: [] }, ...options });
+}
+
+async function selectAutomationModelById(model, options) {
+  const response = await cdpSend('Runtime.evaluate', {
+    expression: '(' + selectAutomationModel.toString() + ')(' + JSON.stringify({ model, ...options }) + ')',
+    awaitPromise: true, returnByValue: true,
+  });
+  if (response && response.exceptionDetails) {
+    const description = response.exceptionDetails.exception && response.exceptionDetails.exception.description || response.exceptionDetails.text || '未知错误';
+    throw new Error('选择会话模型失败：' + String(description).split('\n')[0].slice(0, 240));
+  }
+  if (!response || !response.result || !response.result.value) throw new Error('选择会话模型未返回确认');
+  return response.result.value;
+}
+
+async function confirmAutomationModel(model, options) {
+  const response = await cdpSend('Runtime.evaluate', {
+    expression: '(' + verifyAutomationModel.toString() + ')(' + JSON.stringify({ model, ...options }) + ')',
+    returnByValue: true,
+  });
+  if (!response || !response.result || response.result.value !== true) throw new Error('会话模型已变化，停止发送');
+}
+
+async function restoreAutomationNewTaskPreference(selection) {
+  const response = await cdpSend('Runtime.evaluate', {
+    expression: '(' + restoreNewTaskModelPreference.toString() + ')(' + JSON.stringify(selection) + ')',
+    returnByValue: true,
+  });
+  return response && response.result && response.result.value || { restored: false };
 }
 
 function automationAgentSurfaceExpression(focusComposer) {
@@ -10729,28 +11044,28 @@ async function fetchCredits(accessToken, account) {
   };
 }
 
-function rememberCreditRotation(uid, result) {
-  const key = String(uid || '').trim();
-  if (!key || !result || !Array.isArray(result.segments)) return;
-  creditRotationCache.set(key, {
-    uid: key,
-    credits: result.credits,
-    segments: result.segments,
-    unlimited: !!result.unlimited,
-    fetchedAt: Date.now(),
-  });
-}
-
-function cachedCreditRotationAccounts() {
-  const names = new Map(listAccounts(DATA_DIR).map((account) => [String(account.uid), account.nickname || '']));
-  return Array.from(creditRotationCache.values()).map((entry) => ({
-    uid: entry.uid,
-    nickname: names.get(entry.uid) || '',
-    creditSegments: entry.segments,
-    credits: entry.credits,
-    creditUnlimited: entry.unlimited,
-    creditFetchedAt: entry.fetchedAt,
-  }));
+async function refreshCreditRotationAccounts(currentUid, currentResult) {
+  if (!currentResult || !Array.isArray(currentResult.segments) || currentResult.meterError || currentResult.packageError) {
+    throw new Error('当前账号积分段不可用');
+  }
+  const accounts = listAccounts(DATA_DIR);
+  if (!accounts.some((account) => String(account.uid) === currentUid)) throw new Error('当前账号不在备份列表中');
+  const refreshed = [];
+  for (let index = 0; index < accounts.length; index += 3) {
+    const batch = accounts.slice(index, index + 3);
+    const results = await Promise.all(batch.map(async (account) => {
+      const uid = String(account.uid);
+      if (uid === currentUid) return { uid, nickname: account.nickname || '', creditSegments: currentResult.segments };
+      const raw = JSON.parse(fs.readFileSync(accountBackupFile(uid), 'utf8'));
+      const token = raw && raw.auth && (raw.auth.accessToken || raw.auth.access_token || raw.auth.token);
+      if (!token) throw new Error('账号凭证不可用');
+      const result = await fetchCredits(token, raw.account || {});
+      if (!Array.isArray(result.segments) || result.meterError || result.packageError) throw new Error('积分段不可用');
+      return { uid, nickname: account.nickname || '', creditSegments: result.segments };
+    }));
+    refreshed.push(...results);
+  }
+  return refreshed;
 }
 
 async function listDailyUsage(accounts, date = todayStr()) {
@@ -10818,17 +11133,6 @@ function decryptLegacyExport(b64, password) {
   return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }
 
-function applyCheckinConsent(enabled) {
-  const pending = readCheckinConsent(DATA_DIR).shouldPrompt;
-  const choice = decideCheckinConsent(DATA_DIR, enabled);
-  if (!pending || !enabled || !choice.enabled) return choice;
-  const task = readAutomations(DATA_DIR).find((item) => item.id === 'daily-account-checkin' && item.enabled);
-  if (!task) return choice;
-  const running = Array.from(automationRuns.values()).find((run) => run.taskId === task.id && run.status === 'running');
-  const run = running || startAutomationRun(task);
-  return { ...choice, run: automationPublicRun(run) };
-}
-
 function handleApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || HOST}`);
   const p = url.pathname;
@@ -10866,15 +11170,27 @@ function handleApi(req, res) {
   }
 
   if (req.method === 'GET' && p === '/api/automations/capabilities') {
-    return json(res, 200, { ok: true, schemaVersion: 1, capabilities: AUTOMATION_CAPABILITIES.filter(item => item.available !== false), protocolZh: automationCapabilityText('zh'), protocolEn: automationCapabilityText('en') });
+    return json(res, 200, { ok: true, schemaVersion: AUTOMATION_SCHEMA_VERSION, supportedSchemaVersions: [1, 2], capabilities: AUTOMATION_CAPABILITIES.filter(item => item.available !== false), protocolZh: automationCapabilityText('zh'), protocolEn: automationCapabilityText('en') });
   }
 
-  if (req.method === 'POST' && ['/api/automations/export', '/api/automations/import/preview', '/api/automations/import'].includes(p)) {
-    return readTransferBody(req).then(body => {
+  if (req.method === 'GET' && p === '/api/automations/discovery') {
+    return automationDiscovery.getCatalog()
+      .then(result => json(res, 200, { ok: true, ...result }))
+      .catch(error => json(res, 503, { ok: false, error: error.message || '公开任务加载失败' }));
+  }
+
+  if (req.method === 'POST' && p === '/api/automations/discovery/import') {
+    return readBody(req).then((body) => {
+      const content = automationDiscovery.getTaskContent(body && body.key);
       const runtime = { version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform };
-      if (p === '/api/automations/export') return exportTasks(readAutomations(DATA_DIR), body && body.ids);
-      if (p === '/api/automations/import/preview') return previewImport(body, readAutomations(DATA_DIR), runtime);
-      return importTasks(DATA_DIR, body, runtime);
+      return importTasks(DATA_DIR, { content, selected: ['0'] }, runtime);
+    }).then(result => json(res, 200, { ok: true, ...result }))
+      .catch(error => json(res, 400, { ok: false, error: error.message }));
+  }
+
+  if (req.method === 'POST' && p === '/api/automations/export') {
+    return readTransferBody(req).then(body => {
+      return exportTasks(readAutomations(DATA_DIR), body && body.ids);
     }).then(result => json(res, 200, { ok: true, ...result }))
       .catch(error => json(res, 400, { ok: false, error: error.message }));
   }
@@ -10949,27 +11265,14 @@ function handleApi(req, res) {
     });
   }
 
-  if (['GET', 'POST'].includes(req.method) && p === '/api/automations/checkin-consent') {
-    if (!PROFILE.capabilities.accounts || PROFILE.capabilities.checkin === false) {
-      return json(res, 200, { ok: true, shouldPrompt: false, enabled: false });
-    }
-    if (req.method === 'GET') {
-      try { return json(res, 200, readCheckinConsent(DATA_DIR)); }
-      catch (_) { return json(res, 500, { ok: false, error: 'Unable to read check-in choice' }); }
-    }
-    return readBody(req).then((body) => {
-      if (!body || typeof body.enabled !== 'boolean') return json(res, 400, { ok: false, error: 'Invalid check-in choice' });
-      try { return json(res, 200, applyCheckinConsent(body.enabled)); }
-      catch (_) { return json(res, 500, { ok: false, error: 'Unable to save check-in choice' }); }
-    });
-  }
-
   if (req.method === 'GET' && p === '/api/automations') {
     const imported = importAgentInbox(DATA_DIR, { profileId: PROFILE.id });
     imported.forEach((item) => log(`[automation-agent] request=${item.requestId} ${item.ok ? 'imported=' + item.taskId : 'rejected=' + item.error}`));
     const tasks = readAutomations(DATA_DIR);
+    let builtinMarkers = {};
+    try { builtinMarkers = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'automation-builtins.json'), 'utf8')) || {}; } catch (_) {}
     const runs = Array.from(automationRuns.values()).slice(-50).map(automationPublicRun);
-    return json(res, 200, { ok: true, tasks: tasks.map((task) => ({ ...task, manualRunnable: canManuallyRunTask(task), compatible: isTaskCompatible(task) })), runs });
+    return json(res, 200, { ok: true, tasks: tasks.map((task) => ({ ...task, manualRunnable: canManuallyRunTask(task), compatible: isTaskCompatible(task), builtinManaged: builtinMarkers[task.id] === true || builtinMarkers[task.id] && builtinMarkers[task.id].managed === true })), runs });
   }
 
   // 定时任务核验台账的只读视图（面板将来可接；现在用于人工核对与验收）
@@ -11043,6 +11346,22 @@ function handleApi(req, res) {
         if (running) return json(res, 409, { ok: false, error: '任务正在运行', run: automationPublicRun(running) });
         const run = startAutomationRun(task);
         return json(res, 202, { ok: true, run: automationPublicRun(run) });
+      } catch (error) { return json(res, 400, { ok: false, error: error.message }); }
+    });
+  }
+
+  if (req.method === 'POST' && p === '/api/automations/safety-review') {
+    return readBody(req).then((body) => {
+      try {
+        const id = String(body && body.id || '').trim();
+        if (!readAutomations(DATA_DIR).some(task => task.id === id)) return json(res, 404, { ok: false, error: '自动化任务不存在' });
+        if (Array.from(automationRuns.values()).some(run => run.safetyReviewTaskId === id && run.status === 'running')) {
+          return json(res, 409, { ok: false, error: '该任务正在安全评估中' });
+        }
+        const review = createSafetyReviewTask(DATA_DIR, id);
+        const run = startAutomationRun(review);
+        run.safetyReviewTaskId = id;
+        return json(res, 202, { ok: true, runId: run.id });
       } catch (error) { return json(res, 400, { ok: false, error: error.message }); }
     });
   }
@@ -11600,6 +11919,7 @@ function handleApi(req, res) {
       status.cdp.targetUrl = cdp.targetUrl;
       status.current = currentAccount();
       status.dataDir = DATA_DIR;
+      if (IS_WIN) status.appDir = WORKDADDY_DIR_WIN;
       status.authFile = currentAuthFile();
     }
     return json(res, 200, status);
@@ -11732,7 +12052,6 @@ function handleApi(req, res) {
           unlimited: !!r.unlimited,
           cycleResetTime: r.cycleResetTime || null,
         };
-        rememberCreditRotation(uid, r);
         if (usage.synced) payload.todayUsage = usage.value;
         return json(res, 200, payload);
       } catch (e) {
@@ -11744,7 +12063,7 @@ function handleApi(req, res) {
     });
   }
 
-  // 会话完成后的轮换建议：只刷新当前账号，其他账号只使用最近一次已缓存的积分段。
+  // 会话完成后的轮换建议：用同一轮新鲜积分段比较所有账号，无法确认全局最早时不建议切换。
   if (req.method === 'POST' && p === '/api/credit-rotation') {
     return readBody(req).then(async (body) => {
       const uid = String(body && body.uid || '').trim();
@@ -11757,10 +12076,11 @@ function handleApi(req, res) {
         const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
         const token = raw && raw.auth && (raw.auth.accessToken || raw.auth.access_token || raw.auth.token);
         if (!token) return json(res, 400, { ok: false, error: '备份中无 accessToken' });
-        const previousCached = creditRotationCache.get(uid);
         const refreshed = await fetchCredits(token, raw.account || {});
-        rememberCreditRotation(uid, refreshed);
-        const candidate = selectRotationCandidate(cachedCreditRotationAccounts(), uid, Date.now());
+        let accounts;
+        try { accounts = await refreshCreditRotationAccounts(uid, refreshed); }
+        catch (_) { return json(res, 200, { ok: true, shouldSuggest: false, current: { uid, segments: refreshed.segments } }); }
+        const candidate = selectRotationCandidate(accounts, uid, Date.now());
         if (!candidate) return json(res, 200, { ok: true, shouldSuggest: false, current: { uid, segments: refreshed.segments } });
         return json(res, 200, {
           ok: true,
@@ -11841,6 +12161,43 @@ function handleApi(req, res) {
         accounts: accounts.map(a => ({ uid: a.uid, nickname: a.nickname || '' })) });
     }).catch(error => json(res, error.status || 400, { ok: false,
       error: error.status === 409 ? '另一个积分查询正在进行，请稍后重试' : '查询参数无效，请选择近 7、30 或 90 天' }));
+  }
+
+  // Read-only daily growth/reward/cat summary. Tokens and upstream payloads stay in the daemon.
+  if (req.method === 'POST' && p === '/api/growth/daily-progress') {
+    return readBody(req).then(async (body) => {
+      if (PROFILE.capabilities.growthDaily !== true) return json(res, 400, { ok: false, error: '当前客户端不支持成长任务查询' });
+      const accounts = listAccounts(DATA_DIR);
+      const requested = body && body.uids;
+      if (!Array.isArray(requested) || requested.length > 100 || requested.some((uid) => typeof uid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(uid))) {
+        return json(res, 400, { ok: false, error: '账号选择无效' });
+      }
+      const wanted = new Set(requested);
+      if (wanted.size !== requested.length || requested.some((uid) => !accounts.some((account) => account.uid === uid))) {
+        return json(res, 400, { ok: false, error: '账号选择无效' });
+      }
+      const results = new Array(requested.length);
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < requested.length) {
+          const index = cursor++;
+          const uid = requested[index];
+          try {
+            const [progress, streak] = await Promise.all([
+              dailyProgressCache.get(uid, { force: body.force === true }),
+              growthStreakCache.get(uid, { force: body.force === true }),
+            ]);
+            results[index] = { uid, ...progress, streak };
+          }
+          catch (error) {
+            log(`[growth-daily] 查询 ${uid} 失败: ${String(error && error.message || error).slice(0, 160)}`);
+            results[index] = { uid, status: 'unavailable', fetchedAt: Date.now() };
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, requested.length) }, worker));
+      return json(res, 200, { ok: true, results });
+    });
   }
 
   // Read-only per-account continuous activity count; never creates a conversation or changes accounts.
@@ -12709,6 +13066,28 @@ function handleApi(req, res) {
       }
     })();
   }
+  // 从当前账号的消息位置创建同工作区会话，不修改原会话。
+  if (req.method === 'POST' && p === '/api/sessions/fork') {
+    return readBody(req).then(async (body) => {
+      const id = body && body.id;
+      const uid = String((currentAccount() || {}).uid || '').trim();
+      if (PROFILE.kind !== 'workbuddy' || !uid || !isValidSessionId(id)) {
+        return json(res, 400, { ok: false, error: '无法分支当前会话' });
+      }
+      try {
+        const rows = await sqliteQuery(
+          'SELECT ' + SESSION_COPY_COLUMNS.join(',') +
+            ' FROM sessions WHERE id = ? AND user_id = ? AND deleted_at IS NULL LIMIT 1;',
+          [id, uid]
+        );
+        if (!rows.length) return json(res, 404, { ok: false, error: '当前账号下没有该会话' });
+        const result = await createForkSession(rows[0], body);
+        return json(res, 200, Object.assign({ ok: true }, result));
+      } catch (error) {
+        return json(res, 400, { ok: false, error: error.message });
+      }
+    });
+  }
   // 复制会话：POST /api/sessions/copy { ids, targetUid }（保留原会话，复制记录+消息文件到目标账号）
   if (req.method === 'POST' && p === '/api/sessions/copy') {
     return readBody(req).then(async (body) => {
@@ -13268,6 +13647,9 @@ function handleApi(req, res) {
   }
 
   // 自动更新：检查（GET /api/update-check，force=1 强制刷新）→ 下载（POST /api/update-download）→ 状态（GET /api/update-status）→ 安装（POST /api/update-apply）
+  if (IS_PORTABLE_WIN && ['/api/update-download', '/api/update-apply'].includes(p)) {
+    return json(res, 409, { ok: false, error: '便携版请从发布页手动下载新版 ZIP' });
+  }
   if (req.method === 'GET' && p === '/api/update-check') {
     const force = url.searchParams.get('force') === '1';
     return Promise.resolve(checkUpdateBoth(force)).then(({ self: st }) =>
@@ -13315,6 +13697,7 @@ function handleApi(req, res) {
     return json(res, 200, status);
   }
   if (req.method === 'POST' && p === '/api/update-download') {
+    if (IS_LINUX) return json(res, 200, { ok: false, started: false, error: '当前平台（Linux）暂不支持自动更新' });
     updateState.error = null;
     downloadUpdate().then(() => {
       log('[update] 后台下载任务完成');
@@ -13332,6 +13715,7 @@ function handleApi(req, res) {
     });
   }
   if (req.method === 'POST' && p === '/api/update-apply') {
+    if (IS_LINUX) return json(res, 200, { ok: false, error: '当前平台（Linux）暂不支持自动更新' });
     return applyUpdate()
       .then((r) => json(res, 200, { ...r, attemptId: updateState.attemptId, applyLog: path.join(UPDATE_DIR, 'apply.log'), debugLog: UPDATE_DEBUG_LOG }))
       .catch((e) => json(res, 200, {
@@ -13493,6 +13877,8 @@ function handleApi(req, res) {
     try {
       if (IS_WIN) {
         require('child_process').execFile('explorer.exe', [DATA_DIR]);
+      } else if (IS_LINUX) {
+        require('child_process').execFile('xdg-open', [DATA_DIR]);
       } else {
         require('child_process').execFile('/usr/bin/open', [DATA_DIR]);
       }
@@ -13523,7 +13909,8 @@ function handleApi(req, res) {
       try {
         // 只记录源账号；自动复制队列会在 renderer 刷新并完成组件注入后重新规划。
         // 不在这里预规划，否则大量会话的同步 SQLite/文件扫描会让切换界面长时间无响应。
-        const sourceUid = String((currentAccount() || {}).uid || '').trim();
+        const sourceAccount = currentAccount() || {};
+        const sourceUid = String(sourceAccount.uid || '').trim();
         const acct = switchTo(DATA_DIR, uid, log);
         const hint = '登录文件已切换，请重启 WorkBuddy 使新账号生效';
         let reloaded = false;
@@ -13904,7 +14291,7 @@ log(`登录信息文件: ${currentAuthFile() || '(未唯一确认)'}`);
 log(`备份目录: ${DATA_DIR}`);
 updateDebug('daemon-start', { authFile: currentAuthFile(), dataDir: DATA_DIR, appPath: IS_WIN ? WORKDADDY_DIR_WIN : macWorkDaddyAppPath(), apiPort: UI_PORT_BASE });
 
-for (const preset of ['close-buddy-popups.json', ...(PROFILE.capabilities.accounts ? ['keep-accounts-active.json'] : [])]) {
+for (const preset of ['close-buddy-popups.json', ...(PROFILE.capabilities.accounts ? ['keep-accounts-active.json'] : []), ...(PROFILE.id === 'workbuddy-cn' ? ['buddy-travel.json', 'daily-account-checkin.json'] : [])]) {
   try {
     const result = installBuiltinTask(DATA_DIR, path.join(__dirname, 'builtin/automations', preset));
     if (result && result.status === 'upgraded') log(`[automation] 内置任务已升级: ${preset} (revision ${result.revision})`);

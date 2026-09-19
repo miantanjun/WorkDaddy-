@@ -1,4 +1,4 @@
-# WorkDaddy Windows 移植 - 环境探测脚本
+﻿# WorkDaddy Windows 移植 - 环境探测脚本
 # 用途：在安装了 WorkBuddy Windows 版的电脑上采集移植所需全部信息，
 #       输出日志到桌面 WorkDaddy-Windows-Probe.log
 # 兼容：Windows PowerShell 5.1+（Win10/11 自带），无需管理员权限
