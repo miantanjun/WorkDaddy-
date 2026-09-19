@@ -430,7 +430,7 @@ const DAEMON_VERSION = '1.4.0';
 const UPSTREAM_VERSION = '1.2.3';
 // 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.3）。
 // 本机 fork 用自己的修改版版本号（1.4.x = 上游 1.2.3 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.4.0-20260919-upstream-1.2.3-merge';
+const DAEMON_BUILD_ID = 'release-1.4.0-20260919-upstream-merge';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -7882,7 +7882,7 @@ async function prepareFailoverContinuation(ctx) {
   }
 }
 
-function startAutoCopyJob(sourceUid, targetUid, plan) {
+function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
   const id = crypto.randomUUID();
   const accountLabels = labels && typeof labels === 'object' ? labels : {};
   const job = {
@@ -8088,7 +8088,65 @@ function startAutoCopyJob(sourceUid, targetUid, plan) {
       job.processedBytes += job.currentBytes;
       job.updatedAt = Date.now();
     }
-    job.status = job.conflicts ? 'conflict' : (job.failed || job.partial ? 'partial' : 'done');
+
+    // 第二阶段：产物目录。体积从几十 MB 到数百 MB 不等，与正文分开推进，
+    // 这样进度条能先如实报出「正文 N/N」，再去慢慢搬产物。
+    job.phase = payloadQueue.length ? 'payload' : 'done';
+    job.payloadTotal = payloadQueue.length;
+    job.payloadBytes = payloadQueue.reduce((sum, item) => sum + (item.bytes || 0), 0);
+    if (payloadQueue.length) {
+      log(`[sessions-auto-copy] 正文完成 ${job.processed}/${job.total}，开始复制 ${job.payloadTotal} 个会话的产物（合计 ${formatByteSize(job.payloadBytes)}）`);
+    }
+    for (let index = 0; index < payloadQueue.length; index++) {
+      const item = payloadQueue[index];
+      job.currentIndex = index + 1;
+      job.currentId = item.sourceId;
+      job.currentLabel = item.label;
+      job.currentBytes = item.bytes;
+      job.payloadFileTotal = item.files || 0;
+      job.payloadFileProcessed = 0;
+      job.updatedAt = Date.now();
+      const linkedBase = job.payloadLinked;
+      const linkedBytesBase = job.payloadLinkedBytes;
+      log(`[sessions-auto-copy] 产物 (${index + 1}/${job.payloadTotal}) ${item.label} [${formatByteSize(item.bytes)} / ${item.files || 0} 文件]`);
+      await yieldAutoCopyToRenderer();
+      // 检查点：每个产物目录开始前查一次暂停。
+      if (job.cancelRequested) { finishPaused(); return; }
+      try {
+        const result = await copySessionWorkspacePayload(wbHome, item.sourceId, item.targetId, {
+          // 每处理一个文件回写一次：32 万文件的目录只靠字节量看不出是否还在动
+          onFile: (counters) => {
+            // 再查一次暂停：单个产物目录可能有 32 万文件，只靠外层循环的检查点，
+            // 用户点暂停后仍要等整棵树搬完才停得下来。这里抛哨兵异常，把控制流从
+            // 目录递归里立即弹出，交给下面的 catch 收尾成 paused。
+            if (job.cancelRequested) throw new AutoCopyPausedError();
+            job.payloadFileProcessed = counters.files;
+            job.payloadLinked = linkedBase + counters.linked;
+            job.payloadLinkedBytes = linkedBytesBase + counters.linkedBytes;
+            job.updatedAt = Date.now();
+          },
+        });
+        if (result.outcome === 'copied') job.payloadCopied++;
+        else if (result.outcome === 'failed') job.payloadFailed++;
+        else job.payloadSkipped++;
+        job.payloadLinked = linkedBase + (result.linked || 0);
+        job.payloadLinkedBytes = linkedBytesBase + (result.linkedBytes || 0);
+        job.payloadCopiedFiles += result.copied || 0;
+        job.payloadSkippedFiles += result.skipped || 0;
+        job.payloadFailedFiles += result.failed || 0;
+      } catch (e) {
+        // 暂停是用户主动行为，不是失败：收尾成 paused 而不是记一次 payloadFailed。
+        if (isAutoCopyPausedError(e)) { finishPaused(); return; }
+        job.payloadFailed++;
+        log(`[sessions-auto-copy] 产物处理失败 ${item.sourceId}: ${e.message}`);
+      }
+      job.payloadProcessed++;
+      job.payloadProcessedBytes += item.bytes || 0;
+      job.updatedAt = Date.now();
+    }
+
+    job.status = job.conflicts ? 'conflict' : ((job.failed || job.partial || job.payloadFailed) ? 'partial' : 'done');
+    job.phase = 'done';
     job.finishedAt = Date.now();
     job.updatedAt = job.finishedAt;
     job.currentId = null;

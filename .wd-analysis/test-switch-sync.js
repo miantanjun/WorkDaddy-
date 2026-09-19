@@ -30,7 +30,8 @@ const injectSrc = fs.readFileSync(path.join(ROOT, 'scripts', 'inject.js'), 'utf8
 
 /* ---------- 切片：切号后自动复制 + 源账号解析 ---------- */
 const START = '/* ---------------- 切号后自动复制同步会话（共用一个入口） ---------------- */';
-const END = 'function startAutoCopyJob(sourceUid, targetUid, plan) {';
+// 锚点只认函数名：签名是随功能演进的（1.4.0 起多了 labels 参数），写死签名会一升级就翻红。
+const END = 'function startAutoCopyJob(';
 const sIdx = daemonSrc.indexOf(START);
 const eIdx = daemonSrc.indexOf(END, sIdx);
 if (sIdx < 0 || eIdx < 0) { console.log('  FAIL A0 找不到切片锚点'); process.exit(1); }

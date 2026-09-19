@@ -97,7 +97,7 @@ ok(/class AutoCopyPausedError extends Error/.test(daemonSrc), 'A1 定义 AutoCop
 ok(/this\.autoCopyPaused = true;/.test(daemonSrc), 'A2 哨兵带 autoCopyPaused 标记');
 ok(/function isAutoCopyPausedError\(error\)/.test(daemonSrc), 'A3 定义 isAutoCopyPausedError');
 
-const jobBlock = sliceBlock(daemonSrc, 'function startAutoCopyJob(sourceUid, targetUid, plan)');
+const jobBlock = sliceBlock(daemonSrc, 'function startAutoCopyJob');
 ok(/job\.status = 'paused'/.test(jobBlock), 'A4 finishPaused 置 status=paused');
 ok(/job\.pausedAt = Date\.now\(\)/.test(jobBlock), 'A5 finishPaused 记录 pausedAt');
 ok(/job\.phase = 'paused'/.test(jobBlock), 'A6 finishPaused 置 phase=paused');
@@ -156,7 +156,7 @@ function buildSandbox(overrides) {
     sliceBlock(daemonSrc, 'function isAutoCopyPausedError(error)'),
     sliceBlock(daemonSrc, 'function pruneAutoCopyJobs()'),
     sliceBlock(daemonSrc, 'function runAutoCopyQueue()'),
-    sliceBlock(daemonSrc, 'function startAutoCopyJob(sourceUid, targetUid, plan)'),
+    sliceBlock(daemonSrc, 'function startAutoCopyJob'),
     sliceBlock(daemonSrc, 'function publicAutoCopyJob(job)'),
   ];
   const logs = [];

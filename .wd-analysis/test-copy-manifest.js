@@ -97,10 +97,12 @@ function makeFixture() {
   ok(/档位 \$\{sized\.tiers\[0\]/.test(DAEMON_SRC)
     && /清单命中 \$\{sized\.stats\.fromList\}\/\$\{sized\.stats\.total\}/.test(DAEMON_SRC),
     'A10 任务启动日志里打出档位分布与清单命中率（可诊断）');
-  ok(/DAEMON_VERSION = '1\.3\.(1[1-9]|[2-9]\d)'/.test(DAEMON_SRC),
-    'A11 daemon 版本已递增（>= 1.3.11）');
-  const buildId = (DAEMON_SRC.match(/DAEMON_BUILD_ID = '([^']+)'/) || [])[1] || '';
   const version = (DAEMON_SRC.match(/DAEMON_VERSION = '([^']+)'/) || [])[1] || '';
+  // 版本下限用数值比较，别写死 1.3.x —— 升到 1.4.0 时旧正则必然误报（沿用 test-switch-settle 的口径）。
+  const verNum = (v) => { const m = String(v).match(/^(\d+)\.(\d+)\.(\d+)$/); return m ? (+m[1]) * 10000 + (+m[2]) * 100 + (+m[3]) : -1; };
+  ok(verNum(version) >= 10311,
+    'A11 daemon 版本已递增（>= 1.3.11，实际 ' + version + '）');
+  const buildId = (DAEMON_SRC.match(/DAEMON_BUILD_ID = '([^']+)'/) || [])[1] || '';
   ok(buildId.indexOf('release-' + version + '-') === 0, 'A12 buildId 与版本号自洽', buildId);
   ok(DAEMON_SRC.indexOf("const { scanSpace, spaceSlug, SPACE_SCAN_VERSION } = require('./space-scan.js');") >= 0
     && /SPACE_SCAN_VERSION\s*=\s*4/.test(fs.readFileSync(path.join(REPO, 'scripts', 'space-scan.js'), 'utf8')),
