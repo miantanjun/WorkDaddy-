@@ -26,8 +26,9 @@ const SUITES = [
   ['test-schedule-verify.js', 254],
   ['test-archive-isolation.js', 63],
   ['test-session-open.js', 87],   // v1.3.9/1.3.10：session.open 迷你 renderer 仿真；v1.3.13 加侧栏收起态
-  ['test-copy-manifest.js', 95],  // v1.3.11：空间扫描 → 复制排队清单 → 排序
+  ['test-copy-manifest.js', 96],  // v1.3.11：空间扫描 → 复制排队清单 → 排序；H4/H4b 拆开新鲜度口径
   ['test-send-verify.js', 81],    // v1.3.12 草稿核验 / 1.3.14 composerSendExpr / 1.3.15 草稿残留 / 1.3.16 busy 落定
+  ['test-switch-settle.js', 42],  // v1.3.17 切号闸门：还原因定时任务切走的账号前，先等在飞的回合跑完
 ];
 
 const out = [];

@@ -410,13 +410,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        其余一律不动（原来按「谁最新听谁的」，会把主账号的 archived 冲成非归档）；
 //        ② 会话删除抽出 deleteSessionsCore，并新增「原生软删探测」——用户在 WorkBuddy
 //        界面里删（软删 deleted_at）也会向下级联，不再出现「其他账号没删、切回来又复活」。
-const DAEMON_VERSION = '1.3.16';
+const DAEMON_VERSION = '1.3.17';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.2';
 // 上游源码用内部构建号（1.2.42），安装包在打包时改写成宣传版本号（1.2.2）。
 // 本机 fork 用自己的修改版版本号（1.3.x = 上游 1.2.2 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.3.16-20260918-busy-settle';
+const DAEMON_BUILD_ID = 'release-1.3.17-20260919-switch-settle-gate';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const HOST = '127.0.0.1';
@@ -4678,6 +4678,77 @@ function automationSwitchAccount(account) {
   automationAccountSwitchTail = run.catch(() => {});
   return run;
 }
+
+/* ---------------- 切号闸门：还原前先等「在飞的回合」跑完（v1.3.17） ---------------- */
+//
+// 用户实测（2026-09-18 21:08，daemon.log 逐行可取）：
+//   task_sched_mu699jz0r781b（定时发送）在 18688296454 上发送成功
+//   （composer:finish ok/sent，223 字）后 **91ms** 就被切回主账号。
+//   那一次切号不是用户要的 —— 是 account.forEach{switch:true} 在循环收尾时做的「还原」。
+//
+// 为什么还原会掐死任务：
+//   · session.send 的语义只是「消息已进入会话」，AI 才刚开始生成；
+//   · 一次切号 = switchTo + reloadWorkBuddyPage（整页重载），在飞的回合当场夭折。
+//
+// 这条铁律项目自己早就立过 —— 闲置切回模块开头写着：
+//   「1) 正在生成回复时绝不切（会当场把任务掐死）——「正在生成」本身就算活动，计时归零」。
+// 但 account.forEach 的收尾还原走的是 automationSwitchAccount 这条**没有闸门**的硬切路径。
+// 这里把同一条铁律补到还原路径上。
+//
+// 两条口径：
+//   · 显式切号（account.forEach 开头切到目标账号）是任务作者明确要的动作 → 原样透传，不加闸门；
+//   · 还原是**记账**动作，没有时效要求 → 先等会话落定；等不到就**不切**。
+//
+// 为什么「等不到就不切」而不是「等不到硬切」：
+//   把账号留在目标账号上只是「没还回去」，而「非主账号闲置超阈值自动切回」会按既有策略
+//   （默认 30 分钟）把它收回去；反过来硬切会直接把用户排的定时任务掐死。代价不对等，故宁可延后。
+const SWITCH_SETTLE_RESTORE_MAX_MS = 300000;   // 还原前最多等 5 分钟（与 session.wait 的上限一致）
+const SWITCH_SETTLE_POLL_MS = 500;
+
+// 读「当前选中会话」的在飞状态。复用 probeSessionReceipt —— 它用 compat.getSelectedConversationId
+// 定位会话（不靠控制器在数组里的先后顺序），并已把 busy 拆成 hydrating / streaming / turnActive。
+// ⚠️ hydration 不算「在飞」：历史还在加载时切号是安全的（v1.3.16 的教训）。
+async function readAutomationTurnState() {
+  if (!cdp.connected) return null;
+  const response = await cdpSend('Runtime.evaluate', { expression: '(' + probeSessionReceipt.toString() + ')()', returnByValue: true });
+  return (response && response.result && response.result.value) || null;
+}
+
+// 等「当前会话没有在生成的回合」，最长 maxMs。ok:false 表示等满预算仍在生成。
+async function waitForAutomationReplySettle(maxMs) {
+  const startedAt = Date.now();
+  const budget = Math.max(1000, Number(maxMs) || 0);
+  for (;;) {
+    // 读不到状态（CDP 断开、页面还没挂上控制器）时不拦路：没有可保护的对象，按可切处理。
+    const probe = await readAutomationTurnState().catch(() => null);
+    if (!probe) return { ok: true, reason: 'unreadable', waitedMs: Date.now() - startedAt };
+    if (!probe.streaming && !probe.turnActive) return { ok: true, reason: 'settled', waitedMs: Date.now() - startedAt };
+    const waitedMs = Date.now() - startedAt;
+    if (waitedMs >= budget) return { ok: false, reason: 'still-generating', waitedMs, conversationId: String(probe.conversationId || '') };
+    await sleep(SWITCH_SETTLE_POLL_MS);
+  }
+}
+
+// account.forEach{switch:true} 的切号入口：显式切换原样透传，还原先过闸门。
+async function automationAccountSwitchGuarded(account, detail) {
+  const target = account && typeof account === 'object' ? account : { uid: String(account || '').trim() };
+  if (!(detail && detail.restore)) return automationSwitchAccount(target);
+  const current = currentAccount();
+  if (current && current.uid && String(current.uid) === String(target.uid || '')) return automationSwitchAccount(target);
+  const settled = await waitForAutomationReplySettle(SWITCH_SETTLE_RESTORE_MAX_MS);
+  if (settled.ok) {
+    if (settled.reason === 'settled' && settled.waitedMs > 2000) {
+      log('[switch] 还原账号前等了 ' + settled.waitedMs + 'ms，等当前会话的回复跑完（避免整页重载掐断它）');
+    }
+    return automationSwitchAccount(target);
+  }
+  const stay = current ? String(current.nickname || current.uid || '') : '';
+  log('[switch] 延后还原账号：当前会话仍在生成回复（已等 ' + settled.waitedMs + 'ms，会话 ' +
+    String(settled.conversationId || '未知').slice(0, 12) + '）—— 不切号，把账号留在 ' +
+    stay.slice(0, 24) + ' 上，交给「闲置自动切回主账号」按既有策略收回');
+  limitFailoverNotify('warning', '定时任务仍在执行，已暂缓切回主账号（等回复跑完会自动收回）');
+  return { ok: true, uid: String(target.uid || ''), switched: false, deferred: true, reason: settled.reason, waitedMs: settled.waitedMs };
+}
 function startAutomationRun(task, event = null) {
   if (event && (event.navigationSerial == null || event.pageSessionId == null)) event = { ...event, navigationSerial: event.navigationSerial == null ? mainFrameNavigationSerial : event.navigationSerial, pageSessionId: event.pageSessionId || cdpPageSessionId };
   if (automationRuns.size > 200) {
@@ -4923,7 +4994,7 @@ function startAutomationRun(task, event = null) {
     }
     return result;
   };
-  const runDeps = { sessionAction: sessionActionWithReceipt, primaryAccount: async () => publicAccounts().find(a=>a.isPrimary) || null, dismissToast: runNotifier.dismiss, completionReport, event, listAccounts: async () => publicAccounts(), currentAccount: publicCurrent, accountSwitch: (account, detail) => withInput(() => automationSwitchAccount(account), !!(detail && detail.restore)), accountStatus: automationAccountStatus, accountCheckin: async (account) => {
+  const runDeps = { sessionAction: sessionActionWithReceipt, primaryAccount: async () => publicAccounts().find(a=>a.isPrimary) || null, dismissToast: runNotifier.dismiss, completionReport, event, listAccounts: async () => publicAccounts(), currentAccount: publicCurrent, accountSwitch: (account, detail) => withInput(() => automationAccountSwitchGuarded(account, detail), !!(detail && detail.restore)), accountStatus: automationAccountStatus, accountCheckin: async (account) => {
     if (!account || !account.uid) throw new Error('没有可用账号');
     const result = await claimDailyForUid(account.uid);
     appendRunLog('account:checkin:' + (result.skipped ? 'skipped' : result.ok ? 'success' : 'failed'));

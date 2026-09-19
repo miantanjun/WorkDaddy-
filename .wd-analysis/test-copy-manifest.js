@@ -315,12 +315,23 @@ function makeFixture() {
     // 复制任务一次只处理**一个源账号**，所以按 uid 取一个子集来跑（uid 是索引键的一部分）。
     const firstUid = (rm.entries[0] || {}).uid || '';
     const realPlan = rm.entries.filter((e) => e.uid === firstUid).map((e) => ({ id: e.id, cwd: e.cwd }));
+    // ⚠️ H4 的口径是「清单命中就不现场测量」，**不是**「清单新鲜度」。
+    // 真实 space-scan.json 是**外部文件**：落盘超过 DEFAULT_FRESH_MS（24h）就被
+    // isEntryTrusted 判过期，sortPlan 整批退回现场测量 —— 这条断言于是会随日历自己变红。
+    // 2026-09-19 实测：扫描文件 31.4 小时前生成 ⇒ 19/19 全部 measure，与代码改动无关
+    // （git stash 对照同样失败）。这里用「扫描完成时刻 +1 分钟」当 now，把新鲜度这个
+    // 外部变量固定住，测的才是索引命中；「过期必须退回现场测量」由 H4b 单独钉死。
+    const scanNow = Number(real.finishedAt) || Date.now();
     let calls = 0;
     const t0 = Date.now();
-    const sorted = cm.sortPlan(realPlan, { uid: firstUid, index: realIndex, wbHome: '', measure: () => (calls++, {}), now: Date.now() });
+    const sorted = cm.sortPlan(realPlan, { uid: firstUid, index: realIndex, wbHome: '', measure: () => (calls++, {}), now: scanNow + 60000 });
     const ms = Date.now() - t0;
     ok(calls === 0, 'H4 真实清单全命中 → 零现场测量（省掉整棵目录树的同步遍历）',
       { calls, plan: realPlan.length, uid: firstUid });
+    let staleCalls = 0;
+    cm.sortPlan(realPlan, { uid: firstUid, index: realIndex, wbHome: '', measure: () => (staleCalls++, {}), now: scanNow + cm.DEFAULT_FRESH_MS + 60000 });
+    ok(staleCalls === realPlan.length, 'H4b 清单过期（超过 DEFAULT_FRESH_MS）时退回现场测量，不吃陈旧体积',
+      { staleCalls, plan: realPlan.length });
     console.log('      单账号 ' + realPlan.length + ' 条：清单路径排序 ' + ms + ' ms'
       + '（对照：现场全量测量 900ms/3 账号 ≈ 300ms/账号）');
     ok(ms < 50, 'H5 排序耗时可忽略', ms);
