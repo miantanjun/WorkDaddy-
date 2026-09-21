@@ -105,6 +105,7 @@ const {
   canonicalWorkspace,
   getAutoCopyRules,
   readAutoCopyConfig,
+  getAutoCopyJudge,
   dedupeAutoCopySessionRows,
   setAutoCopyRule,
   setAutoCopyAllSessions,
@@ -170,6 +171,13 @@ const {
   createDailyProgressCache,
   fetchDailyProgress,
 } = require('./growth-daily.js');
+// 成长任务「一键完成」：事件构造/上报/领奖全在模块内，daemon 只负责鉴权、互斥与超时。
+const {
+  runAutoRun: runGrowthAutoAll,
+  CN_BASES: GROWTH_CN_BASES,
+  buildTaskActions: buildGrowthTaskActions,
+  TIER_EVENT: GROWTH_TIER_EVENT,
+} = require('./growth-tasks.js');
 const {
   captureException,
   captureMessage,
@@ -268,6 +276,9 @@ const { runCompletionReport, probeAccountCompletion } = require('./completion-re
 const { createPrimaryAccountStore } = require('./primary-account.js');
 const { scanSpace, spaceSlug, SPACE_SCAN_VERSION } = require('./space-scan.js');
 const copyManifest = require('./copy-manifest.js');
+// 方案 D 的本地层：判据缝合件 + 内容定源（D1）。两者都不含副作用，可安全在启动期 require。
+const autoCopyJudge = require('./auto-copy-judge.js');
+const autoCopyLeader = require('./auto-copy-leader.js');
 const cloudCleanup = require('./cloud-cleanup.js');
 const PROFILE = getProfile();
 const DATA_DIR = defaultDataDir();
@@ -455,13 +466,16 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        会话复制冲突登记（血缘两边都改过时不覆盖任何一边，只登记待用户处理）、
 //        更新源降级链与便携版 ZIP 发行；上游「签到不再作为内置任务」一并落地
 //        （checkin-consent 模块删除、注入侧弹窗与接口随之下线）。本地 1.3.x 增强全部保留。
-const DAEMON_VERSION = '1.4.1';
+// 1.4.2：成长任务「一键完成」——tier 1/2 默认执行（真实对话/真实专家 id/服务端 requestId），
+//        tier 3（服务端不校验真实性的纯上报）默认关闭、需显式开关；新增 /api/growth/task-actions、
+//        /api/growth/tasks-auto-all、/api/growth/tasks-auto-status 三条接口，面板按档位渲染按钮。
+const DAEMON_VERSION = '1.4.2';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.3';
 // 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.3）。
 // 本机 fork 用自己的修改版版本号（1.4.x = 上游 1.2.3 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.4.1-20260920-failover-clock-and-build-pin';
+const DAEMON_BUILD_ID = 'release-1.4.2-20260920-growth-task-autorun';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -3504,6 +3518,13 @@ const dailyProgressCache = createDailyProgressCache(async (uid) => {
   return fetchDailyProgress(token, { apiHost: PROFILE.apiHost });
 });
 const automationRuns = new Map();
+// 成长任务「一键完成」的 per-account 在跑标记。
+// 为什么必须互斥：档 1 的动作里有**真实对话**（专家链 / GLM5.2 / 夜猫子），
+// 并发重跑既浪费配额又会让两轮上报互相覆盖进度，结果无法解释。
+const growthAutoInFlight = new Set();
+// 每个账号最近一次「一键完成」的作业态（面板轮询读；只保留最新一轮，不落盘）。
+const growthAutoJobs = new Map();
+const GROWTH_AUTO_TIMEOUT_MS = 10 * 60 * 1000;
 let completionReportRunning = false;
 const automationStateFile = () => path.join(DATA_DIR, 'automation-state.json');
 function readAutomationState() {
@@ -6484,14 +6505,62 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   const targetIds = live.map((member) => member.id);
   const targetPresent = targetUid === undefined || live.some((member) => member.uid === String(targetUid || '').trim());
   if (live.length < 2) return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent };
+  // ---- 判主偏序（方案 D 的 D1；只有 judge='content' 时才走，默认路径逐行为不变）----
+  // 用**内容**定源：找「含住其余全部成员」的那一份当源。有唯一领导者才 fan-out；
+  // 全部等价 => 无事可做；谁都不含谁 => 真分叉，**一份都不覆盖**，双方保留交用户裁决。
+  // 判据全部来自上游 session-sync.js 的 compareSnapshots，mtime 不参与 ——
+  // mtime 只回答「要不要重算快照」（见 auto-copy-judge.js），绝不回答「谁赢」。
+  const judgeMode = String((options && options.judge) || (typeof getAutoCopyJudge === 'function' ? getAutoCopyJudge(DATA_DIR) : 'mtime')) === 'content'
+    ? 'content' : 'mtime';
+  let contentLatest = null;
+  let contentLead = null;
+  if (judgeMode === 'content') {
+    await yieldAutoCopyToRenderer();
+    // aliases 必须是该血缘的**全部成员 id** 且保持稳定：它既参与「同一份内容落在不同副本上」的
+    // 身份归一化（缺了会把等价副本判成 conflict），又是 auto-copy-judge 缓存键的一部分。
+    contentLead = autoCopyLeader.resolveContentLeader(
+      PROFILE.dataRoot,
+      live.map((member) => ({ uid: member.uid, id: member.id })),
+      { aliases: live.map((member) => member.id), preferredId: String(targetUid || '').trim() }
+    );
+    if (contentLead.kind === 'divergent' || contentLead.kind === 'insufficient') {
+      // 「保留分叉」在这里落地：连产物相位都不推进，目标侧保持原样。
+      return {
+        members: live.length,
+        synced: 0,
+        failedFiles: 0,
+        targetIds,
+        targetPresent,
+        conflict: true,
+        conflicts: 1,
+        judge: 'content',
+        divergent: contentLead.kind === 'divergent',
+        branch: {
+          kind: contentLead.kind,
+          leaderId: contentLead.leaderId,
+          pairs: contentLead.pairs,
+          reason: contentLead.reason,
+        },
+      };
+    }
+    const targetMember = live.find((member) => member.uid === String(targetUid || '').trim());
+    // 全部等价、或目标自己就是领导者 => 目标已经含着全部内容，没有可下发的。
+    if (targetPresent && targetMember && (contentLead.kind === 'all-equal' || contentLead.leaderId === targetMember.id)) {
+      return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent, unchanged: true, judge: 'content' };
+    }
+    contentLatest = live.find((member) => member.id === contentLead.leaderId) || null;
+    if (!contentLatest) return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent, judge: 'content' };
+  }
   // Once a lineage has been synchronized, a changed file on each side means
   // both accounts wrote new content since the last common snapshot. Do not
   // pick one side by mtime and silently overwrite the other; surface a
   // conflict for the user after the progress bar completes.
-  const changedSinceBaseline = baselineAt > 0
-    ? live.filter((member) => Number(member.contentMtime || 0) > baselineAt)
-    : [];
-  if (changedSinceBaseline.length >= 2) {
+  // judge='content' 时这条 mtime 水位线判据整段停用（D1）：定源已交给内容偏序，
+  // 若还让它拦在前面 return，内容判据永远走不到 —— 两条判据同时存在只会互相打架。
+  const changedSinceBaseline = (judgeMode === 'content' || !(baselineAt > 0))
+    ? []
+    : live.filter((member) => Number(member.contentMtime || 0) > baselineAt);
+  if (judgeMode !== 'content' && changedSinceBaseline.length >= 2) {
     return {
       members: live.length,
       synced: 0,
@@ -6504,10 +6573,11 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   }
   // The lineage already has the target member and neither side changed since
   // the last successful sync. Avoid a full overwrite of an unchanged session.
-  if (targetPresent && baselineAt > 0 && changedSinceBaseline.length === 0) {
+  if (judgeMode !== 'content' && targetPresent && baselineAt > 0 && changedSinceBaseline.length === 0) {
     return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent, unchanged: true };
   }
-  const latest = selectLatestAutoCopyMember(live);
+  // judge='content' 时源由内容偏序决定（contentLatest）；只有默认的 mtime 路径才比时间。
+  const latest = contentLatest || selectLatestAutoCopyMember(live);
   if (!latest) return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent };
   const sourceRow = latest.row;
   let synced = 0;
@@ -6521,9 +6591,71 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
       payloadTargets.push({ sourceId: String(sourceId || ''), targetId: String(targetId) });
     }
   };
+  // ---- 写盘：content 模式走事务写入（applySnapshot），mtime 模式保持原实现 ----------------
+  let failedFiles = 0;
+  if (judgeMode === 'content') {
+    // ================= D2：事务写入（只有 judge='content' 才走这里）=================
+    // 为什么换掉 copySessionFiles：它是「整目录 cp」—— ① 不删目标侧多出来的文件，repair 场景
+    // 永远清不干净；② 写盘中途失败会留下半截状态，没有回滚。applySnapshot 是差异集 + 先备份
+    // 目标旧字节 + 原子 rename 发布 + 发布后复检，失败自动回滚（journal 记 rolled-back）。
+    // ⚠️ 默认 judge='mtime' 走下面的 else，本分支一行都不经过 ⇒ 行为零变化。
+    //
+    // 源自身仍交给 copySessionFiles 自复制：applySnapshot 明确拒绝 source.id === target.id
+    // （session-sync.js 顶部校验），而「修复来源副本自己的 artifact-index owner」必须自复制。
+    // 这一步只碰 artifact-index 一个文件，不删任何文件、不做 fan-out。
+    const repairedSource = await copySessionFiles(PROFILE.dataRoot, latest.id, latest.id, ownerIds, options);
+    failedFiles += Number(repairedSource.failed) || 0;
+    // 源快照**读一次、复用于全部目标**。必须是 writable（含 bytes）——applySnapshot 要给目标做备份。
+    const contentSource = autoCopyJudge.readWritableSnapshot(PROFILE.dataRoot, latest.id, ownerIds);
+    autoCopyJudge.assertWritable(contentSource, 'content-source');
+    const syncBackupRoot = path.join(DATA_DIR, 'session-sync-backups');
+    // 备份是**回滚凭据**不是历史归档：不裁剪 = 每次切号在 DATA_DIR 里堆一份会话全量旧字节。
+    const pruned = autoCopyJudge.pruneSessionSyncBackups(syncBackupRoot);
+    if (pruned.removed) log('[sessions-auto-copy] 清理事务备份 ' + pruned.removed + ' 份（保留 ' + pruned.kept + '）');
+    // 产物目录不在内容快照域内（auto-copy-judge 已把 workspace/sessions 排除）——这正是
+    // 「产物走第二阶段」的落点，语义与 copySessionFiles 的 workspacePending 完全一致：
+    // 源侧真有产物才登记。这一段就是 D2 的「workspacePending 回传」。
+    let workspacePending = false;
+    if (options && options.skipWorkspaceSessions) {
+      try {
+        const workspaceDir = path.join(PROFILE.dataRoot, 'workspace', 'sessions', latest.id);
+        workspacePending = fs.existsSync(workspaceDir) && directoryStats(workspaceDir).files > 0;
+      } catch (_) {}
+    }
+    // ⚠️ 刻意**不写 status**（不变量 I-1，与下面 mtime 分支同一条 SQL、逐列一致）：
+    //    归档（archived）是主账号专属的用户意图，不能跟着「谁最新」传播，否则别的账号一活跃
+    //    就把主账号的归档冲回普通态、或把归档态带到别人的任务列表里。
+    const metaSql = 'UPDATE sessions SET title = ?, custom_title = ?, updated_at = ?, last_activity_at = ? WHERE id = ? AND user_id = ? AND deleted_at IS NULL;';
+    const metaArgs = [sourceRow.title || '', sourceRow.custom_title || '',
+      Number(sourceRow.updated_at || Date.now()), Number(sourceRow.last_activity_at || sourceRow.updated_at || Date.now())];
+    for (const target of live) {
+      if (target.id === latest.id) continue;
+      await yieldAutoCopyToRenderer();
+      try {
+        const contentTarget = autoCopyJudge.readWritableSnapshot(PROFILE.dataRoot, target.id, ownerIds);
+        autoCopyJudge.assertWritable(contentTarget, 'content-target/' + target.id);
+        const applied = await autoCopyJudge.applySnapshot(contentSource, contentTarget, {
+          backupRoot: syncBackupRoot,
+          guard: async () => { await yieldAutoCopyToRenderer(); },
+          commit: async (verifyPublished) => {
+            await sqliteRun(metaSql, [...metaArgs, target.id, target.uid]);
+            // 官方进程可能在上面那次异步写库期间又动了文件；再复检一次，不一致就抛错触发回滚。
+            if (typeof verifyPublished === 'function') verifyPublished();
+          },
+        });
+        if (applied && Number(applied.copied) > 0) synced++;
+        if (workspacePending) trackPayload({ workspacePending: true }, latest.id, target.id);
+      } catch (error) {
+        failedFiles++;
+        log('[sessions-auto-copy] 事务同步会话失败 ' + target.uid + '/' + target.id + ': ' + error.message);
+      }
+    }
+  } else {
+  // ⚠️ 本分支（mtime 路径）刻意**保持原有缩进不 reformat**：它是默认路径，逐字节不变才好证明
+  //    「content 开关关掉后行为零变化」。谁都不许顺手 prettier 它。
   // 旧版副本可能仍挂着最初源会话的 owner；也修复作为最新来源的副本自身。
   const repairedSource = await copySessionFiles(PROFILE.dataRoot, latest.id, latest.id, ownerIds, options);
-  let failedFiles = repairedSource.failed;
+  failedFiles = repairedSource.failed;
   for (const target of live) {
     if (target.id === latest.id) continue;
     await yieldAutoCopyToRenderer();
@@ -6544,9 +6676,13 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
       log(`[sessions-auto-copy] 同步会话元数据失败 ${target.uid}/${target.id}: ${error.message}`);
     }
   }
+  }
   // 本次 fan-out 已把**全部**成员拉到同一份内容 ⇒ 这就是新的「共同快照」时刻，
   // 记下来给下一次的冲突判据当标尺（见函数上方关于假冲突自锁的说明）。
   // 只有「无失败文件」才算数：有失败时成员并未全部对齐，推进标尺会让判据偏松。
+  // 目标刚被写过（copySessionFiles 用 preserveTimestamps，mtime 不变、只有 ctime 变），
+  // 显式清掉判定缓存，避免下一次判主拿「刚写完之前的旧快照」自欺欺人。
+  if (judgeMode === 'content') for (const member of live) autoCopyJudge.evictCache(PROFILE.dataRoot, member.id);
   if (!failedFiles && typeof setAutoCopyLineageSyncedAt === 'function') {
     setAutoCopyLineageSyncedAt(DATA_DIR, lineageId, Date.now());
   }
@@ -6561,7 +6697,7 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
       });
     }
   }
-  return { members: live.length, synced, failedFiles, sourceId: latest.id, targetIds, targetPresent, payloadTargets };
+  return { members: live.length, synced, failedFiles, sourceId: latest.id, sourcePickedBy: judgeMode, targetIds, targetPresent, payloadTargets };
 }
 
 /* ---------------- 会话删除的唯一实现（面板端点 + 原生软删探测共用） ---------------- */
@@ -8054,6 +8190,8 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
     payloadFileTotal: 0,
     payloadFileProcessed: 0,
     conflicts: 0,
+    // 分叉保留计数（方案 D D1）：内容判主判不出领导者、一份都没覆盖的会话数。
+    divergences: 0,
     failedItems: 0,
     details: [],
     error: null,
@@ -8118,6 +8256,9 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
         + (merged.written ? '' : '（未落盘：' + merged.reason + '）'));
     }
     const payloadQueue = [];
+    // 判据模式在一个任务期内不会变，这里读一次就够 —— 每个会话都重读一遍 meta.json 是纯浪费
+    // （readMeta 没有缓存，而 meta.json 里装着全部血缘与账号索引）。
+    const autoCopyJudgeMode = typeof getAutoCopyJudge === 'function' ? getAutoCopyJudge(DATA_DIR) : 'mtime';
     for (let index = 0; index < job.plan.length; index++) {
       const src = job.plan[index];
       job.currentIndex = index + 1;
@@ -8145,7 +8286,7 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
           // from the account that happened to be active most recently.
           // 本任务自己分两阶段搬产物，lineage 同步也必须跟着跳过产物目录，
           // 否则「正文 N/N」之后又会在这里把几百 MB 的产物一次搬完，phase 拆分形同虚设。
-          const syncOptions = { skipWorkspaceSessions: true };
+          const syncOptions = { skipWorkspaceSessions: true, judge: autoCopyJudgeMode };
           const enqueuePayload = (targets) => {
             for (const target of (targets || [])) {
               if (!target || !target.targetId) continue;
@@ -8161,7 +8302,13 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
           const synced = await syncAutoCopyLineage(src.lineageId, targetUid, syncOptions);
           enqueuePayload(synced.payloadTargets);
           if (synced.conflict) {
-            result = { status: 'conflict', conflicts: synced.conflicts || 1, failedFiles: 0 };
+            result = {
+              status: 'conflict',
+              conflicts: synced.conflicts || 1,
+              failedFiles: 0,
+              divergent: !!synced.divergent,
+              branch: synced.branch || null,
+            };
           } else if (synced.targetPresent) {
             result = {
               status: synced.failedFiles ? 'partial' : (synced.synced ? 'copied' : 'skipped'),
@@ -8175,7 +8322,11 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
             });
             const synced = await syncAutoCopyLineage(src.lineageId, targetUid, syncOptions);
             enqueuePayload(synced.payloadTargets);
-            if (synced.conflict) result.status = 'conflict';
+            if (synced.conflict) {
+              result.status = 'conflict';
+              result.divergent = !!synced.divergent;
+              result.branch = synced.branch || null;
+            }
             result.conflicts = synced.conflicts || 0;
             result.failedFiles = (result.failedFiles || 0) + synced.failedFiles;
             if (synced.failedFiles) result.status = 'partial';
@@ -8188,9 +8339,19 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
           : result.status === 'skipped' ? 'skipped' : 'copied';
         detail.failedFiles = Number(result.failedFiles) || 0;
         detail.conflicts = Number(result.conflicts) || 0;
+        // 分叉保留：kind/leaderId/pairs 原样带给面板，让 UI 能把「真分叉」与旧的
+        // 「两边都改过、未覆盖」区分开。渲染文案在 inject.js，本轮刻意不动它。
+        if (result.divergent) {
+          detail.divergent = true;
+          detail.branch = result.branch || null;
+          detail.branchNotice = '两个账号的这段对话已各自分叉，已保留双方，未自动覆盖';
+        }
         if (result.status === 'skipped') job.skipped++;
         else if (result.status === 'partial') { job.partial++; job.failedItems++; }
-        else if (result.status === 'conflict') job.conflicts += Number(result.conflicts) || 1;
+        else if (result.status === 'conflict') {
+          job.conflicts += Number(result.conflicts) || 1;
+          if (result.divergent) job.divergences += 1;
+        }
         else job.copied++;
         if (result.failedFiles) job.failed += result.failedFiles;
         // 产物目录留到第二阶段（体积大），此处只登记待办。
@@ -8280,7 +8441,7 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
     job.currentId = null;
     job.currentLabel = '';
     job.currentBytes = 0;
-    log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 完成 total=${job.total} copied=${job.copied} skipped=${job.skipped} partial=${job.partial} conflicts=${job.conflicts} failed=${job.failed} 产物=${job.payloadCopied}/${job.payloadTotal}(跳过 ${job.payloadSkipped} 失败 ${job.payloadFailed}) 硬链接=${job.payloadLinked}个/省${formatByteSize(job.payloadLinkedBytes)}(复制${job.payloadCopiedFiles} 跳过${job.payloadSkippedFiles} 失败${job.payloadFailedFiles}) 用时 ${((job.finishedAt - job.startedAt) / 1000).toFixed(1)}s`);
+    log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 完成 total=${job.total} copied=${job.copied} skipped=${job.skipped} partial=${job.partial} conflicts=${job.conflicts} divergent=${job.divergences || 0} failed=${job.failed} 产物=${job.payloadCopied}/${job.payloadTotal}(跳过 ${job.payloadSkipped} 失败 ${job.payloadFailed}) 硬链接=${job.payloadLinked}个/省${formatByteSize(job.payloadLinkedBytes)}(复制${job.payloadCopiedFiles} 跳过${job.payloadSkippedFiles} 失败${job.payloadFailedFiles}) 用时 ${((job.finishedAt - job.startedAt) / 1000).toFixed(1)}s`);
     const cleanup = setTimeout(() => autoCopyJobs.delete(id), 30 * 60 * 1000);
     if (cleanup.unref) cleanup.unref();
     pruneAutoCopyJobs();
@@ -8355,6 +8516,7 @@ function publicAutoCopyJob(job) {
     elapsedMs: startedAt ? ((job.finishedAt || Date.now()) - startedAt) : 0,
     failedItems: job.failedItems,
     conflicts: job.conflicts,
+    divergences: job.divergences || 0,
     details: Array.isArray(job.details) ? job.details.slice(0, 500) : [],
     error: job.error,
     sourceUid: job.sourceUid,
@@ -12569,6 +12731,138 @@ function handleApiRoute(req, res) {
         return json(res, 500, { ok: false, error: e.message });
       }
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 成长任务「一键完成」
+  //   档 1/2 默认执行；档 3（纯上报即得分）必须显式 includeTier3=true 才纳入。
+  //   真实对话类动作可能跑数分钟 ⇒ 走「202 + 轮询」而不是长挂一个请求
+  //   （Node 的 server.requestTimeout 默认 300s，长挂会在中途被掐断）。
+  // ---------------------------------------------------------------------------
+
+  // 动作表（只读、零网络）：面板据此把「可自动完成」与「仅能手动」分开渲染。
+  if (req.method === 'GET' && p === '/api/growth/task-actions') {
+    if (PROFILE.capabilities.growthDaily !== true) return json(res, 400, { ok: false, error: '当前客户端不支持成长任务' });
+    return json(res, 200, {
+      ok: true,
+      tierEvent: GROWTH_TIER_EVENT,
+      actions: buildGrowthTaskActions().map((a) => ({ code: a.code, tier: a.tier, desc: a.desc, attempt: a.attempt === true })),
+    });
+  }
+
+  // 一键完成作业状态（轮询用）。
+  if (req.method === 'GET' && p === '/api/growth/tasks-auto-status') {
+    const uid = String(url.searchParams.get('uid') || '').trim();
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(uid)) return json(res, 400, { ok: false, error: 'uid 格式无效' });
+    const job = growthAutoJobs.get(uid);
+    return json(res, 200, { ok: true, uid, job: job ? job : { phase: 'idle' } });
+  }
+
+  // 一键完成（异步作业）：同账号互斥；tier3 默认关。
+  if (req.method === 'POST' && p === '/api/growth/tasks-auto-all') {
+    if (PROFILE.capabilities.growthDaily !== true) return json(res, 400, { ok: false, error: '当前客户端不支持成长任务' });
+    return readBody(req).then((body) => {
+      const uid = String(body && body.uid || '').trim();
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(uid)) return json(res, 400, { ok: false, error: 'uid 格式无效' });
+      if (growthAutoInFlight.has(uid)) return json(res, 409, { ok: false, error: '该账号已有一轮「一键完成」在跑，请等本轮结束后重试' });
+      const account = listAccounts(DATA_DIR).find((a) => a.uid === uid);
+      if (!account) return json(res, 404, { ok: false, error: '账号不存在' });
+      const backup = accountBackupFile(uid);
+      if (!fs.existsSync(backup)) return json(res, 404, { ok: false, error: '账号备份不存在' });
+      let token = '';
+      try {
+        const raw = JSON.parse(fs.readFileSync(backup, 'utf8'));
+        const auth = raw && raw.auth || {};
+        token = auth.accessToken || auth.access_token || auth.token || '';
+      } catch (_) { /* 下面统一按缺失处理 */ }
+      if (!token) return json(res, 400, { ok: false, error: '备份中无 accessToken' });
+
+      // 单任务模式：面板点某一行「一键完成」时只传该任务码。
+      let onlyCodes = null;
+      if (body && body.taskCodes !== undefined) {
+        if (!Array.isArray(body.taskCodes) || !body.taskCodes.length || body.taskCodes.length > 20
+          || body.taskCodes.some((code) => typeof code !== 'string' || !/^[A-Za-z0-9_.-]{1,96}$/.test(code.trim()))) {
+          return json(res, 400, { ok: false, error: '任务码无效' });
+        }
+        onlyCodes = body.taskCodes.map((code) => code.trim());
+      }
+
+      const includeTier3 = body && body.includeTier3 === true;
+      const job = {
+        phase: 'starting', startedAt: Date.now(), finishedAt: 0,
+        includeTier3: includeTier3, progress: null, plan: null,
+        results: [], summary: null, error: '',
+      };
+      growthAutoJobs.set(uid, job);
+      growthAutoInFlight.add(uid);
+      let settled = false;
+      const watchdog = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        job.phase = 'timeout';
+        job.error = `超过 ${Math.round(GROWTH_AUTO_TIMEOUT_MS / 60000)} 分钟仍未结束，已释放该账号锁；后台动作可能仍在跑，请稍后再看任务进度`;
+        job.finishedAt = Date.now();
+        growthAutoInFlight.delete(uid);
+        log(`[growth-tasks] ${uid} 一键完成超过预算，已释放账号锁`);
+      }, GROWTH_AUTO_TIMEOUT_MS);
+      if (watchdog && typeof watchdog.unref === 'function') watchdog.unref();
+
+      // 刻意不 await：立即 202 让面板转入轮询（真实对话动辄数十秒，长挂请求会被
+      // server.requestTimeout 掐断，且中途失败无法回报进度）。
+      runGrowthAutoAll({
+        token: token,
+        account: { uid: uid, nickname: account.nickname || '' },
+        chatBase: GROWTH_CN_BASES.chatBase,
+        webBase: GROWTH_CN_BASES.webBase,
+        billingBase: GROWTH_CN_BASES.billingBase,
+        mpBase: GROWTH_CN_BASES.mpBase,
+        includeTier3: includeTier3,
+        onlyCodes: onlyCodes,
+        log: (message) => log(`[growth-tasks] ${uid} ${message}`),
+        onProgress: (payload) => {
+          if (settled) return;
+          if (payload && payload.plan) {
+            job.plan = {
+              run: payload.plan.run.map((r) => ({ code: r.code, tier: r.tier, current: r.current, target: r.target })),
+              skipped: payload.plan.skip,
+              unknown: payload.plan.unknown,
+              manual: payload.plan.manual,
+            };
+          }
+          if (payload && payload.phase === 'running') job.phase = `running ${payload.index}/${payload.total} ${payload.code}`;
+          if (payload && payload.phase === 'item') {
+            job.progress = payload.progress || null;
+            if (payload.result) job.results.push(payload.result);
+          }
+        },
+      }).then((result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(watchdog);
+        job.phase = 'done';
+        job.finishedAt = Date.now();
+        job.results = result.results;
+        job.summary = result.summary;
+        job.plan = {
+          run: result.plan.run.map((r) => ({ code: r.code, tier: r.tier, current: r.current, target: r.target })),
+          skipped: result.plan.skip,
+          unknown: result.plan.unknown,
+          manual: result.plan.manual,
+        };
+        log(`[growth-tasks] ${uid} 一键完成结束：计划 ${result.summary.planned}、成功 ${result.summary.done}、失败 ${result.summary.failed}、领奖 ${result.summary.claimed}（+${result.summary.credit} 分 +${result.summary.energy} 能）`);
+      }).catch((error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(watchdog);
+        job.phase = 'error';
+        job.finishedAt = Date.now();
+        job.error = String((error && error.message) || error).slice(0, 300);
+        log(`[growth-tasks] ${uid} 一键完成失败: ${job.error}`);
+      }).finally(() => {
+        growthAutoInFlight.delete(uid);
+      });
+      return json(res, 202, { ok: true, uid, includeTier3: includeTier3, onlyCodes: onlyCodes, job: { phase: job.phase, startedAt: job.startedAt } });
+    }).catch(() => json(res, 400, { ok: false, error: '请求体无效' }));
   }
 
   // 导出账号：密码必填；v3 使用 gzip + AES-GCM，密码只在本次请求内存在

@@ -19,7 +19,7 @@ const SUITES = [
   ['test-switch-sync.js', 57],
   ['test-lineage-dedupe.js', 34],
   ['test-cloud-ghosts.js', 86],
-  ['test-login-tip-i18n.js', 14],
+  ['test-login-tip-i18n.js', 18],
   ['test-space-sort.js', 65],
   ['test-token-stats-attribution.js', 7],
   ['test-scheduled-send.js', 184],
@@ -36,6 +36,11 @@ const SUITES = [
   ['test-watchdog-backoff.js', 16],  // v1.4.1 §9-4：watchdog 退避复位判据（存活超 60s）+ 熔断
   ['test-failover-clock.js', 42],  // v1.4.1 §9-7：限流窗口绝对到期时刻 + 时钟回拨不可信 + 结构化「选不出账号」
   ['test-build-pin.js', 27],  // v1.4.1 §9-5：ws 钉版本（manifest+lock+npm ci）+ 真跑 vendoring 与内嵌 Python 块
+  ['test-session-sync-124.js', 60],  // 上游 1.2.4 会话同步模块落地：五态判定 + 选主不猜 + applySnapshot 真写 + fixture/delta provenance 锁
+  ['test-auto-copy-judge.js', 27],  // 方案 D/D0：judge 开关（默认 mtime ⇒ 零行为变化）+ 快照域切分 + 指纹 memo（命中零读盘）+ slim/writable 护栏
+  ['test-auto-copy-leader.js', 57],  // 方案 D/D1+D1.5：内容定源判主偏序（repair 方向 + 分叉保留 + 不可读不放行）+ mtime 不参与定源 + alias 契约 + daemon 接线 + 打包白名单 + 面板文案
+  ['test-auto-copy-content-write.js', 54],  // 方案 D/D2：content 模式改走 applySnapshot 事务写入（差异集 + 备份 + journal + 发布后复检）+ 目标多余文件清理 + 产物域不动 + 备份按 mtime 裁剪 + 默认 mtime 路径逐字节未变
+  ['test-growth-tasks.js', 113],  // 成长任务「一键完成」：指纹派生稳定 + 桌面 6 连事件形状 + 四条 CN 通道 + 领奖主备降级 + accept 回读重试 + 档位门控（tier3 默认关）+ 行形状兼容 + 端到端自动领奖 + 面板/daemon 接线 + 全量中文文案 i18n 守卫
 ];
 
 const out = [];

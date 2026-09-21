@@ -158,6 +158,10 @@ cp scripts/Stop-WorkDaddy.cmd "$STAGE/Stop-WorkDaddy.cmd"
 printf 'portable\n' > "$STAGE/WorkDaddy.portable"
 # 3.2) scripts\ 本体（含 node_modules/ws、builtin）
 cp -R scripts "$STAGE/scripts"
+# ⚠️ 改 scripts/*.js 时的回滚备份（*.bak / *.bak-<标记>）绝不能进发行包。
+#    历史血例：本轮与上一轮各在 scripts/ 里留过一个 .bak-*，而这一行是整目录 cp -R，
+#    不显式清就会被 zip 带走（mac 侧是显式白名单，不受影响）。只清顶层，不动 node_modules 里的同名文件。
+find "$STAGE/scripts" -maxdepth 1 \( -name '*.bak' -o -name '*.bak-*' \) -delete
 # 内置资产直接写入 staging，避免修改源码树，也确保最终 ZIP/Setup.exe 一定包含它们。
 rm -rf "$STAGE/scripts/builtin"
 mkdir -p "$STAGE/scripts/builtin"

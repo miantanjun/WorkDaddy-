@@ -555,13 +555,20 @@ function ensureAutoCopyMeta(meta) {
     if (!current.syncedAt || typeof current.syncedAt !== 'object' || Array.isArray(current.syncedAt)) {
       current.syncedAt = {};
     }
+    // 会话同步判据开关（2026-09-20 方案 D 新增）：
+    //   'mtime'   = 现有实现：正文 mtime + 血缘 watermark 判冲突（v1.4.1 修的假冲突/自锁那套，默认）
+    //   'content' = 上游 1.2.4 的内容快照判据（session-sync.js + auto-copy-judge.js）
+    // 只补字段、结构判据（上面那条 version===2 的守卫）一字不动。
+    if (current.judge !== 'mtime' && current.judge !== 'content') {
+      current.judge = 'mtime';
+    }
     return current;
   }
 
   // 1.0.15 stored rules under sourceUid. Convert them once to global session lineages
   // and global workspace paths so a migration/copy keeps the same shared identity.
   const legacy = current && typeof current === 'object' && !Array.isArray(current) ? current : {};
-  const next = { version: 2, allSessions: false, sessions: {}, sessionIndex: {}, workspaces: {}, copies: {}, suppressed: {}, syncedAt: {} };
+  const next = { version: 2, allSessions: false, sessions: {}, sessionIndex: {}, workspaces: {}, copies: {}, suppressed: {}, syncedAt: {}, judge: 'mtime' };
   const legacySessions = legacy.sessions && typeof legacy.sessions === 'object' ? legacy.sessions : {};
   for (const sourceUid of Object.keys(legacySessions)) {
     const bucket = legacySessions[sourceUid];
@@ -615,6 +622,8 @@ function readAutoCopyConfig(dataDir) {
     syncedAt: autoCopy.syncedAt && typeof autoCopy.syncedAt === 'object' && !Array.isArray(autoCopy.syncedAt)
       ? autoCopy.syncedAt
       : {},
+    // ⚠️ 白名单投影：不在这里显式列出的字段 daemon 永远取不到（历史同款坑：syncedAt / branchCopy）。
+    judge: autoCopy.judge === 'content' ? 'content' : 'mtime',
   };
 }
 
@@ -1446,6 +1455,27 @@ function setAutoCopyLineageSyncedAt(dataDir, lineageId, at) {
   writeMeta(dataDir, meta);
   return value;
 }
+/**
+ * 会话同步判据开关（2026-09-20 方案 D）。
+ *   'mtime'（默认）= 现有实现：正文 mtime + 血缘 watermark 判冲突。
+ *   'content'       = 上游 1.2.4 的内容快照判据（sha256 + 逐条记录哈希），mtime 仅用于缓存失效提示。
+ * 默认保持 'mtime' ⇒ 未灰度前行为零变化，可一键回退。
+ */
+function getAutoCopyJudge(dataDir) {
+  return readAutoCopyConfig(dataDir).judge === 'content' ? 'content' : 'mtime';
+}
+
+function setAutoCopyJudge(dataDir, value) {
+  const next = value === 'content' ? 'content' : 'mtime';
+  const meta = readMeta(dataDir);
+  const config = ensureAutoCopyMeta(meta);
+  if (config.judge !== next) {
+    config.judge = next;
+    writeMeta(dataDir, meta);
+  }
+  return next;
+}
+
 function logFile(dataDir) {
   return path.join(dataDir, 'daemon.log');
 }
@@ -1936,6 +1966,8 @@ module.exports = {
   canonicalWorkspace,
   getAutoCopyRules,
   readAutoCopyConfig,
+  getAutoCopyJudge,
+  setAutoCopyJudge,
   dedupeAutoCopySessionRows,
   setAutoCopyRule,
   setAutoCopyAllSessions,

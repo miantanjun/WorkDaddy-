@@ -843,6 +843,122 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '去完成': 'Start', '未选择当前 Buddy': 'No current Buddy selected', 'Buddy 未选择': 'Buddy not selected', '选择 Buddy': 'Choose Buddy', '设为当前': 'Set as current', '选择中': 'Selecting', 'Buddy 已设为当前': 'Buddy is now current', '选择后未读取到最新状态': 'Could not load the current Buddy', '请先选择当前 Buddy，再派出旅行': 'Choose a current Buddy before departure', 'Buddy 编号无效': 'Invalid Buddy ID', '当前客户端不支持 Buddy 选择': 'Buddy selection is unavailable in this client', '请重新选择该账号拥有的 Buddy': 'Select a Buddy owned by this account', '选择 Buddy 失败': 'Could not select Buddy',
     '无法打开官方成长中心': 'Could not open the official growth center', '请先切换到该账号再操作': 'Switch to this account first', '无法确认当前登录账号': 'Could not verify the current account', '去官网接取': 'Open official site to accept', '去官网开启': 'Open official site to open', '去官网抽奖': 'Open official site to draw', '去官网解锁 Buddy': 'Open official site to unlock Buddy', '去官网领取': 'Open official site to claim', '去官网派出': 'Open official site to depart', '去官网选择 Buddy': 'Open official site to choose Buddy',
     '正在刷新成长计划与 Buddy 旅行状态…': 'Refreshing the growth plan and Buddy travel status…', '刷新失败，移开后再次悬浮即可重试': 'Refresh failed. Move away and hover again to retry.', '本次刷新失败，当前展示上次结果': 'Refresh failed. Showing the previous result.',
+    // 「一键完成」：**每条都必须整句入典** —— 词典里已有 '去完成' / '任务' / '成长' 等短词条，
+    // 整句没登记就会被「按位置最长匹配」的扫描器撕成中英混合（§26.4 / §44 的教训）。
+    '一键完成': 'Auto-complete', '一键完成全部': 'Auto-complete all',
+    '一键完成中': 'Auto-completing',
+    '只自动完成真实任务（真实对话 / 真实专家 / 可验证痕迹）': 'Runs only genuine tasks (real chat, real experts, verifiable traces)',
+    '包含纯上报任务（服务端不校验真实性）': 'Include report-only tasks (the server does not verify authenticity)',
+    '纯上报任务会直接向官方声明「已完成」，属于风险自担范围，默认关闭': 'Report-only tasks simply tell the official service the work was done. Use at your own risk, off by default.',
+    '该任务需要人工在官方客户端完成': 'This task must be done manually in the official client',
+    '该账号已有一轮「一键完成」在跑，请等本轮结束后重试': 'A round of Auto-complete is already running for this account. Wait for it to finish.',
+    '一键完成失败': 'Auto-complete failed',
+    '一键完成已结束': 'Auto-complete finished',
+    '一键完成进度': 'Auto-complete progress',
+    '正在执行': 'Running ',
+    '已自动完成': 'Auto-completed ',
+    '需真实捐款，无法自动完成': 'Requires a real donation; cannot be automated',
+    '该任务需在官方客户端手动完成': 'Do this task manually in the official client',
+    // 「成长任务·一键完成」的结果与进度文案。daemon 的逐项结果（results[].message）会**直接渲染进
+    // 面板结果行**，所以这些也必须整句入典；否则词典里的 '账号' / '任务' / '已领取' 等短条会把句子
+    // 撕成中英混合（§26.4 的教训）。
+    // ⚠️ 文案约定：含数字/ID 的句子一律把变量放到**句尾或标点之后**，这样词典只需登记静态前缀，
+    //    不再引入 ' 项' / ' 次' 这种两字片段（短片段会污染词典里其它句子）。
+    '该任务属于「纯上报」类：勾选下方开关后才会执行': 'This task is report-only: turn on the switch below to run it',
+    '完成中…': 'Running…',
+    '可自动项数 · ': 'Auto-completable · ',
+    '一键完成已结束：成功 ': 'Auto-complete finished: succeeded ',
+    ' 项，领取 ': ' item(s), claimed ',
+    ' 项（+': ' item(s) (+',
+    ' 积分 +': ' credits +',
+    ' 能量）': ' energy)',
+    '上报 5 条对话活跃事件（自动补足差额）': 'Report 5 chat activity events (top up the shortfall automatically)',
+    '接受任务 → glm-5.2 真实对话一次 → 对齐模型上报': 'Accept task → one real glm-5.2 chat → report with the matching model',
+    '桌面指纹事件链上报（6 事件，含成功回执）': 'Report the desktop fingerprint event chain (6 events, includes a success receipt)',
+    '上报「进入 Buddy 应用」五连事件': 'Report the five-event "entered the Buddy app" chain',
+    '上报「定时任务创建成功」事件': 'Report the "scheduled task created" event',
+    '上报「读资料库介绍」页面点击事件': 'Report the "read the library intro" page click event',
+    '上报「使用模板创建任务」事件组 ×5': 'Report the "create a task from a template" event group ×5',
+    '上报「灵感案例做同款」事件组': 'Report the "copy an inspiration case" event group',
+    '上报「设计创意画布创建」事件组': 'Report the "design canvas created" event group',
+    '上报解锁 → 同意协议 → 领取第一只 Buddy': 'Report unlock → accept the agreement → claim the first Buddy',
+    '真实专家召唤+使用链 ×5（专家市场真实 id + 真实对话）': 'Real expert summon+use chain ×5 (real expert-market id + real chat)',
+    '真实专家团召唤+使用链 ×3': 'Real expert-team summon+use chain ×3',
+    '真实轻量云专家召唤+使用链': 'Real lightweight-cloud expert summon+use chain',
+    '真实对话 + skill_info 技能加载事件': 'Real chat + skill_info skill-load event',
+    '夜猫子：夜间窗口内 glm-5.2 对话补足（窗口外跳过）': 'Night owl: top up glm-5.2 chats inside the night window (skipped outside it)',
+    '设置官方主题 API + 皮肤生效事件': 'Set the official theme API + theme-applied event',
+    '校园日：mp chat + activityId 上报 → 领奖': 'Campus day: mp chat + activityId report → claim reward',
+    '小程序首对话：mp chat 上报 → 领奖': 'Mini-program first chat: mp chat report → claim reward',
+    '该账号无此任务': 'This account does not have this task',
+    '进度已达标，无需上报': 'Target already met; no report needed',
+    '进度已达标，无需补足': 'Target already met; nothing to top up',
+    '已补报对话事件 · ': 'Reported chat events · ',
+    '已完成 glm-5.2 对话并上报': 'Completed a glm-5.2 chat and reported it',
+    '已上报桌面端完整对话事件链': 'Reported the full desktop chat event chain',
+    '已上报 buddyapp 进入五连事件': 'Reported the buddyapp five-event chain',
+    '已上报 buddyapp 进入五连事件（与 Buddy_App 共用载体）': 'Reported the buddyapp five-event chain (shares the carrier with Buddy_App)',
+    '已上报定时任务创建事件': 'Reported the scheduled-task-created event',
+    '已上报资料库介绍阅读事件': 'Reported the library intro read event',
+    '已上报 template_used ×': 'Reported template_used ×',
+    '已上报 playbook_cta_click + playbook_prompt_send': 'Reported playbook_cta_click + playbook_prompt_send',
+    '已上报 wbx_design_canvas_task_create/open': 'Reported wbx_design_canvas_task_create/open',
+    '前置已上报，但领养门槛未过（需当日活跃），请稍后重试': 'Prerequisites reported, but the adoption threshold is not met (needs same-day activity). Try again later.',
+    '已领取 Buddy': 'Buddy claimed',
+    '已上报真实对话 + skill_info 技能加载事件': 'Reported real chat + skill_info skill-load event',
+    '当前不在 23:00–08:00 计数窗口，行为不计分': 'Outside the 23:00–08:00 counting window; this activity is not scored',
+    '已完成夜间对话并上报 · ': 'Completed night chats and reported · ',
+    '已设置主题并上报皮肤生效事件': 'Theme set and the theme-applied event reported',
+    'mp 口径未下发该任务（活动可能已结束）': 'The mp channel did not deliver this task (the campaign may have ended)',
+    'accept 未登记生效（上游 200+OK 但未落账形态），待下次重试': 'accept was not registered (upstream returned 200+OK but did not persist it); will retry next time',
+    '已领取奖励 · 积分 +': 'Reward claimed · credits +',
+    ' · 能量 +': ' · energy +',
+    '本轮已入账（claimed）': 'Credited this round (claimed)',
+    '已补报但进度未达 · 次数 ': 'Reported but target not met · attempts ',
+    ' · 当前 ': ' · current ',
+    ' · 异步计分未归账，下次重试': ' · async scoring has not settled yet; will retry next time',
+    '任务点亮并领取奖励 · 积分 +': 'Task lit up and reward claimed · credits +',
+    '查询失败: ': 'Query failed: ',
+    '已完成（claimed）': 'Completed (claimed)',
+    ' · 已自动领奖 · 积分 +': ' · reward auto-claimed · credits +',
+    ' · 奖励此前已领取': ' · the reward had already been claimed',
+    ' · 达标但领奖失败（可手动重试）': ' · target met but claiming failed (retry manually)',
+    '(批量接受)': '(batch accept)',
+    '已接受任务 · ': 'Tasks accepted · ',
+    '接受任务失败（不阻塞后续）: ': 'Accepting tasks failed (this does not block the rest): ',
+    '；失败 ': '; failed ',
+    ' 个，原因 ': ' item(s), reason: ',
+    '已完成专家召唤+使用链 ': 'Completed expert summon+use chain ',
+    '指纹为空': 'Fingerprint is empty',
+    '缺少 userId（服务端会静默丢弃）': 'Missing userId (the server silently discards such reports)',
+    '参数不完整': 'incomplete parameters',
+    '返回了无法解析的数据': 'returned unparsable data',
+    '桌面事件上报': 'Desktop event report',
+    '桌面事件上报：事件为空': 'Desktop event report: no events',
+    '桌面事件上报：': 'Desktop event report: ',
+    'Web 事件上报': 'Web event report',
+    'Web 事件上报：': 'Web event report: ',
+    '小程序事件上报': 'Mini-program event report',
+    '小程序事件上报：事件为空': 'Mini-program event report: no events',
+    '小程序事件上报：': 'Mini-program event report: ',
+    '活跃上报': 'Activity report',
+    '活跃上报：缺少 userId（服务端会静默丢弃）': 'Activity report: missing userId (the server silently discards such reports)',
+    '真实对话参数不完整': 'Real chat: incomplete parameters',
+    '真实对话 HTTP ': 'Real chat HTTP ',
+    '真实对话：SSE 中未找到服务端 requestId': 'Real chat: no server requestId found in the SSE stream',
+    '真实对话请求超时': 'Real chat request timed out',
+    '专家列表': 'Expert list',
+    '专家市场列表为空': 'The expert market list is empty',
+    '任务列表': 'Task list',
+    '任务列表(mp)': 'Task list (mp)',
+    '接受任务': 'Accept tasks',
+    '接受任务(mp)': 'Accept tasks (mp)',
+    '领奖': 'Claim reward',
+    '领奖：task_code 为空': 'Claim reward: task_code is empty',
+    '领奖(web 降级)': 'Claim reward (web fallback)',
+    '领奖(mp)': 'Claim reward (mp)',
+    '领奖(mp)：task_code 为空': 'Claim reward (mp): task_code is empty',
+    'Buddy 协议': 'Buddy agreement',
     ' 待领取': ' pending', 'Buddy 旅行': 'Buddy travel', '开启盲盒': 'Open blind box', '待抽奖': 'Draw chances', '未派出': 'Not departed', '刷新于 ': 'Refreshed at ', '尚未刷新': 'Not refreshed', '连续登录 ': 'Current streak ', '连续登录读取中': 'Loading streak', '连续登录读取失败': 'Streak unavailable', '补登卡': 'Makeup cards', ' 张': '', '入门档': 'Starter', '进阶档': 'Advanced', '巅峰档': 'Peak', '还差 ': '', ' 天': ' days remaining', '可领取': 'Available', '每日积分趋势': 'Daily Credits trend', '每日 Token 趋势': 'Daily Token trend',
     '账号': 'Accounts', '主题': 'Theme', '会话': 'Sessions', '模型': 'Models', '增强': 'Enhance', '自动化': 'Automation', '电脑': 'Computer', '关于': 'About', '设置': 'Settings',
     // 空间占用页（只读）。长句说明有意不译：与其它页一样，翻译只覆盖短标签，
@@ -943,7 +1059,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '导入中…': 'Importing…', ' 个任务': ' task(s)', '导入任务': 'Import tasks', '导出任务': 'Export tasks', '请先勾选要导出的任务': 'Select tasks to export first', '选择 JSON 或 ZIP 任务文件': 'Choose a JSON or ZIP task file', '读取任务文件…': 'Reading task file…', '任务导出成功': 'Tasks exported', '导入失败': 'Import failed', '导出失败': 'Export failed', '可导入': 'Ready to import', '已存在，将跳过': 'Already exists; skipped', '不兼容，无法导入': 'Incompatible; cannot import', '导入后保持停用，可在任务列表中启用。相同 ID 的任务会跳过。': 'Imported tasks stay disabled until you enable them. Existing task IDs are skipped.', '任务文件不能超过 8 MiB': 'Task files must not exceed 8 MiB', '缺少必填参数': 'Required inputs are missing', '需要更新 WorkDaddy': 'Requires a newer WorkDaddy version', '不支持当前客户端或系统': 'Unsupported client or platform', '文件不是自动化任务 JSON': 'Not an automation task JSON file', '任务格式或能力不受支持': 'Unsupported task format or capabilities',
     '发现更多自动化任务': 'Discover more automations', '正在发现…': 'Discovering…', '搜索任务名称': 'Search task names', '没有匹配的任务': 'No matching tasks', '暂未发现公开任务': 'No public tasks found', '公开任务加载失败': 'Could not load public tasks', '这些任务来自互联网公开仓库，均为第三方内容，与 WorkDaddy 无归属关系。导入后默认停用，请先安全评估再启用。': 'These tasks come from public repositories and are third-party content unaffiliated with WorkDaddy. Imported tasks stay disabled; review them before enabling.', '部分来源暂时无法访问，当前显示上次缓存的结果。': 'Some sources are unavailable. Showing cached results.', '暂无说明': 'No description', '不兼容': 'Incompatible', '无法打开仓库': 'Could not open repository', '任务已导入，启用后生效': 'Task imported. Enable it to run.', '任务已存在，未重复导入': 'Task already exists and was not imported again.', '我也要出现在这里': 'Publish my tasks', '提交公开任务': 'Publish public tasks', '收录 GitHub 和 Gitee 公开仓库。参考': 'Public GitHub and Gitee repositories are indexed. See', '将任务 JSON 放在 tasks/ 目录，并在仓库描述中加入 WorkDaddyAutomationRepository。': 'Put task JSON files in tasks/ and add WorkDaddyAutomationRepository to the repository description.', '查看示例仓库': 'View example repository', '上一页': 'Previous', '下一页': 'Next', ' · 匹配 ': ' · Matches ', '安全评估': 'Safety review', '评估中…': 'Reviewing…', '安全评估会话已创建': 'Safety review session created', '安全评估失败': 'Safety review failed', '会话创建失败': 'Could not create the session', '无法读取评估状态': 'Could not read review status', '未返回安全评估运行记录': 'No safety review run was returned', '无法创建会话': 'Could not create a session', '评估会话仍在创建，请稍后查看 WorkBuddy': 'The review session is still being created. Check WorkBuddy shortly.',
     '会话同步完成': 'Session sync complete', '会话同步完成，发现冲突': 'Session sync complete with conflicts', '会话同步完成，部分项目失败': 'Session sync complete with some failures', '会话同步等待中': 'Session sync waiting', '正在同步会话': 'Syncing session', '会话同步失败': 'Session sync failed', '同步等待中': 'Sync waiting', '同步失败': 'Sync failed', '同步': 'Sync', '已同步': 'Synced', ' · 新同步': ' · Newly synced ', ' · 有': ' · ', ' 项需要留意': ' item(s) need attention', ' · 请稍后重试': ' · Try again later', '会话同步进度': 'Session sync progress', ' 个会话两边都修改过，未覆盖任何一边': ' session(s) were changed on both sides; neither side was overwritten', '其他账号': 'Other account', '同步完成': 'Sync complete', '同步完成，发现冲突': 'Sync complete with conflicts', '同步完成，部分失败': 'Sync complete with some failures', '正在把已标记的会话同步到「': 'Syncing marked sessions to “', ' 个未变化会话': ' unchanged session(s)', '同步任务未完成，请稍后重试': 'Sync did not finish. Try again later',
-    ' · 跳过': ' · Skipped', ' · 冲突': ' · Conflicts', '成功': 'Succeeded', '跳过': 'Skipped', '已跳过': 'Skipped', '部分失败': 'Partial failure', '冲突': 'Conflict', '处理中': 'Processing', '两边都修改过，未覆盖': 'Changed on both sides; neither side was overwritten', '部分文件失败': 'Some files failed', '当前任务未记录逐项明细。': 'No per-session details were recorded for this task.', '会话同步明细': 'Session sync details', '会话同步结果筛选': 'Filter session sync results', '当前分类没有会话。': 'No sessions in this category.', '正在把已标记的会话从「': 'Syncing marked sessions from “', '」同步到「': '” to “', '查看明细': 'View details', ' 个候选会话': ' candidate session(s)', ' 秒后自动关闭': ' seconds until automatic close',
+    ' · 跳过': ' · Skipped', ' · 冲突': ' · Conflicts', '成功': 'Succeeded', '跳过': 'Skipped', '已跳过': 'Skipped', '部分失败': 'Partial failure', '冲突': 'Conflict', '处理中': 'Processing', '两边都修改过，未覆盖': 'Changed on both sides; neither side was overwritten', '部分文件失败': 'Some files failed', '当前任务未记录逐项明细。': 'No per-session details were recorded for this task.', '会话同步明细': 'Session sync details', '会话同步结果筛选': 'Filter session sync results', '当前分类没有会话。': 'No sessions in this category.', '正在把已标记的会话从「': 'Syncing marked sessions from “', '」同步到「': '” to “', '查看明细': 'View details', ' 个候选会话': ' candidate session(s)', ' 秒后自动关闭': ' seconds until automatic close', '会话同步完成，有会话分叉': 'Session sync complete with branched sessions', ' 个会话两边各自分叉，已保留双方，未覆盖任何一边': ' session(s) branched on both sides; both copies were kept and neither was overwritten',
     '收录 GitHub 和 Gitee 公开仓库。参考 ': 'Public GitHub and Gitee repositories are indexed. See ', '。': '.', '克隆示例仓库：': 'Clone the example repository: ', '删除 ': 'Delete ', ' 目录中不需要的示例任务。': ' directory tasks you do not need.', '把你的自动化任务 JSON 放进 ': 'Put your automation task JSON in ', ' 目录。': ' directory.', '提交改动并推送到 GitHub 或 Gitee。': 'Commit and push changes to GitHub or Gitee.', '在仓库简介中加入关键词 ': 'Add the keyword ',
     '导出账号': 'Export accounts', '导入账号': 'Import accounts', '导出会话': 'Export sessions', '导入会话': 'Import sessions', '导出快捷短语': 'Export quick phrases', '导入快捷短语': 'Import quick phrases', '同步选中到其他账号': 'Sync selected to another account', '删除选中': 'Delete selected', '操作会话': 'Session actions', '连通测试': 'Test connection', '编辑模型': 'Edit model', '模型已保存': 'Model saved', '模型已启用': 'Model enabled', '模型已复制': 'Model copied', '模型配置已共用': 'Model configuration shared', '当前模型': 'Current model', '备选模型': 'Backup models', '模型加载失败：': 'Failed to load models: ', '保存模型失败：': 'Failed to save model: ', '删除当前模型失败：': 'Failed to delete current model: ', '启用模型失败：': 'Failed to enable model: ', '连通测试失败：': 'Connection test failed: ',
     '选择要查看的账号': 'Choose an account to view', '选择账号并输入密码后导出备份': 'Choose accounts and enter a password to export backups', '从加密导出文件导入账号备份': 'Import account backups from an encrypted export', '使用密码导出选中会话': 'Export selected sessions with a password', '使用密码导出选中快捷短语': 'Export selected quick phrases with a password', '从加密文件导入会话': 'Import sessions from an encrypted file', '从加密文件导入快捷短语': 'Import quick phrases from an encrypted file', '仅支持 PNG / JPG / WebP': 'PNG / JPG / WebP only', '点击或拖拽上传壁纸': 'Click or drag to upload a wallpaper', '点击选择图片，或拖拽到此处': 'Click to choose an image, or drag it here', '支持 PNG / JPG / WebP，自动压缩；可添加多张': 'PNG / JPG / WebP supported; images are compressed automatically',
@@ -1472,7 +1588,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
   var accountMaskEnabled = false;
   try { accountMaskEnabled = localStorage.getItem(WBS_ACCOUNT_MASK_KEY) === '1'; } catch (_) {}
-  var state = { accounts: [], current: null, open: false, batchRunning: false, creditRunId: 0, creditRefreshGeneration: {}, activityRunId: 0, dailyProgressRunId: 0, dailyProgressForceNext: false, dailyProgressRefreshing: {}, dailyProgressRefreshErrors: {}, dailyClaimedExpanded: {}, creditRemaining: 0, creditSummaryValue: null, mask: accountMaskEnabled, rotationNotice: null, rotationPromptDay: '', sessionCopyNotice: null, sessionCopyDetailsModal: null, sessionCopyNoticePollTimer: null, sessionCopyNoticeChecked: false, sessionCopyNoticeActiveAttempts: 0 };
+  var state = { accounts: [], current: null, open: false, batchRunning: false, creditRunId: 0, creditRefreshGeneration: {}, activityRunId: 0, dailyProgressRunId: 0, dailyProgressForceNext: false, dailyProgressRefreshing: {}, dailyProgressRefreshErrors: {}, dailyClaimedExpanded: {}, creditRemaining: 0, creditSummaryValue: null, mask: accountMaskEnabled, rotationNotice: null, rotationPromptDay: '', sessionCopyNotice: null, sessionCopyDetailsModal: null, sessionCopyNoticePollTimer: null, sessionCopyNoticeChecked: false, sessionCopyNoticeActiveAttempts: 0, growthTaskActions: null, growthAuto: {}, growthTier3: {}, growthAutoPollTimer: null, growthAutoPollUid: '' };
   var currentBuild = null;
   // 当前注入的 daemon 版本号（由 daemon.js 注入时把 __WBS_VERSION__ 替换为 DAEMON_VERSION）
   // 「关于」tab 直接展示，升级 daemon 后这里自动同步
@@ -5458,6 +5574,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var account = state.accounts.filter(function (item) { return String(item.uid) === String(uid); })[0];
         popup = showStatusPopover(ring, dailyProgressPopoverHtml(account), 'daily', 'side');
         refreshDailyProgressAccount(uid);
+        ensureGrowthAutoStatus(uid);
       }
       refreshDailyProgressPopover = function (uid) {
         if (!activeRing || String(activeRing.getAttribute('data-uid')) !== String(uid)) return;
@@ -5510,12 +5627,28 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       listen(popup, 'mouseleave', function () { dailyPopoverHovered = false; deferHide(); });
       listen(popup, 'pointerdown', function (event) { event.stopPropagation(); });
       listen(popup, 'click', function (event) {
-        var button = event.target && event.target.closest ? event.target.closest('[data-wbs-growth-official],[data-wbs-claimed-toggle]') : null;
+        var button = event.target && event.target.closest ? event.target.closest('[data-wbs-growth-official],[data-wbs-claimed-toggle],[data-wbs-growth-auto],[data-wbs-growth-auto-all],[data-wbs-growth-tier-hint]') : null;
         if (!button || !popup.contains(button)) return;
         event.preventDefault();
         event.stopPropagation();
         if (!activeRing || button.disabled) return;
         var uid = activeRing.getAttribute('data-uid');
+        // ⚠️ 「一键完成」走**备份 token 直连官方接口**，不需要当前登录账号就是该账号
+        // （与 /api/growth/activate 同一隔离口径），所以这里**不能**套
+        // confirmCurrentGrowthAccount —— 套了就会出现「明明能跑却提示请先切换账号」。
+        // 「去官网」类按钮必须要求当前账号，因为官网页面用的是当前登录态。
+        if (button.hasAttribute('data-wbs-growth-auto') || button.hasAttribute('data-wbs-growth-auto-all')) {
+          var codes = button.hasAttribute('data-wbs-growth-auto')
+            ? [String(button.getAttribute('data-wbs-growth-auto') || '')].filter(Boolean)
+            : null;
+          button.disabled = true;
+          startGrowthAuto(uid, codes);
+          return;
+        }
+        if (button.hasAttribute('data-wbs-growth-tier-hint')) {
+          toast('该任务属于「纯上报」类：勾选下方开关后才会执行', false, root);
+          return;
+        }
         confirmCurrentGrowthAccount(uid).then(function (isCurrent) {
           if (!isCurrent) return;
           if (button.hasAttribute('data-wbs-claimed-toggle')) {
@@ -5531,11 +5664,30 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           else if (button.hasAttribute('data-wbs-growth-official')) openOfficialGrowthCenter();
         });
       });
+      listen(popup, 'change', function (event) {
+        var input = event.target;
+        if (!input || typeof input.hasAttribute !== 'function' || !input.hasAttribute('data-wbs-growth-tier3')) return;
+        if (!activeRing) return;
+        var uid = activeRing.getAttribute('data-uid');
+        state.growthTier3[String(uid)] = input.checked === true;
+        if (refreshDailyProgressPopover) refreshDailyProgressPopover(uid);
+      });
       listen(window, 'resize', function () { hide(true); });
       listen(accountsPane, 'scroll', function () { hide(true); }, true);
       listen(document, 'keydown', function (event) { if (event.key === 'Escape') hide(true); });
       closeDailyProgressPopover = function () { hide(true); };
-      registerDisposer(function () { hide(true); closeDailyProgressPopover = null; refreshDailyProgressPopover = null; });
+      // 动作表只取一次（静态）：拿到后重渲染一次，让「一键完成」按钮就位；
+      // 拿不到就静默降级为全部走「去官网」，不打断面板。
+      ensureGrowthTaskActions().then(function (map) {
+        if (!alive || !map || !activeRing) return;
+        if (refreshDailyProgressPopover) refreshDailyProgressPopover(activeRing.getAttribute('data-uid'));
+      });
+      registerDisposer(function () {
+        hide(true);
+        stopGrowthAutoPoll();
+        closeDailyProgressPopover = null;
+        refreshDailyProgressPopover = null;
+      });
     }
 
     function closeSecureTransferModal(mask) {
@@ -7300,12 +7452,20 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var total = Math.max(0, Number(job.total) || 0);
       var processed = Math.min(total, Math.max(0, Number(job.processed) || 0));
       var percent = total ? Math.round(processed / total * 100) : (active ? 0 : 100);
-      var title = job.status === 'queued' ? '会话同步等待中' : job.status === 'running' ? '正在同步会话' : job.status === 'done' ? '会话同步完成' : job.status === 'conflict' ? '会话同步完成，发现冲突' : job.status === 'partial' ? '会话同步完成，部分项目失败' : '会话同步失败';
+      // 方案 D/D1：分叉（两边各自分支、双方都留着等你裁决）与旧的「两边都修改过、不知谁全」
+      // 是两回事，文案必须分开 —— 否则用户看不出「要不要自己动手」这个关键差别。
+      var divergences = Math.max(0, Number(job.divergences) || 0);
+      var conflictTitle = (divergences > 0 && divergences >= (Number(job.conflicts) || 0))
+        ? '会话同步完成，有会话两边分叉'
+        : '会话同步完成，发现冲突';
+      var title = job.status === 'queued' ? '会话同步等待中' : job.status === 'running' ? '正在同步会话' : job.status === 'done' ? '会话同步完成' : job.status === 'conflict' ? conflictTitle : job.status === 'partial' ? '会话同步完成，部分项目失败' : '会话同步失败';
       var route = sessionCopyAccountLabel(job.sourceUid, job.sourceName) + ' → ' + sessionCopyAccountLabel(job.targetUid, job.targetName);
       var detail = route;
       if (active && job.currentLabel) detail += ' · ' + job.currentLabel;
       else if (job.status === 'done') detail += ' · 新同步 ' + (Number(job.copied) || 0) + '，已存在 ' + (Number(job.skipped) || 0);
-      else if (job.status === 'conflict') detail += ' · ' + (Number(job.conflicts) || 1) + ' 个会话两边都修改过，未覆盖任何一边';
+      else if (job.status === 'conflict') detail += divergences > 0
+        ? ' · ' + divergences + ' 个会话两边各自分叉，已保留双方，未覆盖任何一边'
+        : ' · ' + (Number(job.conflicts) || 1) + ' 个会话两边都修改过，未覆盖任何一边';
       else if (job.status === 'partial') detail += ' · 有 ' + ((Number(job.failed) || 0) + (Number(job.partial) || 0)) + ' 项需要留意';
       else if (job.status === 'error') detail += ' · 请稍后重试';
       box.className = 'wbs-sess-copy-progress is-' + String(job.status || 'running');
@@ -13644,6 +13804,132 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }).map(function (item) { return item.task; });
     }
 
+    // ===== 成长任务「一键完成」=====
+    // 档位语义（与 daemon 侧 growth-tasks.js 一致，改档位前先读那边的 §tier 注释）：
+    //   1 = 判据需真实痕迹；2 = 判据是事件但本地有真实功能可先执行 —— 这两档默认执行；
+    //   3 = 判据是事件、服务端不校验真实性（纯上报即得分）—— 默认关闭，用户显式勾选才纳入。
+    var GROWTH_AUTO_TIER_EVENT = 3;
+
+    function growthTaskActions() {
+      return state.growthTaskActions || null;
+    }
+
+    // 动作表只取一次（静态、零网络代价；失败时静默降级为「全部走官网」而不是报错打断面板）。
+    function ensureGrowthTaskActions() {
+      if (state.growthTaskActions) return Promise.resolve(state.growthTaskActions);
+      return api('/api/growth/task-actions').then(function (response) {
+        var map = {};
+        ((response && response.actions) || []).forEach(function (action) {
+          if (action && action.code) map[String(action.code)] = action;
+        });
+        state.growthTaskActions = map;
+        return map;
+      }).catch(function () { return null; });
+    }
+
+    function growthAutoOf(uid) {
+      return state.growthAuto[String(uid)] || null;
+    }
+
+    function growthAutoActionFor(uid, taskCode) {
+      var map = growthTaskActions();
+      var action = map && map[String(taskCode || '')];
+      if (!action) return null;
+      var includeTier3 = !!state.growthTier3[String(uid || '')];
+      if (Number(action.tier) === GROWTH_AUTO_TIER_EVENT && !includeTier3) return { action: action, gated: true };
+      return { action: action, gated: false };
+    }
+
+    function startGrowthAuto(uid, taskCodes) {
+      uid = String(uid || '');
+      if (!uid) return Promise.resolve(null);
+      state.growthAuto[uid] = { phase: 'starting', startedAt: Date.now(), progress: null, summary: null, error: '', codes: taskCodes || null };
+      if (refreshDailyProgressPopover) refreshDailyProgressPopover(uid);
+      return api('/api/growth/tasks-auto-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: uid,
+          includeTier3: !!state.growthTier3[uid],
+          taskCodes: taskCodes && taskCodes.length ? taskCodes : undefined,
+        }),
+      }).then(function () {
+        // 立刻进入轮询：本轮真实对话可能跑几分钟，靠轮询回报进度而不是干等一个响应。
+        pollGrowthAuto(uid);
+        return true;
+      }).catch(function (error) {
+        state.growthAuto[uid] = {
+          phase: 'error', finishedAt: Date.now(), results: [], summary: null,
+          error: (error && error.message) || '一键完成失败',
+        };
+        toast((error && error.message) || '一键完成失败', true, root);
+        if (refreshDailyProgressPopover) refreshDailyProgressPopover(uid);
+        return false;
+      });
+    }
+
+    function pollGrowthAuto(uid) {
+      uid = String(uid || '');
+      if (!uid) return;
+      if (state.growthAutoPollUid === uid && state.growthAutoPollTimer) return; // 已在轮询同一账号
+      stopGrowthAutoPoll();
+      state.growthAutoPollUid = uid;
+      var tick = function () {
+        if (!alive) { stopGrowthAutoPoll(); return; }
+        api('/api/growth/tasks-auto-status?uid=' + encodeURIComponent(uid)).then(function (response) {
+          if (!alive) { stopGrowthAutoPoll(); return; }
+          var job = response && response.job ? response.job : { phase: 'idle' };
+          var previous = state.growthAuto[uid];
+          var wasRunning = previous && (previous.phase === 'starting' || String(previous.phase).indexOf('running') === 0);
+          state.growthAuto[uid] = job;
+          if (refreshDailyProgressPopover) refreshDailyProgressPopover(uid);
+          var phase = String(job.phase || '');
+          var finished = phase === 'done' || phase === 'error' || phase === 'timeout' || phase === 'idle';
+          if (!finished) {
+            state.growthAutoPollTimer = setBuildTimeout(tick, 2000);
+            return;
+          }
+          stopGrowthAutoPoll();
+          if (wasRunning && phase === 'done') {
+            var summary = job.summary || {};
+            toast('一键完成已结束：成功 ' + (Number(summary.done) || 0) + ' 项，领取 ' + (Number(summary.claimed) || 0) + ' 项（+' +
+              (Number(summary.credit) || 0) + ' 积分 +' + (Number(summary.energy) || 0) + ' 能量）', false, root);
+          }
+          else if (wasRunning && (phase === 'error' || phase === 'timeout')) {
+            toast(job.error || '一键完成失败', true, root);
+          }
+          // 结束后强制刷新真实进度（服务端计分是异步的，立刻读可能还是旧值）。
+          refreshDailyProgressAccount(uid);
+        }).catch(function () {
+          if (!alive) { stopGrowthAutoPoll(); return; }
+          state.growthAutoPollTimer = setBuildTimeout(tick, 3000);
+        });
+      };
+      tick();
+    }
+
+    function stopGrowthAutoPoll() {
+      if (state.growthAutoPollTimer) clearTimeout(state.growthAutoPollTimer);
+      state.growthAutoPollTimer = null;
+      state.growthAutoPollUid = '';
+    }
+
+    // 面板重开后恢复进度显示（inject 上下文可能已重建，内存里的 job 会丢；
+    // daemon 侧保留作业态，所以问一次就能接上）。
+    function ensureGrowthAutoStatus(uid) {
+      uid = String(uid || '');
+      if (!uid || state.growthAuto[uid]) return;
+      api('/api/growth/tasks-auto-status?uid=' + encodeURIComponent(uid)).then(function (response) {
+        if (!alive) return;
+        var job = response && response.job ? response.job : null;
+        if (!job || job.phase === 'idle') return;
+        state.growthAuto[uid] = job;
+        var phase = String(job.phase || '');
+        if (phase === 'starting' || phase.indexOf('running') === 0) pollGrowthAuto(uid);
+        if (refreshDailyProgressPopover) refreshDailyProgressPopover(uid);
+      }).catch(function () { /* 状态读取失败不打断面板 */ });
+    }
+
     function growthTaskRewardHtml(task) {
       var reward = task && task.reward || {};
       var parts = [];
@@ -13688,27 +13974,71 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           : task.state === 'not_accepted' ? '未接取'
           : '进行中';
       };
+      var autoJob = growthAutoOf(uid);
+      var autoPhase = autoJob ? String(autoJob.phase || '') : '';
+      var autoRunning = autoPhase === 'starting' || autoPhase.indexOf('running') === 0;
+      var autoItemResult = function (taskCode) {
+        var list = autoJob && Array.isArray(autoJob.results) ? autoJob.results : [];
+        for (var i = list.length - 1; i >= 0; i--) {
+          if (list[i] && String(list[i].taskCode || '') === taskCode) return list[i];
+        }
+        return null;
+      };
       var renderGrowthTask = function (task) {
         var current = Math.max(0, Number(task.current) || 0);
         var target = Math.max(1, Number(task.target) || 1);
         var stateName = growthTaskState(task);
         var taskCode = String(task.taskCode || '');
-        var stateControl = task.state === 'not_accepted' && taskCode
-          ? '<button type="button" class="wbs-growth-task-action" data-wbs-growth-official>去完成</button>'
-          : '<b>' + esc(stateName) + '</b>';
+        var autoInfo = taskCode ? growthAutoActionFor(uid, taskCode) : null;
+        var rowResult = taskCode ? autoItemResult(taskCode) : null;
+        var stateControl;
+        if (task.state === 'claimed') stateControl = '<b>' + esc(stateName) + '</b>';
+        else if (autoInfo && !autoInfo.gated) {
+          stateControl = '<button type="button" class="wbs-growth-task-action is-auto" data-wbs-growth-auto="' + escAttr(taskCode) + '"' +
+            (autoRunning ? ' disabled' : '') + '>' + (autoRunning ? '完成中…' : '一键完成') + '</button>';
+        }
+        else if (autoInfo && autoInfo.gated) {
+          // 档 3：服务端不校验真实性的纯上报任务。默认关，点按钮只提示开开关，不直接跑。
+          stateControl = '<button type="button" class="wbs-growth-task-action is-gated" data-wbs-growth-tier-hint="' + escAttr(taskCode) + '">一键完成</button>';
+        }
+        else {
+          // 线上有、动作表没有：只能人工在官方客户端完成（如需真实捐款的那一项）。
+          // 保持原有版式：未接取时给「去完成」（打开官方成长中心），其余显示状态。
+          stateControl = task.state === 'not_accepted' && taskCode
+            ? '<button type="button" class="wbs-growth-task-action" data-wbs-growth-official>去完成</button>'
+            : '<b>' + esc(stateName) + '</b>';
+        }
         var taskTag = task.tag ? '<span class="wbs-growth-task-tag">' + esc(task.tag) + '</span>' : '';
         var guide = task.guide ? '<div class="wbs-growth-task-guide">' + esc(task.guide) + '</div>' : '';
+        var resultLine = rowResult && rowResult.message
+          ? '<div class="wbs-growth-task-result is-' + escAttr(rowResult.status || '') + '">' + esc(String(rowResult.message).slice(0, 160)) + '</div>'
+          : '';
         return '<div class="wbs-growth-task-row is-' + escAttr(task.state || 'in_progress') + '">' +
           '<div class="wbs-growth-task-title"><i aria-hidden="true"></i><span>' + esc(task.title || '未识别任务') + '</span>' +
           taskTag + '<div class="wbs-growth-task-state">' + stateControl + '</div></div>' + guide +
           '<div class="wbs-growth-task-meta"><span class="wbs-growth-task-progress"><label>进度</label>' + current + ' / ' + target + '</span>' +
           '<span><label>截止</label>' + esc(formatGrowthTaskDeadline(task.deadline)) + '</span>' +
-          '<span class="wbs-growth-task-reward"><label>奖励</label>' + growthTaskRewardHtml(task) + '</span></div></div>';
+          '<span class="wbs-growth-task-reward"><label>奖励</label>' + growthTaskRewardHtml(task) + '</span></div>' + resultLine + '</div>';
       };
       var claimedToggle = claimedTasks.length ? '<button type="button" class="wbs-growth-claimed-toggle" data-wbs-claimed-toggle aria-expanded="' + claimedExpanded + '"><span>' +
         (claimedExpanded ? '收起已领取' : '展开已领取') + '</span><em> · ' + claimedTasks.length + '</em></button>' : '';
+      var autoEligible = visibleTasks.filter(function (task) {
+        var info = task && task.taskCode ? growthAutoActionFor(uid, String(task.taskCode)) : null;
+        return !!info && !info.gated;
+      }).length;
+      var autoStatusText = autoRunning
+        ? '<em class="wbs-growth-auto-status">' + esc(String(autoPhase).replace(/^running\s*/, '正在执行 ')) + '</em>'
+        : (autoEligible ? '<em class="wbs-growth-auto-status">可自动项数 · ' + autoEligible + '</em>' : '');
+      var autoBar = '<div class="wbs-growth-auto-bar">' +
+        '<button type="button" class="wbs-growth-task-action wbs-growth-auto-all" data-wbs-growth-auto-all' +
+        (autoRunning || !autoEligible ? ' disabled' : '') + '>' + (autoRunning ? '一键完成中' : '一键完成全部') + '</button>' +
+        autoStatusText + '</div>';
+      var tier3Row = '<label class="wbs-growth-tier3"><input type="checkbox" data-wbs-growth-tier3' +
+        (state.growthTier3[uid] ? ' checked' : '') + '><span>包含纯上报任务（服务端不校验真实性）</span></label>' +
+        (state.growthTier3[uid] ? '<div class="wbs-growth-tier3-note">纯上报任务会直接向官方声明「已完成」，属于风险自担范围，默认关闭</div>' : '');
       var taskListHtml = '<div class="wbs-growth-task-section">' +
         '<div class="wbs-growth-task-head"><span><i class="growth" aria-hidden="true"></i>成长任务</span><em>' + (Number(growth.completed) || 0) + ' / ' + (Number(growth.total) || growthTasks.length) + '</em></div>' +
+        autoBar + tier3Row +
         '<div class="wbs-growth-task-list">' + visibleTasks.map(renderGrowthTask).join('') + claimedToggle +
         (claimedExpanded ? claimedTasks.map(renderGrowthTask).join('') : '') + '</div></div>';
       var gachaButton = Number(gacha.count) > 0
@@ -15622,6 +15952,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-buddy-picker{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;padding:7px 9px 2px;font-size:10.5px;color:var(--wb-color-text-secondary,#5f6368)}',
     '.wbs-daily-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;margin-top:4px}.wbs-daily-action{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:7px;min-height:29px;padding:3px 5px 3px 8px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:7px;background:color-mix(in srgb,var(--wb-bg-secondary,#f6f7f8) 72%,transparent)}.wbs-daily-action span{min-width:0;color:var(--wb-color-text-secondary,#5f6368);white-space:nowrap}.wbs-daily-action b{color:var(--wb-color-text-primary,#1f1f1f);font-size:11px;font-weight:650;white-space:nowrap}.wbs-daily-action-button{min-width:46px}',
     '.wbs-growth-rewards{margin-top:8px;padding:8px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:8px;background:color-mix(in srgb,var(--wb-bg-secondary,#f6f7f8) 46%,transparent)}.wbs-growth-rewards-head,.wbs-growth-tier{display:grid;align-items:center;column-gap:8px}.wbs-growth-rewards-head{grid-template-columns:minmax(0,1fr) auto;padding-bottom:6px;border-bottom:1px solid var(--wb-border-subtle,rgba(20,24,32,.1))}.wbs-growth-rewards-head span{font-weight:650;white-space:nowrap}.wbs-growth-rewards-head em{font-size:10px;font-style:normal;color:var(--wb-icon-tertiary,#7c818b);white-space:nowrap}.wbs-growth-tier{grid-template-columns:52px 38px minmax(0,1fr);min-height:24px;color:var(--wb-color-text-secondary,#5f6368);font-size:10.5px}.wbs-growth-tier span,.wbs-growth-tier em,.wbs-growth-tier b{white-space:nowrap}.wbs-growth-tier em{font-style:normal;color:var(--wb-icon-tertiary,#7c818b)}.wbs-growth-tier b{text-align:right;color:var(--wb-color-text-secondary,#5f6368);font-weight:650}.wbs-growth-tier.is-claimed b{color:var(--wb-icon-tertiary,#7c818b)}',
+    // 「一键完成」工具条 / 档位开关 / 单项结果
+    '.wbs-growth-auto-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:1px 0 6px}.wbs-growth-auto-all{min-width:96px}.wbs-growth-auto-status{font-size:10px;font-style:normal;color:var(--wb-icon-tertiary,#7c818b);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.wbs-growth-task-action.is-auto{border-color:color-mix(in srgb,var(--wbs-ring-growth) 42%,transparent);color:var(--wbs-ring-growth);font-weight:650}.wbs-growth-task-action.is-gated{color:var(--wb-icon-tertiary,#7c818b)}.wbs-growth-tier3{display:flex;align-items:flex-start;gap:6px;margin:0 0 6px;color:var(--wb-color-text-secondary,#5f6368);font-size:10px;line-height:1.5;cursor:pointer}.wbs-growth-tier3 input{margin:1px 0 0;flex:none;accent-color:var(--wbs-ring-growth)}.wbs-growth-tier3 span{min-width:0;overflow-wrap:anywhere}.wbs-growth-tier3-note{margin:0 0 6px 19px;color:var(--wb-color-text-secondary,#5f6368);font-size:9.5px;line-height:1.5;opacity:.85}.wbs-growth-task-result{margin:4px 0 0 13px;font-size:10px;line-height:1.5;color:var(--wb-color-text-secondary,#5f6368);overflow-wrap:anywhere}.wbs-growth-task-result.is-error{color:var(--wb-color-text-error,#d94838)}.wbs-growth-task-result.is-skipped{opacity:.8}',
     '.wbs-status-popover button:not([disabled]){cursor:pointer}',
     '.wbs-credit-tip-value{display:flex;align-items:center;gap:8px;padding:8px 9px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:8px;background:color-mix(in srgb,var(--wb-bg-secondary,#f6f7f8) 72%,transparent);color:var(--wb-color-text-primary,#1f1f1f)}.wbs-credit-tip-value i.credit{color:var(--wbs-tip-credit)}.wbs-credit-tip-value b{font-size:12px;font-variant-numeric:tabular-nums}.wbs-credit-tip-value+.wbs-daily-manual{margin-top:11px}',
     '.wbs-daily-popover-empty,.wbs-daily-refresh-error{margin-top:8px;padding-top:8px;border-top:1px solid var(--wb-border-subtle,rgba(20,24,32,.12));color:var(--wb-icon-secondary,#667085);font-size:10.5px;line-height:1.55;overflow-wrap:anywhere}.wbs-daily-refresh-error{color:var(--wb-color-text-secondary,#5f6368)}',

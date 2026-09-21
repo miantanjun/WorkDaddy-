@@ -56,7 +56,7 @@ chmod 644 "$APP/Contents/Resources/AppIcon.icns"
 echo "==> 应用图标已同步（背景 #e1e1e1）"
 
 # 2) 只覆盖前端代码（保留壳的其余一切：launcher/Info.plist/builtin/node_modules/theme-audit.js）
-for f in daemon.js toast-runtime.js toast-options.js primary-account.js completion-report.js automation-runtime.js automation-model.js automation-packages.js automation-compatibility.js automation-transfer.js automation-discovery.js automation-zip.js automation.js automation-picker.js token-refresh.js session-db.js session-fork.js third-party-models.js secure-transfer.js session-transfer.js windows-process-boundary.js windows-installer-launch.js workbuddy-compat.js inject.js theme-patches.js theme-text-shadow.js theme-vars.js credit-segments.js credit-resource-queries.js credit-request-usage.js credit-history-sync.js credit-usage-store.js credit-rotation.js token-stats.js growth-active.js growth-daily.js atomic-file-write.js ui-port.js checkin-result.js lib.js platform.js profiles.js workbuddy-target.js cdp-targets.js sentry-report.js usage-report.js install.sh relaunch-with-cdp.sh uninstall.sh apply-update.sh; do
+for f in daemon.js toast-runtime.js toast-options.js primary-account.js completion-report.js automation-runtime.js automation-model.js automation-packages.js automation-compatibility.js automation-transfer.js automation-discovery.js automation-zip.js automation.js automation-picker.js token-refresh.js session-db.js session-fork.js session-sync.js auto-copy-judge.js auto-copy-leader.js third-party-models.js secure-transfer.js session-transfer.js windows-process-boundary.js windows-installer-launch.js workbuddy-compat.js inject.js theme-patches.js theme-text-shadow.js theme-vars.js credit-segments.js credit-resource-queries.js credit-request-usage.js credit-history-sync.js credit-usage-store.js credit-rotation.js token-stats.js growth-active.js growth-daily.js growth-tasks.js atomic-file-write.js ui-port.js checkin-result.js lib.js platform.js profiles.js workbuddy-target.js cdp-targets.js sentry-report.js usage-report.js limit-failover.js account-switch-log.js schedule-ledger.js idle-switchback.js space-scan.js scheduled-send.js copy-manifest.js cloud-cleanup.js install.sh relaunch-with-cdp.sh uninstall.sh apply-update.sh; do
   [ -f "scripts/$f" ] && cp "scripts/$f" "$APP/Contents/Resources/scripts/$f"
 done
 # Injection reads the wordmark at runtime; keep brand assets in both profiles.
@@ -97,18 +97,32 @@ chmod 644 "$APP/Contents/Resources/scripts/session-db.js" \
   "$APP/Contents/Resources/scripts/secure-transfer.js" \
   "$APP/Contents/Resources/scripts/session-transfer.js" \
   "$APP/Contents/Resources/scripts/session-fork.js" \
+  "$APP/Contents/Resources/scripts/session-sync.js" \
+  "$APP/Contents/Resources/scripts/auto-copy-judge.js" \
+  "$APP/Contents/Resources/scripts/auto-copy-leader.js" \
   "$APP/Contents/Resources/scripts/windows-process-boundary.js" \
   "$APP/Contents/Resources/scripts/credit-request-usage.js" \
   "$APP/Contents/Resources/scripts/credit-history-sync.js" \
   "$APP/Contents/Resources/scripts/credit-usage-store.js" \
   "$APP/Contents/Resources/scripts/credit-rotation.js" \
   "$APP/Contents/Resources/scripts/token-stats.js" \
+  "$APP/Contents/Resources/scripts/growth-active.js" \
+  "$APP/Contents/Resources/scripts/growth-daily.js" \
+  "$APP/Contents/Resources/scripts/growth-tasks.js" \
   "$APP/Contents/Resources/scripts/atomic-file-write.js" \
   "$APP/Contents/Resources/scripts/ui-port.js" \
   "$APP/Contents/Resources/scripts/checkin-result.js" \
   "$APP/Contents/Resources/scripts/automation-discovery.js" \
   "$APP/Contents/Resources/scripts/workbuddy-compat.js" \
   "$APP/Contents/Resources/scripts/inject.js" \
+  "$APP/Contents/Resources/scripts/limit-failover.js" \
+  "$APP/Contents/Resources/scripts/account-switch-log.js" \
+  "$APP/Contents/Resources/scripts/schedule-ledger.js" \
+  "$APP/Contents/Resources/scripts/idle-switchback.js" \
+  "$APP/Contents/Resources/scripts/space-scan.js" \
+  "$APP/Contents/Resources/scripts/scheduled-send.js" \
+  "$APP/Contents/Resources/scripts/copy-manifest.js" \
+  "$APP/Contents/Resources/scripts/cloud-cleanup.js" \
   "$APP/Contents/Resources/scripts/theme-patches.js"
 echo "==> 前端代码已覆盖（权限按壳原样）"
 

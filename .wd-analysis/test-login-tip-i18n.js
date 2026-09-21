@@ -65,6 +65,21 @@ check('方式一描述', '以「不让当前账号登录身份过期」的方式
 check('方式二描述', '不退出 WorkBuddy，在浏览器完成授权后新账号自动加入列表',
   'Keeps WorkBuddy running; after authorizing in the browser, the new account is added to the list automatically.');
 
+console.log('== 方案 D/D1：会话同步「分叉」与「两边都改过」的文案必须分开 ==');
+check('分叉标题', '会话同步完成，有会话分叉', 'Session sync complete with branched sessions');
+check('分叉明细片段', ' 个会话两边各自分叉，已保留双方，未覆盖任何一边',
+  ' session(s) branched on both sides; both copies were kept and neither was overwritten');
+// 实测形态：面板是把 route + ' · N ' + 片段 拼起来再交给翻译器的，所以必须按**拼接后**的样子验
+const divergentDetail = 'A → B · 3 个会话两边各自分叉，已保留双方，未覆盖任何一边';
+const divergentOut = translate(divergentDetail, 'en');
+if (!CJK.test(divergentOut)) { pass++; console.log('  ✔ 分叉明细拼起来零 CJK 残留\n    ' + divergentOut); }
+else { fail++; console.log('  ✘ 分叉明细仍有中文: ' + JSON.stringify(divergentOut)); }
+// 旧文案不能被新词典项撕坏（最长匹配，长短两条必须同时成立）
+const legacyDetail = 'A → B · 2 个会话两边都修改过，未覆盖任何一边';
+const legacyOut = translate(legacyDetail, 'en');
+if (!CJK.test(legacyOut)) { pass++; console.log('  ✔ 旧「两边都修改过」文案未被新词典项撕坏\n    ' + legacyOut); }
+else { fail++; console.log('  ✘ 旧文案被撕坏: ' + JSON.stringify(legacyOut)); }
+
 console.log('== 交叉验证：短词典项不会撕坏新句子 ==');
 // 这几句里刻意混入了 '重启'/'下载' 之类短词典项的同形字，验证「最长优先」确实生效
 const trap = '不用退出或重开应用，授权成功后新账号自动加入列表并切换';
