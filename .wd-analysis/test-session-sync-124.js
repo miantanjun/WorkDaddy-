@@ -1,6 +1,6 @@
 'use strict';
 /*
- * test-session-sync-124.js —— 上游 1.2.4 会话同步模块（content-snapshot 判据）的落地守卫。
+ * test-session-sync-124.js —— 上游会话同步模块（content-snapshot 判据）的落地守卫。
  *
  * 背景（见 WorkDaddy-上游1.2.4影响面实测报告.md）：
  *   上游 1.2.4 把「会话同步判据」从**文件时间**换成**内容快照哈希** ——
@@ -8,13 +8,22 @@
  *   equal / left-extends / right-extends / conflict / repair 五态，selectTargetSnapshot
  *   按内容选目标（**永不按 mtime 选赢家**），applySnapshot 负责落盘 + 备份 + 可回滚。
  *
- * 本套件守五件事：
+ * 2026-09-21（上游 1.2.5 吸纳批，见 WorkDaddy-OpenViking吸纳评估与功能进度总览.md §2.1）：
+ *   基线 fixture 从 1.2.4 升到 **1.2.5**。本套件同步升级：
+ *     · [A] 的 provenance 锁锚到 fixtures/session-sync.upstream-1.2.5.js；导出面 4 → **5**（新增 readSessionSizes）
+ *     · [C] 从「上限适配」反转为「**上限已取消**」：上游 1.2.5 删掉 MAX_BYTES/MAX_FILES 与闸门，
+ *       本地 delta-1 随之退休 ⇒ 改为守「无上限 + attachBytes 惰性读 + 原有防线仍在」
+ *     · 新增 [F] readSessionSizes 的功能性守卫（A4 吸纳）
+ *   文件名叫 …-124 是历史遗留（这轮延续改名成本 > 收益，改名会牵动 SUITES 与多处文档引用）。
+ *
+ * 本套件守六件事：
  *   [A] 契约 + 「上游原文 fixture + delta 表 == 工作副本」的逐字节 provenance 锁（保证可长期与上游 diff）
  *   [B] 判据是「内容」不是「时间」
- *   [C] 上限适配（下界 ≥ 真机最大会话，上界防「等效删除」式突变）
+ *   [C] 上限已取消（A1）+ 惰性读（A2）+ 原有防线仍在
  *   [D] 五态判定 + 安全选主（equal 优先；多分支互相冲突时返回 null 而不是猜）
  *   [E] applySnapshot 真写：字节一致、journal=committed、ownerConversationId 改写、
  *       missingOnly 语义、多余文件清理、guard 抛错时零写入
+ *   [F] readSessionSizes：轻量按会话计字节（A4），非法 id 不拖垮整批
  *
  * 全部在 os.tmpdir() 沙箱里跑，不碰真机数据。
  * 跑法：node .wd-analysis/test-session-sync-124.js
@@ -57,8 +66,8 @@ ok(typeof sync.readSnapshot === 'function', 'A2 readSnapshot 是函数');
 ok(typeof sync.compareSnapshots === 'function', 'A3 compareSnapshots 是函数');
 ok(typeof sync.selectTargetSnapshot === 'function', 'A4 selectTargetSnapshot 是函数');
 ok(typeof sync.applySnapshot === 'function', 'A5 applySnapshot 是函数');
-ok(Object.keys(sync).sort().join(',') === 'applySnapshot,compareSnapshots,readSnapshot,selectTargetSnapshot',
-  'A6 导出面与上游一致（恰好 4 个）', Object.keys(sync).sort());
+ok(Object.keys(sync).sort().join(',') === 'applySnapshot,compareSnapshots,readSessionSizes,readSnapshot,selectTargetSnapshot',
+  'A6 导出面与上游 1.2.5 一致（恰好 5 个，新增 readSessionSizes）', Object.keys(sync).sort());
 
 ok(SOURCE.indexOf('\r') === -1, 'A7 纯 LF（与上游逐字节可 diff）');
 ok(!SOURCE.startsWith('\uFEFF'), 'A8 无 BOM');
@@ -68,12 +77,12 @@ ok(!SOURCE.startsWith('\uFEFF'), 'A8 无 BOM');
 // 任何人绕过 delta 表直接改工作副本，这条立刻翻红。
 // （2026-09-20 从「正则还原两个常量」升级而来：那时差异只有常量，现在有多处，
 //   硬编码还原式已经不可维护，改由 fixtures/session-sync.deltas.js 作唯一真相。）
-const FIXTURE = path.join(ROOT, '.wd-analysis', 'fixtures', 'session-sync.upstream-1.2.4.js');
+const FIXTURE = path.join(ROOT, '.wd-analysis', 'fixtures', 'session-sync.upstream-1.2.5.js');
 const deltas = require('./fixtures/session-sync.deltas.js');
 ok(fs.existsSync(FIXTURE), 'A9 上游原文 fixture 存在（可随时 diff 上游）');
 const fixtureText = fs.readFileSync(FIXTURE, 'utf8');
 ok(crypto.createHash('sha256').update(fixtureText, 'utf8').digest('hex') === deltas.UPSTREAM_SHA256,
-  'A10 fixture 指纹 == 登记的 1.2.4 指纹（防 fixture 本身被改）', deltas.UPSTREAM_SHA256.slice(0, 12));
+  'A10 fixture 指纹 == 登记的 1.2.5 指纹（防 fixture 本身被改）', deltas.UPSTREAM_SHA256.slice(0, 12));
 ok(fixtureText.indexOf('\r') === -1, 'A11 fixture 纯 LF');
 const drifted = deltas.DELTAS.filter((d) => fixtureText.split(d.from).length - 1 !== 1).map((d) => d.id);
 ok(drifted.length === 0, 'A12 每条 delta 在上游原文里恰好命中 1 次（防原地漂移）', drifted);
@@ -86,7 +95,7 @@ section('[B] 判据是「内容」不是「时间」');
 /* ==================================================================== */
 
 const CMP = slice('function compareSnapshots(left, right) {', '\n// Legacy copies can leave');
-const READ = slice('function readSnapshot(root, id, aliases = []) {', '\nfunction compareSnapshots');
+const READ = slice('function readSnapshot(root, id, aliases = [], options = {}, cache = null) {', '\nfunction compareSnapshots');
 ok(CMP.length > 0, 'B1 取到 compareSnapshots 函数体');
 ok(!/mtime/i.test(CMP), 'B2 compareSnapshots 不出现 mtime（不用文件时间判谁赢）');
 ok(!/Date\.now|Date\.parse|new Date\(\)/.test(CMP), 'B3 compareSnapshots 不读墙钟');
@@ -95,23 +104,25 @@ ok(/createHash\('sha256'\)/.test(SOURCE), 'B5 用 sha256 做内容指纹');
 ok(/function canonical\(/.test(SOURCE), 'B6 有会话 id 归一化（否则复制本身会改变内容哈希）');
 
 /* ==================================================================== */
-section('[C] 上限适配 + 防线仍在');
+section('[C] 上限已取消（A1）+ 惰性读（A2）+ 防线仍在');
 /* ==================================================================== */
 
-const BYTES = eval(/const MAX_BYTES = ([0-9 *]+);/.exec(SOURCE)[1]);
-const FILES = Number(/const MAX_FILES = (\d+);/.exec(SOURCE)[1]);
-const GIB = 1024 * 1024 * 1024;
-ok(BYTES === GIB, 'C1 MAX_BYTES == 1 GiB（本地适配值）', BYTES);
-ok(BYTES >= 512 * 1024 * 1024, 'C2 下界：装得下真机最大会话 435.6 MiB', BYTES);
-ok(BYTES <= 4 * GIB, 'C3 上界：不许出现「等效删除」（如 100000 GiB）', BYTES);
-ok(FILES >= 100000 && FILES <= 1000000, 'C4 MAX_FILES 在 10 万–100 万（真机现最大 7294）', FILES);
-ok(/if \(total > MAX_BYTES \|\| files\.size >= MAX_FILES\) throw Error\('会话文件过大，未自动同步'\)/.test(SOURCE),
-  'C5 超限守卫（形态 + 文案）仍在');
-ok(/无效的会话标识/.test(SOURCE), 'C6 会话 id 校验仍在（路径注入防线）');
-ok(/无效的会话文件路径/.test(SOURCE), 'C7 相对路径校验仍在');
-ok(/isSymbolicLink\(\)/.test(SOURCE), 'C8 符号链接拒绝仍在');
-ok(/正在变化，请稍后重试/.test(SOURCE), 'C9 读写竞态检测仍在');
-ok(/会话消息文件不唯一，未同步/.test(SOURCE), 'C10 多项目目录歧义时拒绝同步');
+ok(!/const MAX_BYTES/.test(SOURCE), 'C1 已无 MAX_BYTES 上限常量（上游 1.2.5 取消 ⇒ 本地 delta-1 退休）');
+ok(!/const MAX_FILES/.test(SOURCE), 'C2 已无 MAX_FILES 上限常量');
+ok(!/会话文件过大，未自动同步/.test(SOURCE), 'C3 旧「过大未同步」闸门与文案彻底消失（上限没了，这句话就不该存在）');
+ok(/function attachBytes\(entry\) \{/.test(SOURCE) && /Object\.defineProperty\(entry, 'bytes'/.test(SOURCE),
+  'C4 attachBytes 惰性字节加载在（bytes 是 getter，不再常驻内存）—— 这是「无上限」的安全前提');
+ok(/now\.size !== entry\.size \|\| now\.mtimeMs !== entry\.mtimeMs \|\| now\.ctimeMs !== entry\.ctimeMs/.test(SOURCE),
+  'C5 惰性读之前校验 size/mtimeMs/ctimeMs 三元组（防读到半写状态）');
+ok(/const trustedComponents = new Map\(\)/.test(SOURCE) && /function safePathFast\(relative\) \{/.test(SOURCE),
+  'C6 safePathFast 在：快照内目录组件只验一次（A6，减重复 lstat）');
+ok(/if \(stat\.isSymbolicLink\(\)\) throw Error\('会话文件包含符号链接，未同步'\)/.test(SOURCE),
+  'C7 但**每个文件仍单独查 symlink**（快路径不许放松安全边界）');
+ok(/无效的会话标识/.test(SOURCE), 'C8 会话 id 校验仍在（路径注入防线）');
+ok(/无效的会话文件路径/.test(SOURCE), 'C9 相对路径校验仍在');
+ok(/isSymbolicLink\(\)/.test(SOURCE), 'C10 符号链接拒绝仍在');
+ok(/正在变化，请稍后重试/.test(SOURCE), 'C11 读写竞态检测仍在');
+ok(/会话消息文件不唯一，未同步/.test(SOURCE), 'C12 多项目目录歧义时拒绝同步');
 
 /* ==================================================================== */
 section('[D] 沙箱：五态判定');
@@ -273,6 +284,16 @@ section('[E] 沙箱：选主 + applySnapshot 真写');
   try { await sync.applySnapshot(src, src, { backupRoot, commit: async () => {} }); }
   catch (e) { selfErr = e.message; }
   ok(selfErr === '无效的会话同步目标', 'E22 源与目标相同 → 拒绝', selfErr);
+
+  /* ==================================================================== */
+  section('[F] readSessionSizes：轻量按会话计字节（A4）');
+  /* ==================================================================== */
+
+  const sizes = await sync.readSessionSizes(SANDBOX, ['SRC', 'NOPE', '../evil']);
+  ok(sizes instanceof Map && Number(sizes.get('SRC')) > 0,
+    'F1 正常会话返回累计字节数（只 lstat 累加 size，不解析消息、不读 payload）', sizes instanceof Map && sizes.get('SRC'));
+  ok(sizes.get('NOPE') === 0, 'F2 合法但不存在的 id → 0（不是 null、也不抛）', sizes.get('NOPE'));
+  ok(sizes.get('../evil') === null, 'F3 非法 id → null：单个失败不拖垮整批', sizes.get('../evil'));
 
   fs.rmSync(SANDBOX, { recursive: true, force: true });
 

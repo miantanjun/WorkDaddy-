@@ -226,12 +226,18 @@ let verifyCalls = 0;
   const daemonSrc = fs.readFileSync(path.join(ROOT, 'scripts', 'daemon.js'), 'utf8').replace(/\r\n/g, '\n');
   const has = (needle) => daemonSrc.includes(needle);
 
-  // ⚠️ 锚点必须**唯一到写盘分支**：全文件 `if (judgeMode === 'content') {` 另有一处在
-  //    判主出口（6500 附近），只匹配那一行的话「把这个分支短路掉」也测不出来。
-  ok(has("  let failedFiles = 0;\n  if (judgeMode === 'content') {"),
-    'E1 daemon 里 content 模式有独立写盘分支（锚点唯一到写盘分支）');
-  ok(has('const contentSource = autoCopyJudge.readWritableSnapshot(PROFILE.dataRoot, latest.id, ownerIds);'),
-    'E2 源快照用 readWritableSnapshot（不是判定用的 slim），且**读一次复用**');
+  // ⚠️ 锚点必须**唯一到写盘分支**：全文件 `if (judgeMode === 'content') {` 另有两处
+  //    （6720 判主出口 / 6896 缓存清理），只匹配那一行的话「把这个分支短路掉」也测不出来。
+  //    锚法：以 `let failedFiles = 0;`（全文件唯一）为基准，取它**之后**第一个 content 分支
+  //    —— 6720 那处天然被排除；两者之间夹几行无关初始化（例如 A7 新增的 `let copiedBytes = 0;`）
+  //    也不会误伤。旧写法把两行字面拼在一起，中间插一行就红（本轮实证）。
+  const failedFilesInitAt = daemonSrc.indexOf('  let failedFiles = 0;');
+  const writeBranchAt = failedFilesInitAt < 0 ? -1
+    : daemonSrc.indexOf("  if (judgeMode === 'content') {", failedFilesInitAt + 1);
+  ok(failedFilesInitAt > 0 && writeBranchAt > failedFilesInitAt,
+    'E1 daemon 里 content 模式有独立写盘分支（锚定 failedFiles 之后那处，唯一到写盘分支）');
+  ok(has('const contentSource = autoCopyJudge.readWritableSnapshot(PROFILE.dataRoot, latest.id, ownerIds, getSessionSyncCache());'),
+    'E2 源快照用 readWritableSnapshot（不是判定用的 slim），且**读一次复用**（第 4 参透传 A3 文件级指纹缓存）');
   ok(has("autoCopyJudge.assertWritable(contentSource, 'content-source');")
     && has("autoCopyJudge.assertWritable(contentTarget, 'content-target/' + target.id);"),
     'E3 源与目标在写盘前都过了 assertWritable 硬护栏');
@@ -267,8 +273,8 @@ let verifyCalls = 0;
   ok(tail.includes("'UPDATE sessions SET title = ?, custom_title = ?, updated_at = ?, last_activity_at = ? WHERE id = ? AND user_id = ? AND deleted_at IS NULL;'"),
     'F4 else 分支的 UPDATE 逐字未变（含「不写 status」的注释语境）');
   ok(tail.includes('  if (target.id === latest.id) continue;'), 'F5 else 分支的「跳过源自身」判断仍在');
-  ok(daemonSrc.indexOf("  let failedFiles = 0;\n  if (judgeMode === 'content') {") > 0,
-    'F6 failedFiles 在分支外初始化为 0（两条路各写各的值，不会重复声明）');
+  ok(failedFilesInitAt > 0 && daemonSrc.split('let failedFiles = 0;').length - 1 === 1,
+    'F6 failedFiles 在分支外初始化为 0 且全文件只声明一次（两条路各写各的值，不会重复声明）');
   ok(daemonSrc.split('const repairedSource = await copySessionFiles(').length - 1 === 2,
     'F7 自复制的字面出现**恰好 2 次**（content + mtime 各一次，没有泄露到第三处）');
   ok(daemonSrc.split('copySessionFiles(PROFILE.dataRoot, latest.id, latest.id, ownerIds, options)').length - 1 === 2,

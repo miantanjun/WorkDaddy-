@@ -469,13 +469,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.4.2：成长任务「一键完成」——tier 1/2 默认执行（真实对话/真实专家 id/服务端 requestId），
 //        tier 3（服务端不校验真实性的纯上报）默认关闭、需显式开关；新增 /api/growth/task-actions、
 //        /api/growth/tasks-auto-all、/api/growth/tasks-auto-status 三条接口，面板按档位渲染按钮。
-const DAEMON_VERSION = '1.4.2';
+const DAEMON_VERSION = '1.4.3';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.3';
 // 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.3）。
 // 本机 fork 用自己的修改版版本号（1.4.x = 上游 1.2.3 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.4.2-20260920-growth-task-autorun';
+const DAEMON_BUILD_ID = 'release-1.4.3-20260921-upstream-125-absorb';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -527,7 +527,7 @@ const creditHistorySync = createCreditHistorySync({
 });
 const CREDIT_USAGE_REFRESH_MS = 15000;
 const creditUsageSyncInFlight = new Map();
-const { selectRotationCandidate } = require('./credit-rotation.js');
+const { selectRotationCandidate, nearestExpiringSegment } = require('./credit-rotation.js');
 const limitFailover = require('./limit-failover.js');
 const accountSwitchLog = require('./account-switch-log.js');
 const idleSwitchback = require('./idle-switchback.js');
@@ -3689,7 +3689,7 @@ async function automationHttpRequest(request, account) {
     return { ok: response.ok, status: response.status, headers: { 'content-type': response.headers.get('content-type') || '' }, text, json: jsonBody };
   } catch (e) { if (request.isCancelled && request.isCancelled()) throw new Error('任务已停止'); if (e && e.name === 'AbortError') throw new Error('HTTP 请求超时'); throw new Error(e && e.message === 'HTTP 响应超过 1 MiB' ? e.message : 'HTTP 请求失败'); } finally { clearTimeout(timer); clearInterval(cancelTimer); }
 }
-function automationPublicRun(run) { return { id: run.id, taskId: run.taskId, status: run.status, phase: run.phase || 'executing', startedAt: run.startedAt, finishedAt: run.finishedAt || 0, error: run.error || '', logs: run.logs, result: run.result || null }; }
+function automationPublicRun(run) { return { id: run.id, taskId: run.taskId, status: run.status, phase: run.phase || 'executing', sync: run.sync || null, stopRequested: !!run.stopRequested, startedAt: run.startedAt, finishedAt: run.finishedAt || 0, error: run.error || '', logs: run.logs, result: run.result || null }; }
 
 // 自动化运行前收拢 WorkDaddy 面板「窗口」，避免其 contenteditable/悬浮层与 WorkBuddy 原生
 // composer 抢焦点或遮挡，导致任务把提示词键入到 WorkDaddy 面板输入框 / 点不到官方发送按钮
@@ -3763,6 +3763,108 @@ async function automationNotifyToast(detail) {
   return response.result.value;
 }
 let automationAccountSwitchTail = Promise.resolve();
+/* ---------------- 切号闸门（B4 / A9 / A11）：切号 ↔ 会话同步 互斥 ---------------- */
+//
+// 上游 1.2.5 的 B4 是「switch:true 等本次入向同步成功之后才执行 steps」。它的实现有两处会挂住本 daemon：
+//   · waitAutomationSyncJob 靠 job.completion 无限等待，**没有超时**；
+//   · 还原路径传 isCancelled: () => false，即**不可取消**。
+// 本地作业模型也没有 job.completion（只有 job.status 收尾），所以这里做有界 + 可取消的适配：
+//   · 等锁 / 等同步 / 停止后排空，三处**全部有上限**，超时抛错而不是干等；
+//   · 还原路径保留 v1.3.17 的既有语义（等回合落定，等不到就不切），只额外要求拿到账号锁。
+// 与本地原有闸门的关系是**取并集**，不是替换：automationAccountSwitchGuarded 继续负责
+// 「还原前等回合跑完」，这里新增的是「切号 ↔ 同步」互斥位，两者在同一个入口里串起来。
+let accountSwitchInProgress = false;
+// 入向同步失败屏障：UI 历史 30 分钟就过期了，但「这个账号上次同步失败」必须一直记到
+// 下一次成功为止 —— 否则失败的作业在 worker 停下之后队列变空，会静默变成「允许切号」。
+const accountSyncFailures = new Map();
+const AUTOMATION_SWITCH_LOCK_MAX_MS = 300000;   // 等「上一轮同步/切号」释放锁的上限（与本地 300s 口径一致）
+const AUTOMATION_SYNC_WAIT_MAX_MS = 300000;     // 等本次入向同步成功的上限
+const AUTOMATION_RESTORE_LOCK_MAX_MS = 30000;   // 还原路径抢锁上限：抢不到就不切，交给闲置自动切回
+const AUTOMATION_SYNC_DRAIN_MAX_MS = 60000;     // 任务被停止后，等正在写盘的作业落定的上限
+
+// 本地作业模型：status ∈ queued|running|done|partial|conflict|error|paused，没有完成 Promise。
+function isAutoCopyJobSettled(status) { return !['queued', 'running'].includes(String(status || '')); }
+function assertAutoCopySucceeded(job) {
+  if (!job) return;
+  if (job.status !== 'done' || job.processed !== job.total || job.failed || job.failedItems || job.partial || job.conflicts) {
+    throw new Error('会话同步未成功完成，已停止自动切换（同步任务 ' + job.id + '，状态 ' + job.status + '）');
+  }
+}
+function recordAccountSyncResult(job) {
+  if (!job || !job.targetUid) return;
+  try {
+    assertAutoCopySucceeded(job);
+    accountSyncFailures.delete(job.targetUid);
+  } catch (_) {
+    accountSyncFailures.set(job.targetUid, {
+      id: job.id, status: job.status, total: job.total, processed: job.processed,
+      failed: job.failed, failedItems: job.failedItems, partial: job.partial, conflicts: job.conflicts,
+    });
+  }
+}
+function assertAccountSwitchIdle() {
+  if (accountSwitchInProgress) throw new Error('账号正在切换，请稍后重试');
+  if (autoCopyWorkerRunning || autoCopyQueue.length || sessionCopyLocks.size) throw new Error('会话同步尚未完成，请稍后切换账号');
+  accountSwitchInProgress = true;
+  return () => { accountSwitchInProgress = false; };
+}
+function automationSwitchProgress(options, phase, job = null) {
+  if (!options || typeof options.onProgress !== 'function') return;
+  options.onProgress({ phase, sync: job ? {
+    jobId: job.id, status: job.status, processed: job.processed, total: job.total,
+    failed: job.failed || 0, conflicts: job.conflicts || 0,
+  } : null });
+}
+// 等入向同步「落定且成功」。被停止时立刻抛出（让上层走收尾），超时抛错而不是无限等。
+async function waitAutomationSyncBounded(job, options) {
+  if (!job) return;
+  const startedAt = Date.now();
+  for (;;) {
+    const cancelled = !!(options && typeof options.isCancelled === 'function' && options.isCancelled());
+    automationSwitchProgress(options, cancelled ? 'stopping-sync' : 'syncing-sessions', job);
+    if (isAutoCopyJobSettled(job.status)) break;
+    if (cancelled) throw new Error('任务已停止');
+    if (Date.now() - startedAt >= AUTOMATION_SYNC_WAIT_MAX_MS) {
+      throw new Error('会话同步超时（已等 ' + Math.round((Date.now() - startedAt) / 1000) + ' 秒），已停止自动切换');
+    }
+    await sleep(200);
+  }
+  automationSwitchProgress(options, 'syncing-sessions', job);
+  assertAutoCopySucceeded(job);
+}
+// 停止后仍要等正在写盘的作业落定再释放账号锁 —— 提前释放会让「还原账号」与文件提交撞车。
+async function drainAutoCopyJobBounded(job, maxMs) {
+  if (!job || isAutoCopyJobSettled(job.status)) return;
+  const startedAt = Date.now();
+  while (!isAutoCopyJobSettled(job.status) && Date.now() - startedAt < maxMs) await sleep(200);
+}
+// 抢账号锁：忙碌时**有界等待**（上游是无限轮询），超时抛错。
+async function acquireAutomationAccountSwitch(options) {
+  const startedAt = Date.now();
+  const budget = options && options.restore ? AUTOMATION_RESTORE_LOCK_MAX_MS : AUTOMATION_SWITCH_LOCK_MAX_MS;
+  for (;;) {
+    if (options && typeof options.isCancelled === 'function' && options.isCancelled()) throw new Error('任务已停止');
+    const busy = accountSwitchInProgress || autoCopyWorkerRunning || autoCopyQueue.length || sessionCopyLocks.size;
+    if (!busy) {
+      // 必须看「最近一次入向同步的结果」，而不只是「队列空」：
+      // 失败的作业在 worker 停下来之后队列同样是空的，不能因此变成允许切号。
+      const uid = String((currentAccount() || {}).uid || '');
+      assertAutoCopySucceeded(accountSyncFailures.get(uid));
+      let latest = null;
+      for (const job of autoCopyJobs.values()) if (job.targetUid === uid) latest = job;
+      assertAutoCopySucceeded(latest);
+      // 空闲判定与「占位」之间不能有 await，否则两个调用者会同时以为自己拿到了锁。
+      return assertAccountSwitchIdle();
+    }
+    const pending = Array.from(autoCopyJobs.values()).find((job) => job.status === 'queued' || job.status === 'running');
+    automationSwitchProgress(options, 'waiting-sync', pending);
+    if (Date.now() - startedAt >= budget) {
+      throw new Error('会话同步仍在进行（已等 ' + Math.round(budget / 1000) + ' 秒），本次不切换账号');
+    }
+    await sleep(200);
+  }
+}
+
 /* ---------------- 模型限流自动切号续跑 ---------------- */
 //
 // 语义（与 WorkBuddy 官方内置的「切模型 + 续跑」不同）：官方只切模型；
@@ -3807,6 +3909,26 @@ function limitFailoverAccounts() {
       ? { ...account, creditSegments: hit.creditSegments }
       : account;
   });
+}
+
+// B3：account.forEach 里含 account.checkin 时，先按「最近到期的可用积分」升序排列账号，
+// 让最快到期的额度优先被用掉。数据源与「限流自动切号」共用同一份积分缓存
+// （limitFailoverAccounts 已把缓存段并进账号对象），不另建 account-credit-cache。
+// 未知到期时间排最后；到期时间相同保持原顺序（稳定排序，同上游 accountCreditCache.order 语义）。
+function orderCheckinAccounts(accounts) {
+  const list = Array.isArray(accounts) ? accounts : [];
+  if (list.length < 2) return list;
+  const merged = new Map(limitFailoverAccounts().map((account) => [String(account.uid || ''), account]));
+  const now = Date.now();
+  return list
+    .map((account, index) => {
+      const source = merged.get(String((account && account.uid) || '')) || account || {};
+      const segment = nearestExpiringSegment(source.creditSegments || source.segments, now);
+      const expiry = segment && segment.expiresAt !== null && segment.expiresAt !== undefined ? segment.expiresAt : Infinity;
+      return { account, index, expiry };
+    })
+    .sort((a, b) => (a.expiry === b.expiry ? a.index - b.index : a.expiry - b.expiry))
+    .map((item) => item.account);
 }
 
 async function runCdpExpression(expression, options = {}) {
@@ -5052,17 +5174,71 @@ async function waitForAutomationReplySettle(maxMs) {
 }
 
 // account.forEach{switch:true} 的切号入口：显式切换原样透传，还原先过闸门。
+// 带同步闸门的切号：只有 automation 的 account.forEach 路径用它（由 runDeps.accountSwitch 传入）。
+// 其余内部切号（限流续跑 / 闲置切回 / 云端汇报 / 手动 API）继续走不带闸门的 automationSwitchAccount，
+// 行为与改动前完全一致 —— 闸门只加在「切完号要跑 steps」这一条路径上。
+async function automationSwitchAccountWithSync(account, options = {}) {
+  const target = account && typeof account === 'object' ? account : { uid: String(account || '').trim() };
+  const uid = String(target.uid || '').trim();
+  const before = currentAccount();
+  const sourceUid = String((before && before.uid) || '');
+  const releaseAccountSwitch = await acquireAutomationAccountSwitch(options);
+  let syncJob = null;
+  try {
+    if (options.isCancelled && options.isCancelled()) throw new Error('任务已停止');
+    automationSwitchProgress(options, options.restore ? 'restoring-account' : 'switching-account');
+    // 复用同一份切换核心（含 renderer 刷新优先级与切号后的 pageReady 派发）。
+    // ⚠️ 输入闸门只包「真正切号」这一步：等同步可能要几分钟，把输入闸门一直握在手里
+    // 会把其它运行的 DOM/发送步骤一起堵死（withInput 是模块级共享闸门）。
+    const runSwitch = () => automationSwitchAccount(target);
+    const result = await (typeof options.withInput === 'function' ? options.withInput(runSwitch) : runSwitch());
+    if (!result || result.switched !== true) return result;
+    // 入向同步：复用 autoCopyAfterAccountSwitch（同一份规则判据 + hasPendingAutoCopyTo，
+    // 且自带 try/catch）。读规则失败时按「无需同步」降级 —— 宁可少等一次，
+    // 也不要因为一次规则读失败把整轮 account.forEach 弄崩。
+    if (sourceUid && sourceUid !== uid) {
+      syncJob = autoCopyAfterAccountSwitch(sourceUid, uid, 'automation-account-switch');
+    }
+    if (syncJob) await waitAutomationSyncBounded(syncJob, options);
+    if (options.isCancelled && options.isCancelled()) throw new Error('任务已停止');
+    return { ...result, syncJobId: syncJob ? syncJob.id : null };
+  } finally {
+    // 被停止 / 超时抛出的场合，同步作业可能还在写盘：等它落定再放锁。
+    if (syncJob) { try { await drainAutoCopyJobBounded(syncJob, AUTOMATION_SYNC_DRAIN_MAX_MS); } catch (_) {} }
+    releaseAccountSwitch();
+    automationSwitchProgress(options, 'executing');
+  }
+}
+
+// 还原路径专用：抢锁失败（同步还在进行）时不抛给上层，而是「不切，交给闲置自动切回」。
+// 与 v1.3.17「等不到回合落定就不切」是同一种取舍 —— 把账号留在目标账号只是「没还回去」，
+// 而硬切会掐死在跑的定时任务；代价不对等。
+async function automationRestoreAccountDeferring(target, options) {
+  try {
+    return await automationSwitchAccountWithSync(target, options);
+  } catch (error) {
+    const message = String((error && error.message) || error);
+    if (!/会话同步|账号正在切换/.test(message)) throw error;
+    log('[switch] 延后还原账号：' + message.slice(0, 160));
+    limitFailoverNotify('warning', '定时任务仍在执行，已暂缓切回主账号（等同步收尾后会自动收回）');
+    return { ok: true, uid: String(target.uid || ''), switched: false, deferred: true, reason: 'sync-busy', message };
+  }
+}
+
 async function automationAccountSwitchGuarded(account, detail) {
   const target = account && typeof account === 'object' ? account : { uid: String(account || '').trim() };
-  if (!(detail && detail.restore)) return automationSwitchAccount(target);
+  const gateOptions = detail && typeof detail === 'object' ? detail : {};
+  // 前向切换（任务作者显式要的动作）：加账号锁 + 等本次入向同步成功之后才回到 steps。
+  if (!(detail && detail.restore)) return automationSwitchAccountWithSync(target, gateOptions);
   const current = currentAccount();
-  if (current && current.uid && String(current.uid) === String(target.uid || '')) return automationSwitchAccount(target);
+  // 已经在目标账号上：无需再切，走同步闸门只是为了拿到锁、保持同一套 progress 口径。
+  if (current && current.uid && String(current.uid) === String(target.uid || '')) return automationSwitchAccountWithSync(target, gateOptions);
   const settled = await waitForAutomationReplySettle(SWITCH_SETTLE_RESTORE_MAX_MS);
   if (settled.ok) {
     if (settled.reason === 'settled' && settled.waitedMs > 2000) {
       log('[switch] 还原账号前等了 ' + settled.waitedMs + 'ms，等当前会话的回复跑完（避免整页重载掐断它）');
     }
-    return automationSwitchAccount(target);
+    return automationRestoreAccountDeferring(target, gateOptions);
   }
   const stay = current ? String(current.nickname || current.uid || '') : '';
   log('[switch] 延后还原账号：当前会话仍在生成回复（已等 ' + settled.waitedMs + 'ms，会话 ' +
@@ -5087,7 +5263,7 @@ function startAutomationRun(task, event = null) {
   run.scheduleSource = event && event.slot ? String(event.source || '') : '';
   run.maybeSent = false;
   run.lastMessageId = '';
-  const isCancelled = () => run.status === 'cancelled' || run.superseded === true ||
+  const isCancelled = () => run.stopRequested === true || run.status === 'cancelled' || run.superseded === true ||
     (task.trigger.restartOnNavigation && event && (event.navigationSerial !== mainFrameNavigationSerial || event.pageSessionId !== cdpPageSessionId));
   log('[automation-focus-diagnostics] automation:start ' + JSON.stringify({ runId: id, taskId: task.id, source: event && event.source || '', account: event && event.account || null, cdpTargetUrl: cdp.targetUrl, cdpTargetTitle: cdp.targetTitle }));
   const appendRunLog = (message) => {
@@ -5314,7 +5490,18 @@ function startAutomationRun(task, event = null) {
     }
     return result;
   };
-  const runDeps = { runId: id, sessionAction: sessionActionWithReceipt, primaryAccount: async () => publicAccounts().find(a=>a.isPrimary) || null, dismissToast: runNotifier.dismiss, completionReport, event, listAccounts: async () => publicAccounts(), currentAccount: publicCurrent, accountSwitch: (account, detail) => withInput(() => automationAccountSwitchGuarded(account, detail), !!(detail && detail.restore)), accountStatus: automationAccountStatus, accountCheckin: async (account) => {
+  const runDeps = { runId: id, sessionAction: sessionActionWithReceipt, primaryAccount: async () => publicAccounts().find(a=>a.isPrimary) || null, dismissToast: runNotifier.dismiss, completionReport, event, orderCheckinAccounts: (accounts) => orderCheckinAccounts(accounts), listAccounts: async () => publicAccounts(), currentAccount: publicCurrent, accountSwitch: (account, detail) => automationAccountSwitchGuarded(account, {
+      restore: !!(detail && detail.restore),
+      // 还原是记账动作：停止请求不该让它半途放弃（与上游同口径）。
+      isCancelled: detail && detail.restore ? () => false : isCancelled,
+      // 只把「真正切号」交给输入闸门；等同步在闸门之外进行。
+      withInput: (fn) => withInput(fn, !!(detail && detail.restore)),
+      onProgress: (progress) => {
+        if (run.phase !== progress.phase) appendRunLog('account:switch:' + progress.phase + (progress.sync ? ':' + progress.sync.jobId : ''));
+        run.phase = progress.phase;
+        run.sync = progress.sync;
+      },
+    }), accountStatus: automationAccountStatus, accountCheckin: async (account) => {
     if (!account || !account.uid) throw new Error('没有可用账号');
     const result = await claimDailyForUid(account.uid);
     appendRunLog('account:checkin:' + (result.skipped ? 'skipped' : result.ok ? 'success' : 'failed'));
@@ -5928,7 +6115,7 @@ function sessionRangeMs(range) {
 async function copySessionFiles(wbHome, oldId, newId, lineageIds = [], options = {}) {
   const fsMod = fs;
   const skipWorkspaceSessions = !!(options && options.skipWorkspaceSessions);
-  const result = { copied: 0, failed: 0, workspacePending: false };
+  const result = { copied: 0, failed: 0, sourceBytes: 0, copiedBytes: 0, workspacePending: false };
   const copyOne = async (from, to) => {
     try {
       if (!fsMod.existsSync(from)) return;
@@ -5942,7 +6129,12 @@ async function copySessionFiles(wbHome, oldId, newId, lineageIds = [], options =
         return;
       }
       fsMod.mkdirSync(path.dirname(to), { recursive: true });
+      // A7：源侧体积。cp 是「整份覆盖」（force: true，不比对内容），复制成功即
+      // 源侧体积真的被写了一遍 ⇒ copiedBytes 直接取它，无需逐文件记账。
+      const sourceBytes = measurePathBytes(from);
       await fsMod.promises.cp(from, to, { recursive: true, force: true, preserveTimestamps: true });
+      result.sourceBytes += sourceBytes;
+      result.copiedBytes += sourceBytes;
       result.copied++;
     } catch (e) {
       result.failed++;
@@ -6121,6 +6313,17 @@ function directoryStats(target) {
     }
   }
   return stats;
+}
+
+/** 单条路径的体积：文件取 stat.size，目录递归求和。与 directoryStats 同口径（跳过符号链接）。 */
+function measurePathBytes(target) {
+  try {
+    const stat = fs.lstatSync(target);
+    if (stat.isSymbolicLink()) return 0;
+    if (stat.isFile()) return Number(stat.size || 0);
+    if (stat.isDirectory()) return directoryStats(target).bytes;
+  } catch (_) {}
+  return 0;
 }
 
 /** 会话的全部本地路径，供体积统计与产物复制复用。 */
@@ -6521,7 +6724,8 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
     contentLead = autoCopyLeader.resolveContentLeader(
       PROFILE.dataRoot,
       live.map((member) => ({ uid: member.uid, id: member.id })),
-      { aliases: live.map((member) => member.id), preferredId: String(targetUid || '').trim() }
+      // cache 透传给 auto-copy-judge 的文件级指纹缓存（A3）：memo 未命中时只重读变化的文件。
+      { aliases: live.map((member) => member.id), preferredId: String(targetUid || '').trim(), cache: getSessionSyncCache() }
     );
     if (contentLead.kind === 'divergent' || contentLead.kind === 'insufficient') {
       // 「保留分叉」在这里落地：连产物相位都不推进，目标侧保持原样。
@@ -6593,6 +6797,9 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   };
   // ---- 写盘：content 模式走事务写入（applySnapshot），mtime 模式保持原实现 ----------------
   let failedFiles = 0;
+  // A7：真正写入目标的数据量。内容事务只数 changes（applySnapshot.copiedBytes）；
+  // mtime 路径是整目录 cp，按实际复制的源体积计。判据同上，两分支分别累加。
+  let copiedBytes = 0;
   if (judgeMode === 'content') {
     // ================= D2：事务写入（只有 judge='content' 才走这里）=================
     // 为什么换掉 copySessionFiles：它是「整目录 cp」—— ① 不删目标侧多出来的文件，repair 场景
@@ -6605,8 +6812,9 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
     // 这一步只碰 artifact-index 一个文件，不删任何文件、不做 fan-out。
     const repairedSource = await copySessionFiles(PROFILE.dataRoot, latest.id, latest.id, ownerIds, options);
     failedFiles += Number(repairedSource.failed) || 0;
+    copiedBytes += Math.max(0, Number(repairedSource.copiedBytes) || 0);
     // 源快照**读一次、复用于全部目标**。必须是 writable（含 bytes）——applySnapshot 要给目标做备份。
-    const contentSource = autoCopyJudge.readWritableSnapshot(PROFILE.dataRoot, latest.id, ownerIds);
+    const contentSource = autoCopyJudge.readWritableSnapshot(PROFILE.dataRoot, latest.id, ownerIds, getSessionSyncCache());
     autoCopyJudge.assertWritable(contentSource, 'content-source');
     const syncBackupRoot = path.join(DATA_DIR, 'session-sync-backups');
     // 备份是**回滚凭据**不是历史归档：不裁剪 = 每次切号在 DATA_DIR 里堆一份会话全量旧字节。
@@ -6632,7 +6840,7 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
       if (target.id === latest.id) continue;
       await yieldAutoCopyToRenderer();
       try {
-        const contentTarget = autoCopyJudge.readWritableSnapshot(PROFILE.dataRoot, target.id, ownerIds);
+        const contentTarget = autoCopyJudge.readWritableSnapshot(PROFILE.dataRoot, target.id, ownerIds, getSessionSyncCache());
         autoCopyJudge.assertWritable(contentTarget, 'content-target/' + target.id);
         const applied = await autoCopyJudge.applySnapshot(contentSource, contentTarget, {
           backupRoot: syncBackupRoot,
@@ -6644,6 +6852,7 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
           },
         });
         if (applied && Number(applied.copied) > 0) synced++;
+        if (applied) copiedBytes += Math.max(0, Number(applied.copiedBytes) || 0);
         if (workspacePending) trackPayload({ workspacePending: true }, latest.id, target.id);
       } catch (error) {
         failedFiles++;
@@ -6656,10 +6865,12 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   // 旧版副本可能仍挂着最初源会话的 owner；也修复作为最新来源的副本自身。
   const repairedSource = await copySessionFiles(PROFILE.dataRoot, latest.id, latest.id, ownerIds, options);
   failedFiles = repairedSource.failed;
+  copiedBytes += Math.max(0, Number(repairedSource.copiedBytes) || 0);
   for (const target of live) {
     if (target.id === latest.id) continue;
     await yieldAutoCopyToRenderer();
     const files = await copySessionFiles(PROFILE.dataRoot, latest.id, target.id, ownerIds, options);
+    copiedBytes += Math.max(0, Number(files.copiedBytes) || 0);
     trackPayload(files, latest.id, target.id);
     synced++;
     failedFiles += files.failed;
@@ -6697,7 +6908,7 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
       });
     }
   }
-  return { members: live.length, synced, failedFiles, sourceId: latest.id, sourcePickedBy: judgeMode, targetIds, targetPresent, payloadTargets };
+  return { members: live.length, synced, failedFiles, copiedBytes, sourceId: latest.id, sourcePickedBy: judgeMode, targetIds, targetPresent, payloadTargets };
 }
 
 /* ---------------- 会话删除的唯一实现（面板端点 + 原生软删探测共用） ---------------- */
@@ -7288,6 +7499,54 @@ const SESSION_COPY_COLUMNS = [
 ];
 const sessionCopyLocks = new Map();
 
+// 会话复制指纹缓存（上游 1.2.5 / A3）：文件的 size/mtime/ctime 三元组没变，就复用已存的
+// SHA-256，不必每次同步都重读 + 重哈希。**尽力而为** —— 条目丢失或过期只是多读一次。
+// 上限必须能装下磁盘上全部会话文件（几万个），否则活跃会话互相淘汰、缓存永远热不起来。
+// 只喂给 sessionSync.readSnapshot 的第 5 参；被 skipPrefixes 排除的 workspace 产物文件
+// 不会进这里（readSnapshot 压根不访问它们，见 auto-copy-judge.js 的快照域切分）。
+// ⚠️ 默认 judge=mtime 路径一行都不经过这里：getSessionSyncCache 只在 content 分支被调用，
+//    sessionSyncCacheState 保持 null ⇒ scheduleSessionSyncCacheSave 立即 return。
+const SESSION_SYNC_CACHE_LIMIT = 100000;
+let sessionSyncCacheState = null;
+function getSessionSyncCache() {
+  if (sessionSyncCacheState) return sessionSyncCacheState.map;
+  const file = path.join(DATA_DIR, 'session-sync-cache.json');
+  const map = new Map();
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (raw && raw.version === 1 && raw.entries && typeof raw.entries === 'object') {
+      for (const [key, entry] of Object.entries(raw.entries)) {
+        if (!entry || typeof entry !== 'object') continue;
+        if (typeof entry.hash !== 'string' || !entry.hash) continue;
+        if (![entry.size, entry.mtimeMs, entry.ctimeMs].every(Number.isFinite)) continue;
+        map.set(key, entry);
+      }
+    }
+  } catch (_) {}
+  while (map.size > SESSION_SYNC_CACHE_LIMIT) map.delete(map.keys().next().value);
+  sessionSyncCacheState = { file, map, timer: null, dirty: false };
+  const set = map.set.bind(map);
+  map.set = (key, value) => { sessionSyncCacheState.dirty = true; return set(key, value); };
+  return map;
+}
+// 1 秒去抖落盘：一次同步会写几千上万个条目，逐条落盘等于把 io 打满。
+// timer.unref() —— 缓存是尽力而为的，绝不允许它拖住 daemon 退出。
+function scheduleSessionSyncCacheSave() {
+  const state = sessionSyncCacheState;
+  if (!state || !state.dirty || state.timer) return;
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    if (!state.dirty) return;
+    state.dirty = false;
+    try {
+      while (state.map.size > SESSION_SYNC_CACHE_LIMIT) state.map.delete(state.map.keys().next().value);
+      fs.mkdirSync(path.dirname(state.file), { recursive: true });
+      atomicWriteText(state.file, JSON.stringify({ version: 1, entries: Object.fromEntries(state.map) }));
+    } catch (_) { state.dirty = true; }
+  }, 1000);
+  if (typeof state.timer.unref === 'function') state.timer.unref();
+}
+
 function isTaskSessionRecord(cwd) {
   // WorkBuddy 的普通工作区也使用 WorkBuddy\\YYYY-MM-DD-HH-MM-SS；仅凭 cwd 无法可靠区分任务会话。
   return false;
@@ -7489,6 +7748,9 @@ async function adoptExistingCopyTarget(src, targetUid, currentLineageId) {
 }
 
 async function copySessionRecord(src, targetUid, options = {}) {
+  // 自动切号正在进行时，手动复制先让路：那条路径是「切号 → 同步 → 跑 steps」的串行事务，
+  // 中途插进来的复制会与它的计划/映射打架。自动路径（options.auto）不受影响。
+  if (accountSwitchInProgress && !options.auto) throw new Error('账号正在切换，请稍后同步');
   const sourceUid = String(options.sourceUid || src.user_id || '').trim();
   const auto = !!options.auto;
   const wbHome = PROFILE.dataRoot;
@@ -7500,7 +7762,7 @@ async function copySessionRecord(src, targetUid, options = {}) {
   // 只在自动路径（auto）生效 —— 用户手动发起复制时，setAutoCopyRule(enable) 已经把抑制标记清掉。
   // 放在锁之前返回，避免为一次注定跳过的复制去排队。
   if (auto && lineageId && isAutoCopySuppressedForTarget(DATA_DIR, lineageId, targetUid)) {
-    return { status: 'suppressed', sourceId: src.id, targetId: null, failedFiles: 0, suppressed: true };
+    return { status: 'suppressed', sourceId: src.id, targetId: null, failedFiles: 0, copiedBytes: 0, suppressed: true };
   }
   const perform = async () => {
   let ownerIds = lineageId ? getAutoCopySessionMemberRecords(DATA_DIR, lineageId).map((member) => member.id) : [];
@@ -7519,7 +7781,7 @@ const files = await copySessionFiles(wbHome, src.id, mapping.targetId, ownerIds,
           status: files.failed ? 'partial' : 'copied',
           failedFiles: files.failed,
         });
-        return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: mapping.targetId, failedFiles: files.failed, workspacePending: files.workspacePending };
+        return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: mapping.targetId, failedFiles: files.failed, copiedBytes: Number(files.copiedBytes) || 0, workspacePending: files.workspacePending };
       }
       deleteAutoCopyMapping(DATA_DIR, lineageId, targetUid);
     }
@@ -7558,7 +7820,7 @@ const files = await copySessionFiles(wbHome, src.id, canonicalId, ownerIds, { sk
           status: files.failed ? 'partial' : 'copied',
           failedFiles: files.failed,
         });
-        return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: canonicalId, failedFiles: files.failed, workspacePending: files.workspacePending };
+        return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: canonicalId, failedFiles: files.failed, copiedBytes: Number(files.copiedBytes) || 0, workspacePending: files.workspacePending };
       }
     }
   }
@@ -7579,7 +7841,7 @@ const files = await copySessionFiles(wbHome, src.id, canonicalId, ownerIds, { sk
       });
     }
     log(`[sessions-auto-copy] ${adopted.adopted === 'merge-lineage' ? '血缘被拆开但目标账号已有同源会话，已合并并复用' : '登记缺失但目标账号已有同源会话，复用'} ${String(adoptedId).slice(0, 8)}（源 ${String(src.id).slice(0, 8)}），未新建副本`);
-    return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: adoptedId, failedFiles: files.failed, workspacePending: files.workspacePending };
+    return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: adoptedId, failedFiles: files.failed, copiedBytes: Number(files.copiedBytes) || 0, workspacePending: files.workspacePending };
   }
 
   const newId = crypto.randomUUID();
@@ -7593,7 +7855,7 @@ const files = await copySessionFiles(wbHome, src.id, newId, ownerIds, { skipWork
       failedFiles: files.failed,
     });
   }
-  return { status: files.failed ? 'partial' : 'copied', sourceId: src.id, targetId: newId, failedFiles: files.failed, workspacePending: files.workspacePending };
+  return { status: files.failed ? 'partial' : 'copied', sourceId: src.id, targetId: newId, failedFiles: files.failed, copiedBytes: Number(files.copiedBytes) || 0, workspacePending: files.workspacePending };
   };
   if (!lineageId) return perform();
   const lockKey = JSON.stringify([lineageId, String(targetUid || '')]);
@@ -7721,6 +7983,9 @@ function runAutoCopyQueue() {
       pruneAutoCopyJobs();
     })
     .finally(() => {
+      // 入向同步结果登记进「失败屏障」：UI 历史 30 分钟就过期，但「这个账号上次同步失败」
+      // 必须一直记到下一次成功为止，否则失败会静默变成「允许切号」（A9）。
+      recordAccountSyncResult(item.job);
       autoCopyWorkerRunning = false;
       runAutoCopyQueue();
     });
@@ -8146,6 +8411,13 @@ async function prepareFailoverContinuation(ctx) {
   }
 }
 
+// A7/A8：作业级指标口径与「大会话」建议阈值。
+//   copiedBytes / totalBytes / copyStartedAt 见作业对象里的注释；
+//   averageBytesPerSecond 由 publicAutoCopyJob 现算（分母 = 结束时刻或现在 - copyStartedAt）。
+// 100 MB 阈值与上游一致，且**只是建议**：任何体积都照常同步，不做上限裁剪。
+const AUTO_COPY_LARGE_SESSION_BYTES = 100 * 1024 * 1024;
+const AUTO_COPY_LARGE_WARNING = '会话超过 100 MB，同步可能较慢';
+
 function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
   const id = crypto.randomUUID();
   const accountLabels = labels && typeof labels === 'object' ? labels : {};
@@ -8172,6 +8444,13 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
     currentBytes: 0,
     planBytes: 0,
     processedBytes: 0,
+    // A7：作业级数据量与速率（面板「已同步 X / Y · 平均复制速率 Z」）。
+    // copiedBytes = 真正写入目标的字节；totalBytes = 计划内会话在磁盘上的实际体积；
+    // copyStartedAt = 计划已定、开始搬运的时刻（不含排队与切号等待，速率才算得准）。
+    copiedBytes: 0,
+    totalBytes: null,
+    copyStartedAt: null,
+    warning: '',
     // 第二阶段（产物目录 workspace/sessions/<id>/）计数
     payloadTotal: 0,
     payloadProcessed: 0,
@@ -8244,6 +8523,15 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
     job.total = job.plan.length;
     job.planBytes = job.plan.reduce((sum, row) => sum + (row.sizeBytes || 0), 0);
     job.planTiers = sized.tiers;
+    job.copyStartedAt = Date.now();
+    // A7：读一次计划内全部会话的实际体积当分母。任一读不到（返回 null）就整体置 null ——
+    // 分母缺角时给个偏小的数只会让「已同步 X / Y」看起来像超额完成，不如不显示分母。
+    try {
+      const sizes = await autoCopyJudge.readSessionSizes(PROFILE.dataRoot, job.plan.map((src) => String(src.id || '')));
+      const values = job.plan.map((src) => sizes.get(String(src.id || '')));
+      job.totalBytes = values.every((value) => typeof value === 'number' && Number.isFinite(value) && value >= 0)
+        ? values.reduce((sum, value) => sum + value, 0) : null;
+    } catch (_) { job.totalBytes = null; }
     job.phase = 'meta';
     log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 计划 ${job.total} 个会话，合计 ${formatByteSize(job.planBytes)}`
       + `（档位 ${sized.tiers[0] || 0}/${sized.tiers[1] || 0}/${sized.tiers[2] || 0}/${sized.tiers[3] || 0}，清单命中 ${sized.stats.fromList}/${sized.stats.total}）`);
@@ -8300,6 +8588,7 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
             }
           };
           const synced = await syncAutoCopyLineage(src.lineageId, targetUid, syncOptions);
+          scheduleSessionSyncCacheSave();
           enqueuePayload(synced.payloadTargets);
           if (synced.conflict) {
             result = {
@@ -8321,6 +8610,7 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
               auto: true,
             });
             const synced = await syncAutoCopyLineage(src.lineageId, targetUid, syncOptions);
+            scheduleSessionSyncCacheSave();
             enqueuePayload(synced.payloadTargets);
             if (synced.conflict) {
               result.status = 'conflict';
@@ -8339,6 +8629,13 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
           : result.status === 'skipped' ? 'skipped' : 'copied';
         detail.failedFiles = Number(result.failedFiles) || 0;
         detail.conflicts = Number(result.conflicts) || 0;
+        // A7/A8：累计真正写入的数据量。单个会话超过 100 MB 时给建议性提示；
+        // 本地**不做任何上限裁剪**（全部文件照常同步），提示只影响文案。
+        job.copiedBytes += Math.max(0, Number(result.copiedBytes) || 0);
+        if (job.currentBytes > AUTO_COPY_LARGE_SESSION_BYTES) {
+          detail.warning = AUTO_COPY_LARGE_WARNING;
+          job.warning = AUTO_COPY_LARGE_WARNING;
+        }
         // 分叉保留：kind/leaderId/pairs 原样带给面板，让 UI 能把「真分叉」与旧的
         // 「两边都改过、未覆盖」区分开。渲染文案在 inject.js，本轮刻意不动它。
         if (result.divergent) {
@@ -8394,6 +8691,7 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
       job.currentBytes = item.bytes;
       job.payloadFileTotal = item.files || 0;
       job.payloadFileProcessed = 0;
+      if (Number(item.bytes || 0) > AUTO_COPY_LARGE_SESSION_BYTES) job.warning = AUTO_COPY_LARGE_WARNING;
       job.updatedAt = Date.now();
       const linkedBase = job.payloadLinked;
       const linkedBytesBase = job.payloadLinkedBytes;
@@ -8473,6 +8771,12 @@ function activeAutoCopyJob() {
 function publicAutoCopyJob(job) {
   if (!job) return null;
   const startedAt = job.startedAt || 0;
+  // A7：缺数一律给 null，**不拿 0 冒充**（0 会被面板读成「真的同步了 0 字节」）。
+  // 速率的分母只算搬运阶段（copyStartedAt 起），排队与切号等待不计入，否则速率被稀释。
+  const copiedBytes = Number.isFinite(job.copiedBytes) ? Math.max(0, Number(job.copiedBytes)) : null;
+  const totalBytes = Number.isFinite(job.totalBytes) ? Math.max(0, Number(job.totalBytes)) : null;
+  const copyElapsedMs = job.copyStartedAt == null ? 0
+    : Math.max(0, (job.finishedAt == null ? Date.now() : job.finishedAt) - job.copyStartedAt);
   return {
     id: job.id,
     status: job.status,
@@ -8514,6 +8818,10 @@ function publicAutoCopyJob(job) {
     updatedAt: job.updatedAt || startedAt,
     finishedAt: job.finishedAt || null,
     elapsedMs: startedAt ? ((job.finishedAt || Date.now()) - startedAt) : 0,
+    copiedBytes,
+    totalBytes,
+    averageBytesPerSecond: (copiedBytes == null || !copyElapsedMs) ? null : Math.round(copiedBytes * 1000 / copyElapsedMs),
+    warning: job.warning || '',
     failedItems: job.failedItems,
     conflicts: job.conflicts,
     divergences: job.divergences || 0,
@@ -11627,7 +11935,7 @@ function handleApiRoute(req, res) {
   }
 
   if (req.method === 'GET' && p === '/api/automations/capabilities') {
-    return json(res, 200, { ok: true, schemaVersion: AUTOMATION_SCHEMA_VERSION, supportedSchemaVersions: [1, 2], capabilities: AUTOMATION_CAPABILITIES.filter(item => item.available !== false), protocolZh: automationCapabilityText('zh'), protocolEn: automationCapabilityText('en') });
+    return json(res, 200, { ok: true, schemaVersion: AUTOMATION_SCHEMA_VERSION, supportedSchemaVersions: [1, 2, 3], capabilities: AUTOMATION_CAPABILITIES.filter(item => item.available !== false), protocolZh: automationCapabilityText('zh'), protocolEn: automationCapabilityText('en') });
   }
 
   if (req.method === 'GET' && p === '/api/automations/discovery') {
@@ -12009,7 +12317,10 @@ function handleApiRoute(req, res) {
       const run = automationRuns.get(String(body && body.runId || ''));
       if (!run) return json(res, 404, { ok: false, error: '运行记录不存在' });
       // 当前执行器的网络/CDP调用由超时控制；停止请求先标记状态，避免新的批量运行进入。
-      if (run.status === 'running') { run.pendingEvent = null; run.status = 'cancelled'; run.finishedAt = Date.now(); run.error = '用户停止任务'; }
+      // 本地语义：立刻置 cancelled，面板即时响应（v1.3.x 既有行为，不改）。
+      // 另记 stopRequested + phase=stopping：切号闸门的「等同步」用它判断转入收尾，
+      // 并在释放账号锁之前把正在写盘的同步作业排空（提前释放会让还原与写入撞车）。
+      if (run.status === 'running') { run.pendingEvent = null; run.status = 'cancelled'; run.stopRequested = true; run.phase = 'stopping'; run.finishedAt = Date.now(); run.error = '用户停止任务'; }
       if (run.cleanupNotifications) await run.cleanupNotifications();
       return json(res, 200, { ok: true, run: automationPublicRun(run) });
     });
@@ -13205,10 +13516,12 @@ function handleApiRoute(req, res) {
     const clauses = ["deleted_at IS NULL"];
     const params = [];
     if (uid) { clauses.push('user_id = ?'); params.push(uid); }
-    if (rangeMs) { clauses.push('COALESCE(last_activity_at, updated_at, created_at) >= ?'); params.push(rangeMs); }
+    // A10：时间筛选**刻意不写进 SQL**。账号总量（totalBytes）必须覆盖被 range 挡掉的会话，
+    // 否则「近 7 天」视图下的总量会跟着筛选缩水，用户会以为数据丢了（与上游 1.2.5 同口径）。
+    // 取全量、算完总量再在内存里过筛；本机量级（几十到几千行）下成本可忽略。
     // 时间筛选和排序按最近活动/修改时间；旧记录缺字段时回退到创建时间。
     return sqliteQuery("SELECT id, cwd, user_id, title, custom_title, status, created_at, updated_at, last_activity_at, is_playground, project_id FROM sessions WHERE " + clauses.join(' AND ') + " ORDER BY COALESCE(last_activity_at, updated_at, created_at) DESC, created_at DESC;", params)
-      .then((rows) => {
+      .then(async (rows) => {
         const autoCopyAll = getAutoCopyRules(DATA_DIR, uid).allSessions;
         const rulesByUid = {};
         rows.forEach((row) => {
@@ -13219,13 +13532,23 @@ function handleApiRoute(req, res) {
         });
         const lineagesByUid = {};
         Object.keys(rulesByUid).forEach((owner) => { lineagesByUid[owner] = rulesByUid[owner].lineages; });
-        const sessions = dedupeAutoCopySessionRows(rows, lineagesByUid).map((row) => {
+        const allSessions = dedupeAutoCopySessionRows(rows, lineagesByUid).map((row) => {
           const rules = rulesByUid[String(row.user_id || '').trim()] || { sessions: new Set(), workspaces: new Set() };
           return Object.assign({}, row, {
             autoCopySession: rules.sessions.has(String(row.id)),
             autoCopyWorkspace: rules.workspaces.has(canonicalWorkspace(row.cwd)),
           });
         });
+        // A10：逐行体积（A4 的 readSessionSizes）+ 账号总量。
+        // ⚠️ 总量按**全量**算：任一行的体积读不出来（返回 null）就整体给 null，
+        //    不拿「缺角的和」冒充总量 —— 那会让面板上的数字比真实值偏小且无从察觉。
+        const sizes = await autoCopyJudge.readSessionSizes(PROFILE.dataRoot, allSessions.map((row) => String(row.id)));
+        allSessions.forEach((row) => { row.totalBytes = sizes.get(String(row.id)); });
+        const totalBytes = allSessions.every((row) => typeof row.totalBytes === 'number' && Number.isFinite(row.totalBytes))
+          ? allSessions.reduce((sum, row) => sum + row.totalBytes, 0) : null;
+        const sessions = rangeMs
+          ? allSessions.filter((row) => Number(row.last_activity_at || row.updated_at || row.created_at) >= rangeMs)
+          : allSessions;
         const currentRules = uid
           ? (rulesByUid[uid] || (() => {
               const rules = getAutoCopyRules(DATA_DIR, uid);
@@ -13236,6 +13559,7 @@ function handleApiRoute(req, res) {
           ok: true,
           sessions,
           count: sessions.length,
+          totalBytes,
           uid,
           range,
           autoCopyAll,
@@ -13700,6 +14024,8 @@ function handleApiRoute(req, res) {
       const targetUid = (body.targetUid || '').trim();
       if (!ids.length) return json(res, 400, { ok: false, error: '未选择会话' });
       if (!targetUid) return json(res, 400, { ok: false, error: '未指定目标账号' });
+      // A11：账号正在自动切换时直接拒绝（比让 copySessionRecord 抛 500 更准确）。
+      if (accountSwitchInProgress) return json(res, 409, { ok: false, error: '账号正在切换，请稍后同步' });
       try {
         // 1) 取出源会话（含 cwd 用于定位消息文件）
         const srcRows = await sqliteQuery(
@@ -14509,9 +14835,14 @@ function handleApiRoute(req, res) {
       const uid = (body.uid || '').trim();
       if (!uid) return json(res, 400, { ok: false, error: '缺少 uid' });
       const releaseRendererReload = body.reload ? beginRendererReloadPriority() : null;
+      let releaseAccountSwitch = null;
       try {
         // 只记录源账号；自动复制队列会在 renderer 刷新并完成组件注入后重新规划。
         // 不在这里预规划，否则大量会话的同步 SQLite/文件扫描会让切换界面长时间无响应。
+        // A11：与自动切号/会话同步互斥 —— 同步正在写盘时不允许切换登录文件。
+        // 失败折成 409（handleApi 认 statusCode），让面板能区分「稍后重试」与真正的服务端错误。
+        try { releaseAccountSwitch = await assertAccountSwitchIdle(); }
+        catch (busy) { const conflict = new Error(busy.message); conflict.statusCode = 409; throw conflict; }
         const sourceAccount = currentAccount() || {};
         const sourceUid = String(sourceAccount.uid || '').trim();
         const acct = switchTo(DATA_DIR, uid, log);
@@ -14583,6 +14914,7 @@ function handleApiRoute(req, res) {
         return json(res, 500, { ok: false, error: e.message });
       } finally {
         if (releaseRendererReload) releaseRendererReload();
+        if (releaseAccountSwitch) releaseAccountSwitch();
       }
     });
   }

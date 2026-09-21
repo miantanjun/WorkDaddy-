@@ -47,7 +47,11 @@ const eIdx = src.indexOf(END, sIdx);
 if (sIdx < 0 || eIdx < 0) { console.log('  FAIL S0 找不到切号闸门代码块的锚点'); process.exit(1); }
 const block = src.slice(sIdx, eIdx);
 ['SWITCH_SETTLE_RESTORE_MAX_MS', 'SWITCH_SETTLE_POLL_MS', 'readAutomationTurnState',
-  'waitForAutomationReplySettle', 'automationAccountSwitchGuarded']
+  'waitForAutomationReplySettle', 'automationAccountSwitchGuarded',
+  // v1.4.3（B4 切号闸门）后同一切片内新增的两个函数：显式切号走带同步闸门的版本，
+  // 还原走「抢不到锁就延后」的包装。它们依赖的闸门原语在切片**之前**的代码块里，
+  // 所以下面用工厂参数桩掉（见 【S】 开头）。
+  'automationSwitchAccountWithSync', 'automationRestoreAccountDeferring']
   .forEach((need) => { if (block.indexOf(need) < 0) { console.log('  FAIL S0 切出的代码块缺少 ' + need); process.exit(1); } });
 ok(true, 'S0 切出切号闸门代码块（' + block.split('\n').length + ' 行）');
 
@@ -69,6 +73,10 @@ const world = {
   switchError: '',
   notify: [],
   logs: [],
+  // v1.4.3（B4）：账号锁与 progress 相位（闸门原语的桩件写入这里）
+  lockCalls: 0,
+  lockAcquires: 0,
+  progress: [],
 };
 
 function nextProbe() {
@@ -80,6 +88,9 @@ function nextProbe() {
 const factory = new Function(
   'cdp', 'cdpSend', 'probeSessionReceipt', 'sleep', 'log', 'currentAccount',
   'automationSwitchAccount', 'limitFailoverNotify',
+  // v1.4.3：闸门原语（定义在本切片之前的代码块里）——桩掉，避免沙箱里出现未定义引用。
+  'acquireAutomationAccountSwitch', 'automationSwitchProgress', 'autoCopyAfterAccountSwitch',
+  'waitAutomationSyncBounded', 'drainAutoCopyJobBounded', 'AUTOMATION_SYNC_DRAIN_MAX_MS',
   block + '\nreturn { guard: automationAccountSwitchGuarded, settle: waitForAutomationReplySettle, ' +
   'read: readAutomationTurnState, C: { restore: SWITCH_SETTLE_RESTORE_MAX_MS, poll: SWITCH_SETTLE_POLL_MS } };'
 );
@@ -102,7 +113,14 @@ const api = factory(
     world.current = { uid, nickname: '切过去的' };
     return { ok: true, uid, switched: true };
   },
-  (level, message) => { world.notify.push({ level: String(level), message: String(message) }); }
+  (level, message) => { world.notify.push({ level: String(level), message: String(message) }); },
+  // 账号锁：测试里永远立刻拿到（锁本身的行为由 test-automation-protocol-v3.js 覆盖）
+  async () => { world.lockCalls += 1; world.lockAcquires += 1; return () => { world.lockCalls -= 1; }; },
+  (options, phase) => { world.progress.push(String(phase)); },
+  () => null,          // autoCopyAfterAccountSwitch：本套件不触发同步作业 ⇒ 不产生等待
+  async () => {},      // waitAutomationSyncBounded
+  async () => {},      // drainAutoCopyJobBounded
+  60000                // AUTOMATION_SYNC_DRAIN_MAX_MS
 );
 
 function resetWorld() {
@@ -118,6 +136,9 @@ function resetWorld() {
   world.switchError = '';
   world.notify = [];
   world.logs = [];
+  world.lockCalls = 0;
+  world.lockAcquires = 0;
+  world.progress = [];
   clock = 1700000000000;
 }
 
@@ -128,6 +149,10 @@ ok(world.switchCalls.length === 1 && world.switchCalls[0] === 'A', 'S1a 显式�
 ok(world.probeCalls === 0, 'S1b 显式切号不做任何探测（不给正常流程加等待）', world.probeCalls);
 ok(world.sleepCalls === 0, 'S1c 显式切号不等待', world.sleepCalls);
 ok(r && r.switched === true, 'S1d 显式切号返回 switched:true', r);
+// v1.4.3：前向切号现在也过账号锁（B4 取并集：显式切号仍有「切完再跑 steps」的同步序）
+ok(world.lockAcquires === 1 && world.lockCalls === 0, 'S1e 前向切号拿了账号锁且已释放', { a: world.lockAcquires, l: world.lockCalls });
+ok(world.progress.includes('switching-account') && world.progress.includes('executing'),
+  'S1f 前向切号上报 switching-account → executing 相位', world.progress.slice());
 
 /* ---- S2 还原 + 会话空闲：直接切，零等待 ---- */
 resetWorld();
@@ -149,6 +174,7 @@ ok(r && r.waitedMs >= api.C.restore, 'S3e 等满预算才放弃', r && r.waitedM
 ok(world.notify.length === 1 && world.notify[0].level === 'warning', 'S3f 给用户一条 warning 提示（不是静默延后）', world.notify);
 ok(/延后还原账号/.test(world.logs.join('\n')), 'S3g 日志里能一眼看出「延后还原」', world.logs.slice(-1));
 ok(world.current.uid === 'B', 'S3h 账号留在目标账号上（交给闲置自动切回收回）', world.current);
+ok(world.lockAcquires === 0, 'S3i 延后还原根本没进闸门（不占锁、不上报相位）', world.lockAcquires);
 
 /* ---- S4 还原 + 先流式后落定：骑过生成，再切 ---- */
 resetWorld();
@@ -212,16 +238,21 @@ ok(/streamingRequestId/.test(world.lastExpression) && /isHydrating/.test(world.l
 
 section('[T] daemon 接线');
 
-ok(/accountSwitch: \(account, detail\) => withInput\(\(\) => automationAccountSwitchGuarded\(account, detail\),/.test(src),
+ok(/accountSwitch: \(account, detail\) => automationAccountSwitchGuarded\(account, \{/.test(src),
   'T1a 定时任务的切号入口确实走了闸门');
-ok(!/accountSwitch: \(account, detail\) => withInput\(\(\) => automationSwitchAccount\(account\),/.test(src),
+ok(!/accountSwitch: \(account, detail\) => withInput\(\(\) => automationSwitchAccount\(account\)\),/.test(src),
   'T1b 旧的无闸门接线已经不存在（防回退）');
 ok(/const SWITCH_SETTLE_RESTORE_MAX_MS = 300000;/.test(src), 'T1c 还原等待预算 5 分钟（与 session.wait 上限一致）');
 ok(/limitFailoverNotify\('warning'/.test(block), 'T1d 延后时会给用户提示');
 
-/* 显式切号路径不许被误伤：automationSwitchAccount 本体仍是无条件切 */
-ok(/async function automationAccountSwitchGuarded\(account, detail\) \{\n  const target = .*\n  if \(!\(detail && detail\.restore\)\) return automationSwitchAccount\(target\);/.test(block),
-  'T1e 非 restore 的分支在第一行就原样透传');
+/* 显式切号路径不许被误伤：前向分支只加锁 + 等同步，不进「等回合落定」的等待循环 */
+ok(/if \(!\(detail && detail\.restore\)\) return automationSwitchAccountWithSync\(target, gateOptions\);/.test(block),
+  'T1e 非 restore 的分支在第一行就交给同步闸门（不排进等回合的循环）');
+ok(/if \(!\(detail && detail\.restore\)\) return automationSwitchAccountWithSync/.test(block) &&
+  !/if \(!\(detail && detail\.restore\)\)[^\n]*waitForAutomationReplySettle/.test(block),
+  'T1f 前向切号不等待会话落定（只等本次入向同步）');
+ok(/return automationRestoreAccountDeferring\(target, gateOptions\);/.test(block),
+  'T1g 还原分支在会话落定后走「抢不到锁就延后」的包装');
 
 /* ==================================================================== */
 /* 【U】防回退断言                                                        */
@@ -233,7 +264,7 @@ ok(!/probe\.busy/.test(block), 'U1a 判据里不许出现 busy —— hydration 
 ok(/!probe\.streaming && !probe\.turnActive/.test(block), 'U1b 判据是 streaming/turnActive 两个标志位');
 ok(/function automationSwitchAccount\(account\) \{/.test(src),
   'U1c automationSwitchAccount 的签名没被改动（test-idle-switchback.js 拿它当切片结束锚点）');
-ok(src.indexOf('automationAccountSwitchGuarded') > src.indexOf('function automationSwitchAccount(account) {'),
+ok(src.indexOf('async function automationAccountSwitchGuarded(account, detail) {') > src.indexOf('function automationSwitchAccount(account) {'),
   'U1d 闸门定义在 automationSwitchAccount 之后（两个源码切片的边界都不受影响）');
 ok(src.indexOf(START) > src.indexOf('function automationSwitchAccount(account) {'),
   'U1e 闸门代码块不在「闲置切回」切片的范围内');

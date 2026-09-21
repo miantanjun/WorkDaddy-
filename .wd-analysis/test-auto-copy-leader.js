@@ -340,8 +340,8 @@ section('[G] daemon 接线守卫（静态形态断言，防「改回去也不知
     'G6 旧的「≥2 就报冲突」已被 content 模式让路（否则内容判据永远走不到）');
   ok(has('if (judgeMode !== \'content\' && targetPresent && baselineAt > 0 && changedSinceBaseline.length === 0) {'),
     'G7 旧的「没变化就跳过」同样让路（否则会抢在判主之前误判 unchanged）');
-  ok(has("{ aliases: live.map((member) => member.id), preferredId: String(targetUid || '').trim() }"),
-    'G8 判主传入的 alias 是**全成员 id**（含自身），且 preferredId 只用于等价时代表');
+  ok(has("{ aliases: live.map((member) => member.id), preferredId: String(targetUid || '').trim(), cache: getSessionSyncCache() }"),
+    'G8 判主传入的 alias 是**全成员 id**（含自身）、preferredId 只用于等价时代表，且第 3 项透传 A3 文件级指纹缓存');
   ok(has("if (contentLead.kind === 'divergent' || contentLead.kind === 'insufficient') {"),
     'G9 分叉/可读不足走同一个「一份都不覆盖」出口');
   ok(has('detail.branch = result.branch || null;'),

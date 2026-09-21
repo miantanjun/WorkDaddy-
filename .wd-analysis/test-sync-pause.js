@@ -89,6 +89,18 @@ function sliceBlock(src, header) {
   throw new Error('源码块未闭合: ' + header);
 }
 
+// 切片函数若引用了模块级常量（如 A8 的 AUTO_COPY_LARGE_* 阈值），沙箱必须把**真实定义**
+// 也带进来 —— 否则 new Function 里是 ReferenceError，会被 startAutoCopyJob 的 catch 吞成
+// 「会话失败」，测试表现为 status=partial / copied=0，看起来像行为回归，其实是桩件缺件。
+// 取到行尾分号为止（这些常量都是单行字面量，没有跨行初始化）。
+function sliceConst(src, header) {
+  const start = src.indexOf(header);
+  if (start < 0) throw new Error('找不到常量定义: ' + header);
+  const end = src.indexOf(';', start);
+  if (end < 0) throw new Error('常量定义未闭合: ' + header);
+  return src.slice(start, end + 1);
+}
+
 /* ================= A. 结构断言 ================= */
 
 console.log('\n[A] 结构断言');
@@ -152,6 +164,9 @@ console.log('\n[B] 行为断言（切片沙箱）');
 function buildSandbox(overrides) {
   overrides = overrides || {};
   const parts = [
+    // A8：startAutoCopyJob 里的大会话阈值判断引用了这两条模块级常量，沙箱必须带真身。
+    sliceConst(daemonSrc, 'const AUTO_COPY_LARGE_SESSION_BYTES'),
+    sliceConst(daemonSrc, 'const AUTO_COPY_LARGE_WARNING'),
     sliceBlock(daemonSrc, 'class AutoCopyPausedError extends Error'),
     sliceBlock(daemonSrc, 'function isAutoCopyPausedError(error)'),
     sliceBlock(daemonSrc, 'function pruneAutoCopyJobs()'),
@@ -160,7 +175,7 @@ function buildSandbox(overrides) {
     sliceBlock(daemonSrc, 'function publicAutoCopyJob(job)'),
   ];
   const logs = [];
-  const calls = { copy: 0, payload: 0, payloadOnFile: 0 };
+  const calls = { copy: 0, payload: 0, payloadOnFile: 0, recorded: 0 };
   const plan = overrides.plan || [
     { id: 's1', label: 'sess-1', sizeBytes: 10, workspaceBytes: 0, workspaceFiles: 0 },
     { id: 's2', label: 'sess-2', sizeBytes: 10, workspaceBytes: 0, workspaceFiles: 0 },
@@ -211,6 +226,10 @@ function buildSandbox(overrides) {
       return Object.assign({ outcome: 'copied', linked: 0, linkedBytes: 0 }, counters);
     },
     yieldAutoCopyToRenderer: overrides.yieldFn || (async () => { await new Promise((r) => setTimeout(r, 0)); }),
+    // v1.4.3（A9）：worker 收尾时会调 recordAccountSyncResult 把「入向同步成败」记进
+    // 切号闸门的失败屏障。它定义在切号闸门块里（本切片不含），所以这里桩掉 + 计数。
+    // 本套件只关心暂停语义，记账本身的判据由 test-automation-protocol-v3.js 覆盖。
+    recordAccountSyncResult: () => { calls.recorded++; },
   };
   const names = Object.keys(scope);
   const fn = new Function(...names, parts.join('\n') + '\nreturn { startAutoCopyJob, publicAutoCopyJob, autoCopyJobs, autoCopyQueue, activeAutoCopyJob: null };');

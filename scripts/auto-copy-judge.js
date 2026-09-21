@@ -14,6 +14,15 @@
  *      由 copySessionWorkspacePayload 的「目标侧不落后才跳过」兜底 —— 排除是**延续该裁决**。
  *   ② 指纹 memo —— 成员的文件元数据指纹没变，就整份复用上次的快照，跳过读盘与 sha256。
  *      实测读一份 435MB 会话约 1.24s；21 条血缘 × N 成员每次切号全量哈希，代价不可接受。
+ *   ②b 文件级指纹缓存（上游 1.2.5 / A3，可选第 4 参 `fileCache`）—— **memo 未命中**时才用得上：
+ *      memo 是「整份快照」级、进程内、有 TTL；一旦失效（TTL 到期 / daemon 重启 / 真的改了一个
+ *      文件）就得重读整份。A3 把粒度降到**文件**——size/mtime/ctime 三元组没变的文件直接复用
+ *      已存 hash/semantic/records，只重读真正变了的那几个。两者互补，不是重复：
+ *        memo 命中 → 0 次读盘；memo 未命中 + A3 命中 → 只读变化文件。
+ *      缓存由 daemon 持有（落盘 session-sync-cache.json，见 daemon 侧 getSessionSyncCache），
+ *      本模块只做**透传**，不自建缓存、不改上游语义。传 null 即退回逐字节全读。
+ *      ⚠️ 参数名是 `fileCache` 不是 `cache`：本模块模块级已有一个 `cache`（快照级 memo），
+ *      同名会把 memo 查表悄悄遮换成 A3 查表 —— 那种错不会报错，只会让 memo 永久 miss。
  *   ③ 统一的读入口 + 一个「slim 快照不许拿去写盘」的硬护栏。
  *   ④ 事务写入的**备份清理**（pruneSessionSyncBackups）—— 见下。
  *
@@ -133,10 +142,15 @@ function remember(root, id, aliases, walked, slim) {
 }
 
 /**
- * 判定用快照（slim，不含 bytes）。命中缓存时不做任何文件读取，也不做 sha256。
+ * 判定用快照（slim，不含 bytes）。命中 memo 时不做任何文件读取，也不做 sha256。
  * ⚠️ 只能喂给 compareSnapshots / selectTargetSnapshot，**不能**喂给 applySnapshot。
+ *
+ * @param {Map|null} [fileCache] 上游 1.2.5 / A3 的**文件级**指纹缓存（daemon 侧落盘
+ *   session-sync-cache.json）。⚠️ 命名刻意不叫 `cache` —— 本模块模块级已有一个 `cache`
+ *   （快照级 memo），同名会把它遮住、把 memo 查表悄悄换成 A3 查表。
+ *   只在 memo 未命中时才起作用；null/省略 = 退回逐字节全读（与改动前逐行等价）。
  */
-function readJudgedSnapshot(root, id, aliases = []) {
+function readJudgedSnapshot(root, id, aliases = [], fileCache = null) {
   const resolved = path.resolve(root);
   assertSessionId(id);
   const skip = new Set(JUDGE_SKIP_PREFIXES);
@@ -153,20 +167,20 @@ function readJudgedSnapshot(root, id, aliases = []) {
   }
   stats.misses += 1;
   stats.reads += 1;
-  const full = sessionSync.readSnapshot(resolved, id, aliases, { skipPrefixes: judgeSkipPrefixes() });
+  const full = sessionSync.readSnapshot(resolved, id, aliases, { skipPrefixes: judgeSkipPrefixes() }, fileCache);
   // 只构造一次 slim：存进缓存的那份与返回给调用方的**必须是同一个对象**，
   // 否则「命中即复用」名不副实，而且每次 miss 都白白多分配一份 Map。
   return remember(resolved, id, aliases, walked, slimOf(full));
 }
 
 /** 写盘用快照（含 bytes）。总是重新读 —— 不能拿缓存去写盘。 */
-function readWritableSnapshot(root, id, aliases = []) {
+function readWritableSnapshot(root, id, aliases = [], fileCache = null) {
   const resolved = path.resolve(root);
   assertSessionId(id);
   const skip = new Set(JUDGE_SKIP_PREFIXES);
   const walked = walkFingerprint(resolved, id, skip);
   stats.reads += 1;
-  const full = sessionSync.readSnapshot(resolved, id, aliases, { skipPrefixes: judgeSkipPrefixes() });
+  const full = sessionSync.readSnapshot(resolved, id, aliases, { skipPrefixes: judgeSkipPrefixes() }, fileCache);
   remember(resolved, id, aliases, walked, slimOf(full));
   return full;
 }
@@ -273,4 +287,6 @@ module.exports = {
   selectTargetSnapshot: sessionSync.selectTargetSnapshot,
   applySnapshot: sessionSync.applySnapshot,
   readSnapshotFull: sessionSync.readSnapshot,
+  // A7：作业级「计划总体积」分母。与上面几项同理 —— daemon 只 require 本模块一处。
+  readSessionSizes: sessionSync.readSessionSizes,
 };

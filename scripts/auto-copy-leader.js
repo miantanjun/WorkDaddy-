@@ -175,13 +175,17 @@ function contentLeader(entries, options = {}) {
  *        ①compareSnapshots 靠它把 sessionId/ownerConversationId 归一化，缺了会把同一份内容的
  *          不同副本判成 conflict；②auto-copy-judge 的缓存键含 alias 集合，传变来变去的集合会频繁 miss。
  * @param {string}   [options.preferredId]
+ * @param {Map}      [options.cache] 上游 1.2.5 / A3 的**文件级**指纹缓存，透传给
+ *        auto-copy-judge（它再透传给 sessionSync.readSnapshot 的第 5 参）。
+ *        只在 judge 的快照级 memo 未命中时才起作用；省略 = 逐字节全读（旧行为）。
  * @param {Function} [options.readSnapshot] 注入读快照（测试用）；缺省走 auto-copy-judge。
  */
 function resolveContentLeader(root, members, options = {}) {
   const aliases = Array.isArray(options.aliases) ? options.aliases.filter(Boolean).map(String) : [];
+  const fileCache = options.cache || null;
   const readSnapshot = typeof options.readSnapshot === 'function'
     ? options.readSnapshot
-    : (id) => judge.readJudgedSnapshot(root, id, aliases);
+    : (id) => judge.readJudgedSnapshot(root, id, aliases, fileCache);
   const entries = (Array.isArray(members) ? members : []).map((member) => {
     const id = String((member && member.id) || '').trim();
     const uid = String((member && member.uid) || '').trim();

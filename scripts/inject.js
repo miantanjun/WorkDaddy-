@@ -1058,8 +1058,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '连接新服务…': 'Connecting to service…', '等待中': 'Waiting', '运行中': 'Running', '空闲': 'Idle', '已中断': 'Interrupted', '已停止': 'Stopped', '未确认': 'Unconfirmed', '等待确认': 'Waiting for confirmation', '等待新回复': 'Waiting for a new reply', '等待会话': 'Waiting for session', '等待允许': 'Waiting for approval', '整理中': 'Organizing', '恢复中': 'Restoring', '即将完成…': 'Finishing…', '已继续': 'Continued', '检测到会话异常中断，即将自动发送「': 'An interrupted session was detected. Sending “', '自动发送失败，请手动点击发送': 'Automatic send failed. Please click Send manually', '底层发送失败，请手动发送': 'Underlying send failed. Please send manually',
     '导入中…': 'Importing…', ' 个任务': ' task(s)', '导入任务': 'Import tasks', '导出任务': 'Export tasks', '请先勾选要导出的任务': 'Select tasks to export first', '选择 JSON 或 ZIP 任务文件': 'Choose a JSON or ZIP task file', '读取任务文件…': 'Reading task file…', '任务导出成功': 'Tasks exported', '导入失败': 'Import failed', '导出失败': 'Export failed', '可导入': 'Ready to import', '已存在，将跳过': 'Already exists; skipped', '不兼容，无法导入': 'Incompatible; cannot import', '导入后保持停用，可在任务列表中启用。相同 ID 的任务会跳过。': 'Imported tasks stay disabled until you enable them. Existing task IDs are skipped.', '任务文件不能超过 8 MiB': 'Task files must not exceed 8 MiB', '缺少必填参数': 'Required inputs are missing', '需要更新 WorkDaddy': 'Requires a newer WorkDaddy version', '不支持当前客户端或系统': 'Unsupported client or platform', '文件不是自动化任务 JSON': 'Not an automation task JSON file', '任务格式或能力不受支持': 'Unsupported task format or capabilities',
     '发现更多自动化任务': 'Discover more automations', '正在发现…': 'Discovering…', '搜索任务名称': 'Search task names', '没有匹配的任务': 'No matching tasks', '暂未发现公开任务': 'No public tasks found', '公开任务加载失败': 'Could not load public tasks', '这些任务来自互联网公开仓库，均为第三方内容，与 WorkDaddy 无归属关系。导入后默认停用，请先安全评估再启用。': 'These tasks come from public repositories and are third-party content unaffiliated with WorkDaddy. Imported tasks stay disabled; review them before enabling.', '部分来源暂时无法访问，当前显示上次缓存的结果。': 'Some sources are unavailable. Showing cached results.', '暂无说明': 'No description', '不兼容': 'Incompatible', '无法打开仓库': 'Could not open repository', '任务已导入，启用后生效': 'Task imported. Enable it to run.', '任务已存在，未重复导入': 'Task already exists and was not imported again.', '我也要出现在这里': 'Publish my tasks', '提交公开任务': 'Publish public tasks', '收录 GitHub 和 Gitee 公开仓库。参考': 'Public GitHub and Gitee repositories are indexed. See', '将任务 JSON 放在 tasks/ 目录，并在仓库描述中加入 WorkDaddyAutomationRepository。': 'Put task JSON files in tasks/ and add WorkDaddyAutomationRepository to the repository description.', '查看示例仓库': 'View example repository', '上一页': 'Previous', '下一页': 'Next', ' · 匹配 ': ' · Matches ', '安全评估': 'Safety review', '评估中…': 'Reviewing…', '安全评估会话已创建': 'Safety review session created', '安全评估失败': 'Safety review failed', '会话创建失败': 'Could not create the session', '无法读取评估状态': 'Could not read review status', '未返回安全评估运行记录': 'No safety review run was returned', '无法创建会话': 'Could not create a session', '评估会话仍在创建，请稍后查看 WorkBuddy': 'The review session is still being created. Check WorkBuddy shortly.',
-    '会话同步完成': 'Session sync complete', '会话同步完成，发现冲突': 'Session sync complete with conflicts', '会话同步完成，部分项目失败': 'Session sync complete with some failures', '会话同步等待中': 'Session sync waiting', '正在同步会话': 'Syncing session', '会话同步失败': 'Session sync failed', '同步等待中': 'Sync waiting', '同步失败': 'Sync failed', '同步': 'Sync', '已同步': 'Synced', ' · 新同步': ' · Newly synced ', ' · 有': ' · ', ' 项需要留意': ' item(s) need attention', ' · 请稍后重试': ' · Try again later', '会话同步进度': 'Session sync progress', ' 个会话两边都修改过，未覆盖任何一边': ' session(s) were changed on both sides; neither side was overwritten', '其他账号': 'Other account', '同步完成': 'Sync complete', '同步完成，发现冲突': 'Sync complete with conflicts', '同步完成，部分失败': 'Sync complete with some failures', '正在把已标记的会话同步到「': 'Syncing marked sessions to “', ' 个未变化会话': ' unchanged session(s)', '同步任务未完成，请稍后重试': 'Sync did not finish. Try again later',
-    ' · 跳过': ' · Skipped', ' · 冲突': ' · Conflicts', '成功': 'Succeeded', '跳过': 'Skipped', '已跳过': 'Skipped', '部分失败': 'Partial failure', '冲突': 'Conflict', '处理中': 'Processing', '两边都修改过，未覆盖': 'Changed on both sides; neither side was overwritten', '部分文件失败': 'Some files failed', '当前任务未记录逐项明细。': 'No per-session details were recorded for this task.', '会话同步明细': 'Session sync details', '会话同步结果筛选': 'Filter session sync results', '当前分类没有会话。': 'No sessions in this category.', '正在把已标记的会话从「': 'Syncing marked sessions from “', '」同步到「': '” to “', '查看明细': 'View details', ' 个候选会话': ' candidate session(s)', ' 秒后自动关闭': ' seconds until automatic close', '会话同步完成，有会话分叉': 'Session sync complete with branched sessions', ' 个会话两边各自分叉，已保留双方，未覆盖任何一边': ' session(s) branched on both sides; both copies were kept and neither was overwritten',
+    '会话同步完成': 'Session sync complete', '会话同步完成，发现冲突': 'Session sync complete with conflicts', '会话同步完成，部分项目失败': 'Session sync complete with some failures', '会话同步等待中': 'Session sync waiting', '正在同步会话': 'Syncing session', '会话同步失败': 'Session sync failed', '同步等待中': 'Sync waiting', '同步失败': 'Sync failed', '同步': 'Sync', '已同步': 'Synced ', ' · 新同步': ' · Newly synced ', ' · 有': ' · ', ' 项需要留意': ' item(s) need attention', ' · 请稍后重试': ' · Try again later', '会话同步进度': 'Session sync progress', ' 个会话两边都修改过，未覆盖任何一边': ' session(s) were changed on both sides; neither side was overwritten', '其他账号': 'Other account', '同步完成': 'Sync complete', '同步完成，发现冲突': 'Sync complete with conflicts', '同步完成，部分失败': 'Sync complete with some failures', '正在把已标记的会话同步到「': 'Syncing marked sessions to “', ' 个未变化会话': ' unchanged session(s)', '同步任务未完成，请稍后重试': 'Sync did not finish. Try again later',
+    ' · 跳过': ' · Skipped ', ' · 冲突': ' · Conflicts', '成功': 'Succeeded', '跳过': 'Skipped', '已跳过': 'Skipped', '部分失败': 'Partial failure', '冲突': 'Conflict', '处理中': 'Processing', '两边都修改过，未覆盖': 'Changed on both sides; neither side was overwritten', '部分文件失败': 'Some files failed', '当前任务未记录逐项明细。': 'No per-session details were recorded for this task.', '会话同步明细': 'Session sync details', '会话同步结果筛选': 'Filter session sync results', '当前分类没有会话。': 'No sessions in this category.', '正在把已标记的会话从「': 'Syncing marked sessions from “', '」同步到「': '” to “', '查看明细': 'View details', ' 个候选会话': ' candidate session(s)', ' 秒后自动关闭': ' seconds until automatic close', '会话同步完成，有会话分叉': 'Session sync complete with branched sessions', ' 个会话两边各自分叉，已保留双方，未覆盖任何一边': ' session(s) branched on both sides; both copies were kept and neither was overwritten',
     '收录 GitHub 和 Gitee 公开仓库。参考 ': 'Public GitHub and Gitee repositories are indexed. See ', '。': '.', '克隆示例仓库：': 'Clone the example repository: ', '删除 ': 'Delete ', ' 目录中不需要的示例任务。': ' directory tasks you do not need.', '把你的自动化任务 JSON 放进 ': 'Put your automation task JSON in ', ' 目录。': ' directory.', '提交改动并推送到 GitHub 或 Gitee。': 'Commit and push changes to GitHub or Gitee.', '在仓库简介中加入关键词 ': 'Add the keyword ',
     '导出账号': 'Export accounts', '导入账号': 'Import accounts', '导出会话': 'Export sessions', '导入会话': 'Import sessions', '导出快捷短语': 'Export quick phrases', '导入快捷短语': 'Import quick phrases', '同步选中到其他账号': 'Sync selected to another account', '删除选中': 'Delete selected', '操作会话': 'Session actions', '连通测试': 'Test connection', '编辑模型': 'Edit model', '模型已保存': 'Model saved', '模型已启用': 'Model enabled', '模型已复制': 'Model copied', '模型配置已共用': 'Model configuration shared', '当前模型': 'Current model', '备选模型': 'Backup models', '模型加载失败：': 'Failed to load models: ', '保存模型失败：': 'Failed to save model: ', '删除当前模型失败：': 'Failed to delete current model: ', '启用模型失败：': 'Failed to enable model: ', '连通测试失败：': 'Connection test failed: ',
     '选择要查看的账号': 'Choose an account to view', '选择账号并输入密码后导出备份': 'Choose accounts and enter a password to export backups', '从加密导出文件导入账号备份': 'Import account backups from an encrypted export', '使用密码导出选中会话': 'Export selected sessions with a password', '使用密码导出选中快捷短语': 'Export selected quick phrases with a password', '从加密文件导入会话': 'Import sessions from an encrypted file', '从加密文件导入快捷短语': 'Import quick phrases from an encrypted file', '仅支持 PNG / JPG / WebP': 'PNG / JPG / WebP only', '点击或拖拽上传壁纸': 'Click or drag to upload a wallpaper', '点击选择图片，或拖拽到此处': 'Click to choose an image, or drag it here', '支持 PNG / JPG / WebP，自动压缩；可添加多张': 'PNG / JPG / WebP supported; images are compressed automatically',
@@ -1107,7 +1107,28 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '悬停预览，点击或拖动快速定位消息。': 'Hover to preview; click or drag to jump to a message.',
     '选中会话消息文字后，一键插入输入框。': 'After selecting session message text, insert it into the composer with one click.',
     '发送后不会自动删除。': 'Not deleted automatically after sending.', '需要我决策时弹窗确认（全局生效）': 'Ask me with a dialog when my decision is needed (applies globally)',
-    '自动化接口协议 V2': 'Automation interface protocol V2',
+    '自动化接口协议 V3': 'Automation interface protocol V3', '等待会话同步': 'Waiting for session sync ', '切换账号中': 'Switching account ', '同步会话中': 'Syncing sessions ', '恢复原账号': 'Restoring the original account ', '正在安全停止': 'Stopping safely ', '等待同步安全收尾': 'Waiting for sync to finish safely ', '会话超过 100 MB，同步可能较慢': 'Session exceeds 100 MB; syncing may take longer',
+    '体积': 'Size', '账号总量 ': 'Account total ',
+    '账号全部会话的总体积（不受筛选影响）': 'Total size of all sessions in this account (unaffected by filters)',
+    '平均复制速率': 'Average copy rate ', '/秒': '/s ',
+    // —— 第五批：会话同步进度面板（A7 数据量/速率显示补齐）——
+    // 面板文案是**动态拼接**的，任何一段漏典都会被别的短条撕成中英混合，
+    // 所以这里按「片段 + 前后分隔符」整段入典，而不是只收孤立词。
+    '第 ': 'No. ', ' 个 · 共 ': ' of ',
+    ' · 已复制 ': ' · Copied ', ' · 失败 ': ' · Failed ',
+    ' · 已用 ': ' · Elapsed ', ' · 用时 ': ' · Took ',
+    '正文已完成 ': 'Body done ', '正文 ': 'Body ',
+    ' · 产物 ': ' · Payload ', ' · 文件 ': ' · Files ',
+    ' · 硬链接已省 ': ' · Hard links saved ', ' · 硬链接省 ': ' · Hard links saved ',
+    '正在搬运产物「': 'Moving payload “', '」': '”',
+    '正在准备复制计划…': 'Preparing the copy plan…',
+    '同步已暂停': 'Sync paused', '会话复制完成': 'Session copy complete',
+    ' · 点「继续同步」只搬剩下的': ' · Tap “Resume sync” to move only what is left ',
+    '复制完成（有失败项）': 'Copy complete (with failures)', '自动复制失败': 'Auto copy failed',
+    '任务异常终止': 'Task terminated unexpectedly',
+    '暂停': 'Pause', '继续同步': 'Resume sync',
+    '暂停同步：停下正在搬运的会话，之后可以「继续同步」接着搬': 'Pause sync: stops the session being moved; resume it later with “Resume sync”',
+    '继续同步：只搬运尚未完成的部分（已复制的会话会被跳过）': 'Resume sync: moves only what is left (sessions already copied are skipped)',
     '检测到会话异常中断，自动让它继续': 'Detected an interrupted session; letting it continue automatically.',
     '暂存想法择机发送，发送后自动删除': 'Stashed thoughts send at an opportunity, then are deleted automatically.',
     '悬停预览，点击或拖动快速定位消息': 'Hover to preview; click or drag to jump to a message.',
@@ -1186,7 +1207,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '备份文件校验失败：uid 不匹配，已中止切换': 'Backup validation failed: uid mismatch; switch aborted',
     // —— 第六批：会话/模型批量操作 + 头像 + 修补剩余整句 ——
     '请先勾选要同步的会话': 'Select the sessions to sync first', '请先勾选要导出的会话': 'Select the sessions to export first', '请先勾选要删除的会话': 'Select the sessions to delete first',
-    '将加密导出': 'Export with encryption', '已导入': 'Imported', '已复制': 'Copied', '已同步': 'Synced', '已删除': 'Deleted', '请选择目标账号': 'Select the target account', '加载账号失败:': 'Account loading failed:',
+    '将加密导出': 'Export with encryption', '已导入': 'Imported', '已复制': 'Copied', '已同步': 'Synced ', '已删除': 'Deleted', '请选择目标账号': 'Select the target account', '加载账号失败:': 'Account loading failed:',
     '会话将导入到「': 'Importing sessions into “', '会话将保留导出时的账号归属。': 'Sessions keep the account ownership from export.',
     ' 个会话': ' session(s)', ' 个会话（已加密）': ' session(s) (encrypted)', ' 个会话及其本地消息附件。': ' session(s) and their local message attachments.', ' 个会话到…': ' session(s) to…', ' 个会话？': ' session(s)?',
     ' 个模型': ' model(s)', ' 个当前模型': ' current model(s)', ' 个模型备份': ' model backup(s)',
@@ -1205,7 +1226,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '复制选中快捷短语': 'Copy selected quick phrases',
     '开启后 WorkBuddy 需要你决策时会用弹窗提问（写入全局自定义指令，所有会话生效）': 'When enabled, WorkBuddy asks with a dialog when your decision is needed (written to the global custom prompt; affects all sessions)',
     '当前没有进行中的会话，无法开启「所有会话结束允许休眠」': 'No active sessions; cannot enable “Allow sleep when all sessions end”',
-    '进行中的会话': 'active session(s)', '预计剩余': 'Estimated remaining', ' 秒': ' seconds', ' 分': ' minutes',
+    '进行中的会话': 'active session(s)', '预计剩余': 'Estimated remaining', ' 秒': ' seconds ', ' 分': ' min ',
     '无法打开安装程序': 'Could not open the installer',
     '安装程序已打开，请按提示退出 WorkBuddy 并完成安装。': 'The installer is open. Please quit WorkBuddy as prompted and finish installing.',
     '停止旧服务…': 'Stopping old service…', '发现新版本，准备更新…': 'New version available; preparing to update…',
@@ -1248,7 +1269,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '输入导出时设置的密码；已有的相同短语会自动跳过。': 'Enter the password set for export; identical existing phrases are skipped automatically.',
     '允许电脑休眠（系统默认）': 'Allow computer sleep (system default)', '持续禁止休眠（保持唤醒）': 'Keep awake (prevent sleep)',
     // —— 第十一批：休眠模式说明整句 + 时间前导空格变体 ——
-    ' 分钟': ' minutes',
+    ' 分钟': ' min ',
     '所有会话结束允许休眠（暂禁休眠）': 'Allow sleep when all sessions end (sleep blocked)',
     '休眠模式已切换为「': 'Sleep mode switched to “',
     '所有进行中的会话已完成，已自动恢复「允许电脑休眠」': 'All active sessions finished; “Allow computer sleep” restored automatically',
@@ -1385,7 +1406,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     'Token 用量': 'Token usage', '正在读取统计…': 'Loading statistics…', '搜索': 'Search', '重置': 'Reset', '调用': 'Calls', '输入': 'Input', '输出': 'Output', '导入方式': 'Import method', '复制提示词': 'Copy prompt', '导入 WorkDaddy 加密文件': 'Import WorkDaddy encrypted file', '导入 WorkDaddy 导出的账号备份，选择文件后输入导出密码。': 'Import an account backup exported by WorkDaddy, then enter its export password.', '导入 JSON 文件': 'Import JSON file', '可以导入其他工具导出的明文账号。请先让 WorkBuddy 按指定格式整理，再选择生成的 JSON 文件。': 'Import plain-text accounts exported by another tool. Ask WorkBuddy to convert them to the required format, then choose the generated JSON file.', '把其他工具导出的账号文本发给 WorkBuddy，让它只输出符合 WorkDaddy 格式的 JSON，然后复制保存为文件。': 'Send the account text exported by another tool to WorkBuddy. Ask it to output only WorkDaddy-compatible JSON, then save it as a file.', '提示词已复制': 'Prompt copied', '选择文件': 'Choose file',
     '缓存读取': 'Cache read', '缓存写入': 'Cache write',
     ' 个文件，解析失败': ' files, parse failures', ' 行': ' lines', '暂无可统计的 Token 用量': 'No Token usage found',
-    '当前积分段已用完': 'The current credit segment is used up', '积分将在': ' credits expire in', '到期': ' expires', '要切换账号吗？': 'Switch account?', '可以切换到账号': 'Can switch to account', '检测到积分到期时间最临近的账号': 'The account with the nearest credit expiry is', '积分将于': ' credits expire within', '内过期': '', '较长时间': 'a long time', ' 小时 ': ' hr ', ' 分': ' min',
+    '当前积分段已用完': 'The current credit segment is used up', '积分将在': ' credits expire in', '到期': ' expires', '要切换账号吗？': 'Switch account?', '可以切换到账号': 'Can switch to account', '检测到积分到期时间最临近的账号': 'The account with the nearest credit expiry is', '积分将于': ' credits expire within', '内过期': '', '较长时间': 'a long time', ' 小时 ': ' hr ', ' 分': ' min ',
     '切换到此账号': 'Switch to this account', '今天不再提醒': 'Do not remind me again today', '关闭': 'Close',
     '切换中…': 'Switching…', 'Token 用量统计': 'Token usage statistics', ' 分钟后': ' minutes', ' 小时后': ' hours', ' 天后': ' days',
     '未设置时间': 'no expiry time', '时间': 'Time', '近 7 天': 'Last 7 days', '近 30 天': 'Last 30 days', '近 90 天': 'Last 90 days',
@@ -6496,7 +6517,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       automationPane.dataset.built = '1';
       var automationState = { tasks: [], runs: [], examples: [], selected: {}, batchMode: false, editingId: null, pollTimer: null, reviewPollTimer: null, reviewingId: null, stopping: {}, agentDraft: '', agentCreating: false, discovery: null, discoveryLoading: true, discoveryError: '' };
       function defaultTask() {
-        return { schemaVersion: 2, id: 'task_' + Date.now().toString(36), name: '新自动化任务', description: '', enabled: true, concurrency: { policy: 'skip' }, trigger: { type: 'manual', oncePerNavigation: true }, variables: {}, steps: [] };
+        return { schemaVersion: 3, id: 'task_' + Date.now().toString(36), name: '新自动化任务', description: '', enabled: true, concurrency: { policy: 'skip' }, trigger: { type: 'manual', oncePerNavigation: true }, variables: {}, steps: [] };
       }
       function triggerBadgesHtml(task) {
         var trigger = task.trigger || {};
@@ -6511,10 +6532,32 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         if (!names.length) names.push('手动触发');
         return names.map(function (name) { return '<span class="wbs-auto-trigger-chip">' + esc(name) + '</span>'; }).join('');
       }
+      // B6（协议 V3）：run-status 的相位文案。daemon 侧相位由 automationSwitchProgress 产出：
+      // queued / waiting-sync / switching-account / syncing-sessions / restoring-account /
+      // executing / stopping / stopping-sync。未识别相位一律退回「执行中」——
+      // **绝不把原始英文相位名透到界面上**（那会变成「英语界面里夹一个英文枚举值」）。
+      var AUTO_PHASE_LABELS = { queued: '排队中', 'waiting-sync': '等待会话同步', 'switching-account': '切换账号中', 'syncing-sessions': '同步会话中', 'restoring-account': '恢复原账号', executing: '执行中', stopping: '正在安全停止', 'stopping-sync': '等待同步安全收尾' };
+      // 「同步 X/Y」后缀：daemon 只有在真的等某次入向同步时才有 run.sync。
+      // 纯数字 + 斜杠语言无关、不需要入典；但必须**拼在整句 label 之后**，否则短词条会把句子撕开。
+      function autoSyncSuffix(run) {
+        var sync = run && run.sync;
+        if (!sync || sync.total == null) return '';
+        return ' ' + Number(sync.processed || 0) + '/' + Number(sync.total || 0);
+      }
+      // B6：协议版本标题。词典只收**当前**协议版本；老 daemon 报不出 supportedSchemaVersions
+      // （或报了意料之外的版本）时退化成不带版本号的标题，绝不让没入典的串漏到界面上。
+      var AUTO_PROTOCOL_LABELS = { 3: '自动化接口协议 V3' };
+      function autoProtocolLabel(versions) {
+        var list = (Array.isArray(versions) ? versions : []).map(Number).filter(function (n) { return Number.isFinite(n); });
+        return (list.length ? AUTO_PROTOCOL_LABELS[Math.max.apply(null, list)] : '') || '自动化接口协议';
+      }
       function taskStatusLabel(task, run, stopping) {
         if (task.compatible === false) return '任务不兼容';
-        if (stopping) return '正在停止…';
-        if (run && run.status === 'running') return run.phase === 'queued' ? '排队中' : '执行中';
+        var phase = String(run && run.phase || '');
+        // 相位优先：running 时按 daemon 相位显示；收尾窗口（已点停止 / daemon 已受理
+        // stopRequested）即使 status 已被置成 cancelled，也仍按收尾相位显示。
+        if (run && run.status === 'running') return (AUTO_PHASE_LABELS[phase] || (stopping ? '正在安全停止' : '执行中')) + autoSyncSuffix(run);
+        if (stopping) return (AUTO_PHASE_LABELS[phase] || '正在安全停止') + autoSyncSuffix(run);
         if (!task.enabled && !task.manualRunnable) return '已停用';
         var events = task.trigger && (Array.isArray(task.trigger.types) ? task.trigger.types : [task.trigger.type]) || [];
         if (task.schedule && task.schedule.type === 'once' && new Date(task.schedule.at).getTime() + 60000 <= Date.now() && !events.some(function (type) { return type && type !== 'manual'; })) return '定时已结束';
@@ -6556,11 +6599,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
               if (!still) delete automationState.stopping[rid];
             });
           }
-          var stopping = running && run && !!automationState.stopping[run.id]; // 已点停止、等待 daemon 确认结束
+          var runPhase = String(run && run.phase || '');
+          // B6：停止态有两个来源 —— 本地「已点停止等确认」，和 daemon 已受理的 stopRequested。
+          // ⚠️ daemon 出于既有语义会在受理停止时**立刻**置 status='cancelled'，所以收尾窗口里
+          // running 已经是 false，必须靠 stopRequested + 收尾相位自己认出来（否则「正在安全停止」永远不显示）。
+          var draining = !!(run && run.stopRequested && (runPhase === 'stopping' || runPhase === 'stopping-sync'));
+          var stopping = !!(run && (running ? (!!automationState.stopping[run.id] || !!run.stopRequested) : draining));
           var active = running || stopping;
           var check = automationState.batchMode ? '<label class="wbs-auto-check"><input type="checkbox" data-auto-select="' + escAttr(task.id) + '"' + (automationState.selected[task.id] ? ' checked' : '') + '><span></span></label>' : '';
           var stateClass = active ? 'running' : !task.enabled && !task.manualRunnable ? 'off' : 'idle';
-          var action = running ? '<button type="button" class="wbs-auto-icon is-running' + (stopping ? ' is-stopping' : '') + '" data-auto-stop="' + escAttr(run.id) + '" title="' + (stopping ? '正在停止…' : '停止本次执行') + '" aria-label="' + (stopping ? '正在停止…' : '停止本次执行') + '" aria-busy="true"' + (stopping ? ' disabled' : '') + '>' + (stopping ? AUTO_STOPPING_SVG : AUTO_STOP_SVG) + '</button>'
+          var action = running ? '<button type="button" class="wbs-auto-icon is-running' + (stopping ? ' is-stopping' : '') + '" data-auto-stop="' + escAttr(run.id) + '" title="' + (stopping ? '正在安全停止' : '停止本次执行') + '" aria-label="' + (stopping ? '正在安全停止' : '停止本次执行') + '" aria-busy="true"' + (stopping ? ' disabled' : '') + '>' + (stopping ? AUTO_STOPPING_SVG : AUTO_STOP_SVG) + '</button>'
             : task.manualRunnable ? '<button type="button" class="wbs-auto-icon" data-auto-run="' + escAttr(task.id) + '" title="立即运行" aria-label="立即运行">' + MODEL_ENABLE_SVG + '</button>' : '';
           row.innerHTML = '<div class="wbs-auto-row-head">' + check + '<div class="wbs-auto-name"' + (wbsBuiltinAutomationText(task, 'name') ? '' : ' data-wbs-i18n-skip="1"') + ' title="' + escAttr(task.name) + '">' + esc(task.name) + '</div>' +
             '<button type="button" class="wbs-auto-review" data-auto-review="' + escAttr(task.id) + '" title="安全评估"' + (automationState.reviewingId ? ' disabled' : '') + '>' + (automationState.reviewingId === task.id ? '评估中…' : '安全评估') + '</button>' +
@@ -7235,7 +7283,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           closePanelModal((panel || root).querySelector('#wbs-auto-protocol-mask'));
           var protocol = WBS_LANGUAGE === 'zh' ? result.protocolZh : result.protocolEn;
           var mask = document.createElement('div'); mask.id = 'wbs-auto-protocol-mask'; mask.className = 'wbs-modal-mask wbs-modal-mask-panel wbs-auto-dialog-mask';
-          mask.innerHTML = '<div class="wbs-modal wbs-auto-cap-modal" role="dialog" aria-modal="true" aria-labelledby="wbs-auto-protocol-title"><div class="wbs-modal-title" id="wbs-auto-protocol-title">自动化接口协议</div><pre class="wbs-auto-protocol"></pre><div class="wbs-modal-actions"><button class="wbs-modal-btn" data-auto-close type="button">关闭</button></div></div>';
+          mask.innerHTML = '<div class="wbs-modal wbs-auto-cap-modal" role="dialog" aria-modal="true" aria-labelledby="wbs-auto-protocol-title"><div class="wbs-modal-title" id="wbs-auto-protocol-title">' + autoProtocolLabel(result.supportedSchemaVersions) + '</div><pre class="wbs-auto-protocol"></pre><div class="wbs-modal-actions"><button class="wbs-modal-btn" data-auto-close type="button">关闭</button></div></div>';
           mask.querySelector('.wbs-auto-protocol').textContent = String(protocol || '');
           mountAutomationModal(mask);
         }).catch(function (e) { toast(e.message || '读取接口失败', true, root); });
@@ -7414,7 +7462,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
 
     // ===== 会话 pane（构建：账号/时间筛选 + 按空间分组[默认2条/展开10条] + 刷新 + 批量操作[迁移/删除]）=====
-    var sessionsState = { uid: undefined, currentUid: '', range: 'all', list: [], selected: {}, wsExpanded: {}, accounts: [], batchMode: false, autoCopy: null, autoCopyAll: false, autoCopyJob: null, autoCopyPollTimer: null };
+    var sessionsState = { uid: undefined, currentUid: '', range: 'all', minBytes: 0, all: [], totalBytes: null, list: [], selected: {}, wsExpanded: {}, accounts: [], batchMode: false, autoCopy: null, autoCopyAll: false, autoCopyJob: null, autoCopyPollTimer: null };
     function isTaskSessionRecordUI(s) {
       // 任务（未选择项目/一次性）会话：以官方 is_playground=1 为准。
       // 普通工作区也用 WorkBuddy\\YYYY-MM-DD-HH-MM-SS 命名，仅凭 cwd 无法区分。
@@ -7502,6 +7550,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<button class="wbs-sess-seg-btn" type="button" data-range="7d">近 7 天</button>' +
         '<button class="wbs-sess-seg-btn" type="button" data-range="30d">近 30 天</button>' +
         '<button class="wbs-sess-seg-btn active" type="button" data-range="all">全部</button>' +
+        '</div></div>' +
+        '<div class="wbs-sess-filter-row"><span class="wbs-sess-flabel">体积</span><div class="wbs-sess-seg" id="wbs-sess-size-seg">' +
+        '<button class="wbs-sess-seg-btn active" type="button" data-size="0">全部</button>' +
+        '<button class="wbs-sess-seg-btn" type="button" data-size="10485760">≥10 MB</button>' +
+        '<button class="wbs-sess-seg-btn" type="button" data-size="104857600">≥100 MB</button>' +
+        '<button class="wbs-sess-seg-btn" type="button" data-size="1073741824">≥1 GB</button>' +
         '</div></div>' +
         '</div>' +
         // 自动复制进度条：常驻在筛选行之下；切号会整页 reload，状态由
@@ -7761,6 +7815,22 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }).catch(function () {});
     }
 
+    // A10：体积筛选纯前端派生。daemon 一次给全量（含 totalBytes），换阈值时不再打接口 ——
+    // 账号总量是**全量口径**，跟筛选无关，所以它只认 sessionsState.totalBytes。
+    function sessSizeFiltered() {
+      var min = Number(sessionsState.minBytes) || 0;
+      var all = sessionsState.all || [];
+      if (!min) return all.slice();
+      return all.filter(function (s) { return typeof s.totalBytes === 'number' && s.totalBytes >= min; });
+    }
+
+    // A10：每行「时间 · 体积」。体积读不出来的行**不显示**（不写成 0 B 冒充）。
+    function sessMetaText(s) {
+      var text = fmtHumanTime(s.last_activity_at || s.updated_at || s.created_at);
+      if (typeof s.totalBytes === 'number' && isFinite(s.totalBytes) && s.totalBytes >= 0) text += ' · ' + fmtBytes(s.totalBytes);
+      return text;
+    }
+
     function loadSessions() {
       if (!sessionsPane) return;
       var listEl = sessionsPane.querySelector('#wbs-sess-list');
@@ -7771,7 +7841,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (sessionsState.uid !== undefined) url += '&uid=' + encodeURIComponent(sessionsState.uid);
       api(url).then(function (d) {
         // 任务会话（is_playground=1）保留在列表中，由渲染层归入「任务」分组展示与操作。
-        sessionsState.list = ((d && d.sessions) || []);
+        // A10：all 保留全量结果（体积筛选从它派生），totalBytes 是全量账号总量。
+        sessionsState.all = ((d && d.sessions) || []);
+        sessionsState.totalBytes = (d && typeof d.totalBytes === 'number') ? d.totalBytes : null;
+        sessionsState.list = sessSizeFiltered();
         sessionsState.autoCopy = (d && d.autoCopy) || null;
         sessionsState.autoCopyAll = !!(d && d.autoCopyAll);
         sessionsState.selected = {};
@@ -7840,7 +7913,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           html += '<div class="wbs-sess-row">' +
             (batch ? '<input type="checkbox" class="wbs-sess-check" data-id="' + escAttr(s.id) + '"' + sel + '>' : '') +
             '<span class="wbs-sess-main"><span class="wbs-sess-title">' + esc(title) + '</span>' +
-            '<span class="wbs-sess-meta">' + esc(fmtHumanTime(s.last_activity_at || s.updated_at || s.created_at)) + '</span></span>' +
+            '<span class="wbs-sess-meta">' + esc(sessMetaText(s)) + '</span></span>' +
             (batch ? '' : autoCopyButton('session', s.id, s.user_id, marked, inherited)) +
             '</div>';
         });
@@ -7871,7 +7944,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           html += '<div class="wbs-sess-row">' +
             (batch ? '<input type="checkbox" class="wbs-sess-check" data-id="' + escAttr(s.id) + '"' + sel + '>' : '') +
             '<span class="wbs-sess-main"><span class="wbs-sess-title">' + esc(title) + '</span>' +
-            '<span class="wbs-sess-meta">' + esc(fmtHumanTime(s.last_activity_at || s.updated_at || s.created_at)) + '</span></span>' +
+            '<span class="wbs-sess-meta">' + esc(sessMetaText(s)) + '</span></span>' +
             (batch ? '' : autoCopyButton('session', s.id, s.user_id, marked, inherited)) +
             '</div>';
         });
@@ -7890,7 +7963,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
     function updateSessionSummary(countEl) {
       if (!countEl) return;
+      // A10：账号总量是**全量口径**（含被时间/体积筛选挡掉的会话）⇒ 单独一段并显式标注，
+      // 免得用户在筛选视图里把它误读成「当前列表的体积」。读不出来就不显示（不拿 0 冒充）。
+      var sessTotalBytes = sessionsState.totalBytes;
       countEl.innerHTML = '<span class="wbs-sess-summary-tag">共 ' + sessionsState.list.length + ' 个会话</span>' +
+        ((typeof sessTotalBytes === 'number' && isFinite(sessTotalBytes) && sessTotalBytes > 0)
+          ? '<span class="wbs-sess-summary-tag" title="账号全部会话的总体积（不受筛选影响）">账号总量 ' + fmtBytes(sessTotalBytes) + '</span>' : '') +
         '<span class="wbs-sess-summary-tag wbs-sess-summary-auto">自动同步 ' + activeAutoCopyCount() + '</span>';
     }
     function updateAutoCopyAllButton() {
@@ -8132,6 +8210,21 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           sessionsState.selected = {};
           sessionsState.wsExpanded = {};
           loadSessions();
+        });
+      }
+      // 体积 Segment 组件（A10）：纯前端重新派生，不重新取数。
+      var sizeSeg = sessionsPane.querySelector('#wbs-sess-size-seg');
+      if (sizeSeg) {
+        sizeSeg.addEventListener('click', function (e) {
+          var b = e.target.closest ? e.target.closest('.wbs-sess-seg-btn') : null;
+          if (!b) return;
+          sizeSeg.querySelectorAll('.wbs-sess-seg-btn').forEach(function (x) { x.classList.toggle('active', x === b); });
+          sessionsState.minBytes = Number(b.getAttribute('data-size')) || 0;
+          sessionsState.selected = {};
+          sessionsState.wsExpanded = {};
+          sessionsState.list = sessSizeFiltered();
+          renderSessions();
+          updateSessCount();
         });
       }
       // 批量操作：进入批量模式（工具栏右侧按钮隐藏，批量按钮在同一行原位显示）。退出通过「取消」按钮
@@ -14203,6 +14296,25 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         + (Number(job && job.payloadFailedFiles) || 0);
     }
 
+    // A7：数据量 / 速率 / 建议三段的拼接串。daemon 只在实际写过、且分母完整时才给数，
+    // 所以这里**每段独立判空**——拿 0 硬凑出「已同步 0 B / 0 B」比不显示更糟（假数据）。
+    // 片段各自是独立词条（值带尾随空格），拼进整句时不会被短词条撕成中英混合。
+    function autoCopyMetricText(job) {
+      if (!job) return '';
+      var parts = [];
+      var copied = Number(job.copiedBytes);
+      if (job.copiedBytes != null && isFinite(copied) && copied > 0) {
+        var text = '已同步 ' + fmtBytes(copied);
+        var total = Number(job.totalBytes);
+        if (job.totalBytes != null && isFinite(total) && total > 0) text += ' / ' + fmtBytes(total);
+        parts.push(text);
+      }
+      var rate = Number(job.averageBytesPerSecond);
+      if (job.averageBytesPerSecond != null && isFinite(rate) && rate > 0) parts.push('平均复制速率 ' + fmtBytes(rate) + '/秒');
+      if (job.warning) parts.push(String(job.warning));
+      return parts.length ? ' · ' + parts.join(' · ') : '';
+    }
+
     // 已完成的任务只在结束后 2 分钟内保留展示，避免每次打开面板都弹旧结果。
     // 「已暂停」是用户主动留下的待续状态，不受 2 分钟窗口限制：只要任务还在（服务端
     // 30 分钟后回收），面板就应当显示它并提供「继续同步」。
@@ -14247,6 +14359,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var percent = denominator ? Math.round(numerator / denominator * 100) : (running ? 0 : 100);
       var headLabel = '';
       var sub = '';
+      // A7：五条分支共用同一段指标后缀，统一在 els.sub 赋值处拼接（见下方）。
+      var metric = autoCopyMetricText(job);
       if (running) {
         if (payloadPhase) {
           var fileTotal = Number(job.payloadFileTotal) || 0;
@@ -14295,7 +14409,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         if (els.label) els.label.textContent = headLabel;
         if (els.count) els.count.textContent = numerator + ' / ' + denominator;
         if (els.fill) els.fill.style.width = Math.max(0, Math.min(100, percent)) + '%';
-        if (els.sub) els.sub.textContent = sub;
+        if (els.sub) els.sub.textContent = sub + metric;
         // 按钮只在「跑动中」和「已暂停」两态出现；queued 也算跑动中（点暂停=整条流水线停）。
         if (els.btn) {
           if (running) {

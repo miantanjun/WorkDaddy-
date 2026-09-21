@@ -16,7 +16,7 @@ const crypto = require('crypto');
 const { UPSTREAM_SHA256, applyDeltas } = require('./session-sync.deltas.js');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const FIXTURE = path.join(__dirname, 'session-sync.upstream-1.2.4.js');
+const FIXTURE = path.join(__dirname, 'session-sync.upstream-1.2.5.js');
 const TARGET = path.join(ROOT, 'scripts', 'session-sync.js');
 
 const upstream = fs.readFileSync(FIXTURE, 'utf8');
