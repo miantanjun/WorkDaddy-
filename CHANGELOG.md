@@ -18,9 +18,20 @@
 
 ## v1.6.0 —— 2026-09-22
 
-**本版提交**：`5fe02b6`（省 token 专项 / 面板改造 / 上游基线对齐）· `de91b7f`（探针）· `8ebf8b3`（F2 二期 / A3 / D4）
+**本版提交**：`5fe02b6`（省 token 专项 / 面板改造 / 上游基线对齐）· `de91b7f`（探针）· `8ebf8b3`（F2 二期 / A3 / D4）· `de238f7`（本文档 + README）
 
 **质量门**：回归 **42 套件 / 2999 断言全绿**；daemon `1.6.0`（buildId `release-1.6.0-20260922-structured-error`）已重启并活体验证；上游基线 `1.2.5`。
+
+**发布**：GitHub Release [`v1.6.0`](https://github.com/miantanjun/WorkDaddy-/releases/tag/v1.6.0)（tag 指向 `de238f7`），CI run [`35748319036`](https://github.com/miantanjun/WorkDaddy-/actions/runs/35748319036) **16 步全绿**，4 资产齐备：
+
+| 资产 | 大小 | SHA-256 |
+|---|---|---|
+| `WorkDaddy-Setup-1.6.0.exe` | 29.0 MB | `a4cc57c67f96cb897d67daa433c2a637c17b716d10937368752c076bd2086cee` |
+| `WorkDaddy-AI-Setup-1.6.0.exe` | 29.0 MB | `75d5489642729ff72025e7aded319e0d278524828fc639df432e1b24cbc9492a` |
+| `WorkDaddy-Portable-1.6.0.zip` | 38.9 MB | `a0ab248807e80d86e4de7d8caa961972800f3dcfbbeae4c010aefbdd6c056cbf` |
+| `WorkDaddy-AI-Portable-1.6.0.zip` | 38.9 MB | `20bf952d2443937f7f994a025961ac11063817617139092afc04ecf3a9c0bf4c` |
+
+发版后**实下载便携版复验**（不只看 CI 绿）：新模块 `structured-error.js` / `context-audit.js` / `context-fix.js` / `memory-governance.js` 均在包内；包内无安装入口、无 `.bak`、无 `win/probe`。
 
 ### 新增功能
 
