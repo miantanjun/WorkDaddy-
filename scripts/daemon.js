@@ -469,13 +469,17 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.4.2：成长任务「一键完成」——tier 1/2 默认执行（真实对话/真实专家 id/服务端 requestId），
 //        tier 3（服务端不校验真实性的纯上报）默认关闭、需显式开关；新增 /api/growth/task-actions、
 //        /api/growth/tasks-auto-all、/api/growth/tasks-auto-status 三条接口，面板按档位渲染按钮。
-const DAEMON_VERSION = '1.4.4';
+// 1.5.0：F2「429 冷却与『需重新认证』状态机」——把「限流等一等能好」与「凭证已死、等不来自愈」
+//        拆成两个状态（新增 scripts/account-health.js，纯模块 + DATA_DIR/account-health.json）。
+//        新增 GET /api/account-health 与 disable/enable/revive/clear 四个幂等端点，状态接口透出概览；
+//        切号备选池按健康分级排除（needs_reauth / disabled 不再被选中），面板账号卡片显示健康徽标。
+const DAEMON_VERSION = '1.5.0';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.3';
 // 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.3）。
 // 本机 fork 用自己的修改版版本号（1.4.x = 上游 1.2.3 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.4.4-20260921-conflict-and-manual-sync';
+const DAEMON_BUILD_ID = 'release-1.5.0-20260922-account-health';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -529,6 +533,8 @@ const CREDIT_USAGE_REFRESH_MS = 15000;
 const creditUsageSyncInFlight = new Map();
 const { selectRotationCandidate, nearestExpiringSegment } = require('./credit-rotation.js');
 const limitFailover = require('./limit-failover.js');
+// F2：账号健康状态机（429 冷却 / 需重新认证分流）。纯模块，判据唯一真相仍在 limit-failover.js。
+const accountHealth = require('./account-health.js');
 const accountSwitchLog = require('./account-switch-log.js');
 const idleSwitchback = require('./idle-switchback.js');
 const creditRotationCache = new Map();
@@ -4372,6 +4378,26 @@ async function runLimitFailoverCore(detail, ports) {
 
     const modelInfo = await ports.readModel().catch(() => null);
     const modelId = String(d.modelId || '').trim() || String((modelInfo && modelInfo.model) || '').trim();
+    // F2：把「这个号被限了」这件事**贴上类别**（软限流 / 额度耗尽 / 模型额度），
+    // 并与「凭证已死」分开 —— 后者由 account-health 的 needs_reauth 表达，
+    // 不再被这条 10 分钟的窗口盖住。观测取刚复核过的横幅 hits：
+    // 选择器 → 类别、文案 → 细分，判据在 account-health.js 里只有一份。
+    // ⚠️ 必须放在 modelId 之后：`const modelId` 在这里才初始化（提前引用会落进 TDZ，
+    // 而整段被 try/catch 包着 ⇒ 只会静默记一条 health-failed，不报错）。
+    if (typeof ports.recordHealth === 'function') {
+      try {
+        const detected = await ports.readBanner().catch(() => null);
+        const hits = (detected && detected.hits) || [];
+        await ports.recordHealth(current.uid, {
+          source: 'dom-banner',
+          hits,
+          modelId,
+          text: hits.map((hit) => String((hit && hit.text) || '')).filter(Boolean).join(' | '),
+        });
+      } catch (error) {
+        ports.log('limit-failover:health-failed ' + String((error && error.message) || error));
+      }
+    }
     // 被限流的那个会话：副本续跑要以它为源（同步过去之后在它的副本里继续）
     const sourceSessionId = String((modelInfo && modelInfo.conversationId) || '').trim();
     // 续跑指令：落在原会话副本里时只发这一句（由 prepareContinuation 验过同步才走这条路）。
@@ -4409,8 +4435,13 @@ async function runLimitFailoverCore(detail, ports) {
     // 「刚刚离开的账号」每轮都会变：第 1 轮离开的是最初那个限流账号，第 2 轮离开的是上一轮的候选。
     // 复制任务的源必须用它 —— 传 current.uid 会让第二轮把「早就不在用的账号」当源。
     let liveUid = current.uid;
+    // F2/A5：备选池的分级排除谓词由 daemon 通过 `ports.healthFilter` 注入
+    // （**不在这里自己构造**：核心要被切片单测，引用任何模块级新函数都会让沙箱抛
+    //  `ReferenceError`，而它被外层的 try/catch 吞掉 ⇒ 静默变成业务失败）。
+    // 没注入 ⇒ 不过滤，与加这个功能之前逐字等价（既有回归断言一条都不用改）。
+    const healthOptions = typeof ports.healthFilter === 'function' ? { health: ports.healthFilter } : {};
     for (let round = 0; round < 6; round++) {
-      const pick = limitFailover.pickFailoverTarget(limitFailoverAccounts(), current.uid, readLimitFailoverState(), Date.now());
+      const pick = limitFailover.pickFailoverTarget(limitFailoverAccounts(), current.uid, readLimitFailoverState(), Date.now(), healthOptions);
       // pickFailoverTarget 现在**永远返回对象**：account 为 null 时带 reason，
       // 所以这里必须先判 account 再判「这个账号是不是已经试过了」。
       if (!pick || !pick.account) { emptyPick = pick || null; break; }
@@ -4494,11 +4525,31 @@ async function runLimitFailoverCore(detail, ports) {
         if (verdict.hit) {
           state = limitFailover.markAccountBlocked(readLimitFailoverState(), target.uid, Date.now(), 'still-limited');
           writeLimitFailoverState(state);
+          // F2：这条**重复命中**正是「冷却期内不加深」纪律的实战现场 ——
+          // account-health 只会 +hits，绝不会把 until 往后推（A2/A4 的灵魂）。
+          if (typeof ports.recordHealth === 'function') {
+            try {
+              const hits = verdict.hits || [];
+              await ports.recordHealth(target.uid, {
+                source: 'dom-banner',
+                hits,
+                modelId,
+                text: hits.map((hit) => String((hit && hit.text) || '')).filter(Boolean).join(' | '),
+              });
+            } catch (error) {
+              ports.log('limit-failover:health-failed ' + String((error && error.message) || error));
+            }
+          }
           await ports.notify('warning', '账号 ' + (target.nickname || target.uid) + ' 仍处于限流，继续尝试下一个账号');
           continue;
         }
         state = limitFailover.clearAccountBlocked(readLimitFailoverState(), target.uid);
         writeLimitFailoverState(state);
+        // F2/A7：这个号刚证明自己能干活 ⇒ 一条成功就清掉它的健康标记（NoteSuccess 语义）。
+        // 只清自动位：手动停用的号不可能被选成 target，这里不会误伤运维意图。
+        if (typeof ports.clearHealth === 'function') {
+          try { await ports.clearHealth(target.uid); } catch (_) {}
+        }
         // 提示里保留「落在哪」（原会话副本 / 新建任务），再补一句这次是「继续」还是重发全文
         await ports.notify('success', (surface.mode === 'existing'
           ? '已在账号 ' + (target.nickname || target.uid) + ' 的原会话里继续任务'
@@ -4516,9 +4567,10 @@ async function runLimitFailoverCore(detail, ports) {
     }
 
     // 三种「没能换号」必须分开说（审查 P1-7：它们以前共用同一句话，用户分不出是哪种）：
-    //   all-blocked —— 别的账号都在限流窗口里 → 要告诉用户**什么时候能重试**；
-    //   no-others   —— 压根没有别的账号    → 要告诉用户**为什么没得换**（账号列表里就一个）；
-    //   其余        —— 试过的都没顶上来    → 沿用原来的提示。
+    //   all-blocked   —— 别的账号都在限流窗口里 → 要告诉用户**什么时候能重试**；
+    //   no-others     —— 压根没有别的账号    → 要告诉用户**为什么没得换**（账号列表里就一个）；
+    //   all-unhealthy —— 别的账号都得先**重新登录**（F2）→ 要告诉用户**去哪儿修**，等是等不来的；
+    //   其余          —— 试过的都没顶上来    → 沿用原来的提示。
     // 已经在别的账号上试过（tried 非空）时，最后这一轮「全被限流」是**试出来的结果**，
     // 不是「一开始就没得选」—— 两者的提示不一样，必须用 tried 分开：
     //   · tried 为空 + all-blocked → 一开始就全在窗口里、一个都没试 → 报「最早几点可重试」；
@@ -4526,7 +4578,10 @@ async function runLimitFailoverCore(detail, ports) {
     const nothingToTry = tried.length === 0;
     const allBlocked = nothingToTry && !!(emptyPick && emptyPick.reason === 'all-blocked');
     const noOthers = nothingToTry && !!(emptyPick && emptyPick.reason === 'no-others');
-    const failReason = allBlocked ? 'all-blocked' : (noOthers ? 'no-others' : 'no-usable-target');
+    // F2：整池都被健康判据排除（需重新登录 / 手动停用 / 额度耗尽）。
+    // 与 all-blocked 的区别是**等不来自愈** —— 提示词必须分开，否则用户会一直干等。
+    const allUnhealthy = nothingToTry && !!(emptyPick && emptyPick.reason === 'all-unhealthy');
+    const failReason = allBlocked ? 'all-blocked' : (noOthers ? 'no-others' : (allUnhealthy ? 'all-unhealthy' : 'no-usable-target'));
     const recoveryAt = allBlocked ? Number(emptyPick.earliestRecovery || 0) : 0;
     const recoveryClock = recoveryAt > 0
       ? String(new Date(recoveryAt).getHours()).padStart(2, '0') + ':' +
@@ -4536,8 +4591,10 @@ async function runLimitFailoverCore(detail, ports) {
       ? '其他账号都在限流窗口内' + (recoveryClock ? '（最早 ' + recoveryClock + ' 后可重试）' : '') + '，已停止自动切号'
       : noOthers
         ? '没有别的账号可以接管本次任务（账号列表里只有这一个账号），已停止自动切号'
-        : '其他账号都无法接管本次任务，已停止自动切号');
-    ports.log('limit-failover:exhausted ' + JSON.stringify({ tried, lastError, reason: failReason, earliestRecovery: recoveryAt || 0 }));
+        : allUnhealthy
+          ? '其他账号需要先重新登录（或已被手动停用），已停止自动切号 —— 请到账号面板看各账号的健康状态'
+          : '其他账号都无法接管本次任务，已停止自动切号');
+    ports.log('limit-failover:exhausted ' + JSON.stringify({ tried, lastError, reason: failReason, earliestRecovery: recoveryAt || 0, excluded: (emptyPick && emptyPick.excluded) || [] }));
     return { ok: false, reason: failReason, tried, error: lastError, modelId, fromUid: current.uid, earliestRecovery: recoveryAt || null };
   } finally {
     try { if (restorePanelTo) await ports.setPanelOpen(true); } catch (_) {}
@@ -5514,6 +5571,15 @@ function startAutomationRun(task, event = null) {
     let capturedTask = { text: '', mode: '', taskSource: '' };
     const result = await runLimitFailoverCore(detail, {
       readBanner: readLimitBanner,
+      // F2：健康上下文（三个端口全部可选 —— 测试沙箱不注入 ⇒ 行为与加这个功能之前逐字等价）。
+      //   healthFilter→ 备选池的 A5 分级排除谓词（需重新登录 / 手动停用 / 额度耗尽）；
+      //   recordHealth→ 把「被限」贴上类别，并补记 needs_reauth / disabled；
+      //   clearHealth → 备选账号证明自己能干活后，清掉它的自动健康标记。
+      healthFilter: buildFailoverHealthFilter(),
+      recordHealth: (uid, observation) => recordAccountHealth(uid, observation, Date.now()),
+      clearHealth: (uid) => {
+        writeAccountHealth(accountHealth.reviveAuto(readAccountHealth(), uid, Date.now()));
+      },
       // 收「这次到底发了什么」：core 会回调两次（先登记候选全文，落定后再报最终发出内容与方式）
       captureTaskText: (payload) => { capturedTask = Object.assign({}, capturedTask, payload || {}); },
       // 切号前抓源会话指纹、切号后抓副本指纹，判据（compareSnapshot）在 limit-failover.js 里只有一份
@@ -10142,6 +10208,195 @@ function currentAccount() {
   }
 }
 
+/* ---------------- 账号健康（F2：429 冷却 / 「需重新认证」分流） ---------------- */
+//
+// 病灶：以前「被限流」只有一个概念（limit-failover 的一条 blockedUntil），于是
+// 「429 软限流」与「凭证已死」混为一谈 —— 凭证失效的账号被当成「等 10 分钟就好」，
+// 10 分钟后又被选中、又失败，**静默循环**，用户看不到「该重登了」。
+//
+// 边界（**改之前先读**）：account-health 是**投影层**，不参与选号 ——
+// limit-failover.js 的 entryBlockedUntil() 仍是「某账号在限流窗口内」的唯一真相。
+// 这里只做三件事：给已有的「被限」事实贴类别、补记 limit-failover 表达不了的两种状态
+// （needs_reauth / disabled）、统一成 4 态暴露给 /api/status、/api/accounts 与面板。
+// 唯一参与选号的地方是 pickFailoverTarget(..., { health })，**缺省不传 ⇒ 与今天逐字等价**。
+
+const ACCOUNT_HEALTH_FILE = path.join(DATA_DIR, 'account-health.json');
+
+function readAccountHealth() {
+  try {
+    return accountHealth.normalizeHealth(JSON.parse(fs.readFileSync(ACCOUNT_HEALTH_FILE, 'utf8')));
+  } catch (_) {
+    return accountHealth.normalizeHealth(null);
+  }
+}
+
+function writeAccountHealth(state) {
+  try {
+    // 原子替换：与 limit-failover-state.json 同一手法，避免半截 JSON。
+    const tmp = ACCOUNT_HEALTH_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(accountHealth.normalizeHealth(state), null, 2));
+    fs.renameSync(tmp, ACCOUNT_HEALTH_FILE);
+  } catch (e) {
+    log('[account-health] 写入状态失败: ' + e.message);
+  }
+}
+
+/**
+ * 记一条观测（读-改-写）。
+ * ⚠️ 观测里的 `now` 与这里的 `at` **必须同源**：分类器用它算 `until`，
+ * 错位会让冷却时刻算歪（一类症状是「刚记完就已经到期」）。
+ */
+function recordAccountHealth(uid, observation, now) {
+  const at = Number(now) || Date.now();
+  const cls = accountHealth.classifyObservation(Object.assign({ now: at }, observation || {}));
+  // 中性分类（审核拦截 / 参数错 / 无信号）**不落盘** —— 「不罚号」就是真的不写。
+  if (cls.kind === accountHealth.HEALTH_KINDS.Ok || cls.state === accountHealth.HEALTH_STATES.OK) return { cls, state: readAccountHealth() };
+  const next = accountHealth.applyObservation(readAccountHealth(), uid, cls, at);
+  writeAccountHealth(next);
+  return { cls, state: next };
+}
+
+/**
+ * 面板徽标：**落盘状态**与**当下档案信号**取更硬者，纯读不落盘。
+ *
+ * 档案信号（认证档案坏 / 刷新令牌已死 / 签到接口 401）是**当下读出来的事实**，
+ * 比落盘里的历史记录更能代表现在；而「手动停用」是运维意图，优先级最高、不被覆盖。
+ */
+function mergeLiveHealth(view, liveCls) {
+  if (!liveCls) return view;
+  if (liveCls.state !== accountHealth.HEALTH_STATES.NEEDS_REAUTH
+    && liveCls.state !== accountHealth.HEALTH_STATES.DISABLED) return view;
+  if (view.state === accountHealth.HEALTH_STATES.DISABLED) return view;
+  return {
+    state: liveCls.state,
+    kind: liveCls.kind,
+    until: null,
+    remainingMs: 0,
+    reason: liveCls.reason || view.reason || '',
+    hits: view.hits,
+    manualDisabled: view.manualDisabled === true,
+    autoDisabled: liveCls.state === accountHealth.HEALTH_STATES.DISABLED,
+    models: view.models || {},
+  };
+}
+
+// 账号档案 + 原始签到缓存。**不**用 /api/accounts 的 checkinDisplayValue 投影 ——
+// 它只保留「今天签到成功」的记录，签到失败的 401 会被投影成 null，健康判据就断了。
+function accountHealthRecords() {
+  const cache = loadCheckinCache();
+  return listAccounts(DATA_DIR).map((account) => (
+    Object.assign({}, account, { checkin: cache[String(account.uid)] || null })
+  ));
+}
+
+/** 返回 `{ uid: 健康视图 }`。statusOnly=true 时去掉 uid 明细，只给状态接口用。 */
+function accountHealthBadges(now, records) {
+  const at = Number(now) || Date.now();
+  const state = readAccountHealth();
+  const list = Array.isArray(records) ? records : accountHealthRecords();
+  const out = {};
+  for (const account of list) {
+    const uid = String((account && account.uid) || '');
+    if (!uid) continue;
+    out[uid] = mergeLiveHealth(
+      accountHealth.readHealth(state, uid, at),
+      accountHealth.classifyAccountRecord(account || {}, at),
+    );
+  }
+  return out;
+}
+
+/** 按 state 分组 + 计数（`/api/account-health` 与面板概览用）。 */
+function groupAccountHealth(badges) {
+  const groups = { ok: [], rate_limited: [], needs_reauth: [], disabled: [] };
+  for (const uid in badges) {
+    const item = Object.assign({ uid }, badges[uid]);
+    (groups[item.state] || groups.ok).push(item);
+  }
+  return {
+    groups,
+    counts: {
+      total: Object.keys(badges).length,
+      ok: groups.ok.length,
+      rate_limited: groups.rate_limited.length,
+      needs_reauth: groups.needs_reauth.length,
+      disabled: groups.disabled.length,
+    },
+  };
+}
+
+/** 把健康视图投影成 /api/status 要的紧凑形状（**不带 uid 明细**）。 */
+function accountHealthSummary(badges) {
+  const grouped = groupAccountHealth(badges);
+  return {
+    counts: grouped.counts,
+    rateLimited: grouped.groups.rate_limited
+      .filter((item) => item.remainingMs > 0)
+      .map((item) => ({ until: item.until, remainingMs: item.remainingMs, kind: item.kind, reason: item.reason })),
+    needsReauth: grouped.groups.needs_reauth.map((item) => ({ reason: item.reason })),
+    disabled: grouped.groups.disabled.map((item) => ({ manual: item.manualDisabled === true, reason: item.reason })),
+  };
+}
+
+/**
+ * 对全池做一次「等不来自愈」体检并落盘（认证档案坏 / 刷新令牌已死 / 签到接口 401）。
+ * 传 records 可复用调用方已经读到的账号档案，避免重复读盘。
+ */
+function sweepAccountHealth(records, now) {
+  const at = Number(now) || Date.now();
+  const list = Array.isArray(records) ? records : accountHealthRecords();
+  const pairs = [];
+  for (const account of list) {
+    const cls = accountHealth.classifyAccountRecord(account || {}, at);
+    if (cls.kind !== accountHealth.HEALTH_KINDS.Ok) pairs.push([String((account && account.uid) || ''), cls]);
+  }
+  if (!pairs.length) return { changed: 0 };
+  writeAccountHealth(accountHealth.applyClassifications(readAccountHealth(), pairs, at));
+  return { changed: pairs.length };
+}
+
+/**
+ * 构造备选池的 A5 分级排除谓词。**在切片沙箱之外构造**，核心只通过 `ports.healthFilter` 用它 ——
+ * 这样 `runLimitFailoverCore` 里不会出现任何新的模块级标识符，切片单测的依赖表不必扩。
+ * 读不到健康数据就返回 null ⇒ 核心不做任何过滤，与加这个功能之前逐字等价。
+ * 规则本身不在这里重写：谓词直接问 account-health.js 的 `isUsableView`。
+ */
+function buildFailoverHealthFilter() {
+  let badges = null;
+  try {
+    badges = accountHealthBadges(Date.now());
+  } catch (error) {
+    log('[account-health] 读健康视图失败（本次切号不做健康过滤）: ' + String((error && error.message) || error));
+    return null;
+  }
+  if (!badges) return null;
+  return (account) => accountHealth.isUsableView(badges[String((account && account.uid) || '')]).usable;
+}
+
+/** A8 端点的入参校验（与其他路由同一条 uid 口径）。 */
+function accountHealthUidOf(body) {
+  const uid = String((body && body.uid) || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(uid)) throw new Error('uid 格式无效');
+  return uid;
+}
+
+/**
+ * A8 端点统一回显：让人一眼看出「是手动摘除还是系统判坏」——
+ * 上游原话是 `{manual_disabled, manual_reason, disabled, changed}`。
+ */
+function accountHealthEcho(state, uid, changed) {
+  const view = accountHealth.readHealth(state, uid, Date.now());
+  return {
+    uid: uid,
+    changed: changed === true,
+    state: view.state,
+    kind: view.kind,
+    reason: view.reason,
+    manualDisabled: view.manualDisabled === true,
+    autoDisabled: view.autoDisabled === true,
+  };
+}
+
 function accountBackupFile(uid) {
   const value = String(uid || '').trim();
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
@@ -12443,6 +12698,92 @@ function handleApiRoute(req, res) {
     });
   }
 
+  // ── 账号健康（F2：429 冷却 / 「需重新认证」分流）──────────────────────────
+  // 只读视图，**权威**：落盘状态与当下档案信号取更硬者，所以不需要等某次事件落盘。
+  if (req.method === 'GET' && p === '/api/account-health') {
+    try {
+      const records = accountHealthRecords();
+      const badges = accountHealthBadges(Date.now(), records);
+      const grouped = groupAccountHealth(badges);
+      return json(res, 200, {
+        ok: true,
+        counts: grouped.counts,
+        groups: grouped.groups,
+        file: ACCOUNT_HEALTH_FILE,
+        // 「选号时会被跳过」的那几个 —— 面板与用户看的是同一份判据（isUsableView）。
+        excludedFromFailover: Object.keys(badges).filter((uid) => !accountHealth.isUsableView(badges[uid]).usable),
+      });
+    } catch (error) {
+      return json(res, 500, { ok: false, error: error.message });
+    }
+  }
+
+  // A8 三个幂等端点。语义与上游 admin.go 逐条对齐：**手动位与自动位并列、互不影响** ——
+  //   disable → 置手动位；
+  //   enable  → 解手动位，**不碰自动位**（否则一次手动解停会把「系统判坏」的号悄悄放回池）；
+  //   revive  → 解自动位，**不碰手动位**（否则用户手动摘除的号会被自动复活路径解除）。
+  if (req.method === 'POST' && p === '/api/account-health/disable') {
+    return readBody(req).then((body) => {
+      try {
+        const uid = accountHealthUidOf(body);
+        const reason = String((body && body.reason) || '').slice(0, 120);
+        const before = readAccountHealth();
+        const next = accountHealth.setManualDisabled(before, uid, true, reason || '已手动停用', Date.now());
+        writeAccountHealth(next);
+        return json(res, 200, Object.assign({ ok: true }, accountHealthEcho(next, uid, true)));
+      } catch (error) {
+        return json(res, 400, { ok: false, error: error.message });
+      }
+    });
+  }
+
+  if (req.method === 'POST' && p === '/api/account-health/enable') {
+    return readBody(req).then((body) => {
+      try {
+        const uid = accountHealthUidOf(body);
+        const before = readAccountHealth();
+        const had = !!(accountHealth.normalizeEntry(before.accounts[uid]) || {}).manualDisabled;
+        const next = accountHealth.setManualDisabled(before, uid, false, '', Date.now());
+        writeAccountHealth(next);
+        return json(res, 200, Object.assign({ ok: true }, accountHealthEcho(next, uid, had)));
+      } catch (error) {
+        return json(res, 400, { ok: false, error: error.message });
+      }
+    });
+  }
+
+  if (req.method === 'POST' && p === '/api/account-health/revive') {
+    return readBody(req).then((body) => {
+      try {
+        const uid = accountHealthUidOf(body);
+        const before = readAccountHealth();
+        const entry = accountHealth.normalizeEntry(before.accounts[uid]);
+        const next = accountHealth.reviveAuto(before, uid, Date.now());
+        writeAccountHealth(next);
+        return json(res, 200, Object.assign({ ok: true }, accountHealthEcho(next, uid, !!entry)));
+      } catch (error) {
+        return json(res, 400, { ok: false, error: error.message });
+      }
+    });
+  }
+
+  // 整条清除（面板「清除健康标记」用）。带 uid 清一条，不带则整表清空。
+  if (req.method === 'POST' && p === '/api/account-health/clear') {
+    return readBody(req).then((body) => {
+      const uid = String((body && body.uid) || '').trim();
+      if (!uid) {
+        writeAccountHealth(accountHealth.normalizeHealth(null));
+        return json(res, 200, { ok: true, uid: null, cleared: 'all' });
+      }
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(uid)) return json(res, 400, { ok: false, error: 'uid 格式无效' });
+      const before = readAccountHealth();
+      if (!before.accounts[uid]) return json(res, 404, { ok: false, error: '该账号没有健康记录' });
+      const next = accountHealth.clearHealth(before, uid);
+      writeAccountHealth(next);
+      return json(res, 200, { ok: true, uid: uid, cleared: 'one', state: accountHealthEcho(next, uid, true) });
+    });
+  }
+
   if (req.method === 'POST' && p === '/api/automations/stop') {
     return readBody(req).then(async (body) => {
       const run = automationRuns.get(String(body && body.runId || ''));
@@ -12831,6 +13172,13 @@ function handleApiRoute(req, res) {
       status.dataDir = DATA_DIR;
       if (IS_WIN) status.appDir = WORKDADDY_DIR_WIN;
       status.authFile = currentAuthFile();
+      // F2：账号健康概览（**不带 uid 明细** —— 状态接口可能被启动器/更新器轮询）。
+      // 读盘失败绝不能让就绪探针失败，所以整段吞异常。
+      try {
+        status.health = accountHealthSummary(accountHealthBadges(Date.now()));
+      } catch (error) {
+        status.health = { counts: null, error: String((error && error.message) || error) };
+      }
     }
     return json(res, 200, status);
   }
@@ -12895,6 +13243,18 @@ function handleApiRoute(req, res) {
     const accounts = listAccounts(DATA_DIR);
     const cache = loadCheckinCache();
     const today = todayStr();
+    // F2：健康徽标。用**原始**签到缓存条目算，而不是 checkinDisplayValue 的投影 ——
+    // 后者只保留「今天签到成功」的记录，签到失败的 401 会被投影成 null，健康判据就断了。
+    // 顺手做一次「等不来自愈」的体检落盘（面板一打开 account-health.json 就是新的）；
+    // 读-改-写全是同步的，中间没有 await，不会与切号路径的写入交错。
+    let healthBadges = {};
+    try {
+      const healthRecords = accounts.map((a) => Object.assign({}, a, { checkin: cache[String(a.uid)] || null }));
+      sweepAccountHealth(healthRecords);
+      healthBadges = accountHealthBadges(Date.now(), healthRecords);
+    } catch (error) {
+      log('[account-health] 体检失败: ' + String((error && error.message) || error));
+    }
     return CREDIT_USAGE_STORE.listDailyCheckins(accounts.map((a) => a.uid), today)
       .catch((error) => {
         log('[checkin] 读取 SQLite 标记失败: ' + error.message);
@@ -12909,6 +13269,7 @@ function handleApiRoute(req, res) {
           return Object.assign({}, a, {
             checkin: checkinDisplayValue(checked, today),
             activityStreak: growthStreakCache.peek(a.uid),
+            health: healthBadges[String(a.uid)] || null,
           });
         });
         return listDailyUsage(enriched, today)
@@ -12968,7 +13329,13 @@ function handleApiRoute(req, res) {
       } catch (e) {
         log(`[credits] 查询 ${uid} 积分失败: ${e.message}`);
         // token 被服务端拒绝（gateway HTML 401）：返回结构化 401，前端展示「登录身份过期」，不伪造积分
-        if (e && e.expired) return json(res, 401, { ok: false, expired: true, error: '登录身份过期' });
+        // F2：401 是**等不来自愈**的凭证失效 —— 记成 needs_reauth，而不是让它被 10 分钟的
+        // 限流窗口盖住（那会让该号 10 分钟后又被选中、又失败，用户什么都看不到）。
+        // 这条是面板最常触发的健康信号源：打开面板就逐号查积分。
+        if (e && e.expired) {
+          recordAccountHealth(uid, { source: 'credit-api', httpStatus: 401, reason: '登录身份过期' }, Date.now());
+          return json(res, 401, { ok: false, expired: true, error: '登录身份过期' });
+        }
         return json(res, 500, { ok: false, error: e.message });
       }
     });
@@ -13007,6 +13374,8 @@ function handleApiRoute(req, res) {
         });
       } catch (e) {
         log(`[credit-rotation] 查询 ${uid} 失败: ${e.message}`);
+        // F2：与 /api/credits 同源 —— 401 记成 needs_reauth（等不来自愈）。
+        if (e && e.expired) recordAccountHealth(uid, { source: 'credit-api', httpStatus: 401, reason: '登录身份过期' }, Date.now());
         if (e && e.expired) return json(res, 401, { ok: false, expired: true, error: '登录身份过期' });
         return json(res, 500, { ok: false, error: e.message });
       }

@@ -1174,7 +1174,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '共 {n} 个': 'Total: {n} ', '展开 {n} 条（': 'Show {n} (', '从 {src} 导入': 'Import from {src}',
     '（': '(', '）': ')',
     // —— 第五批：基础高频词（杜绝词根缺失造成的半句混合）+ 会话/模型/账号错误整句 ——
-    '错误': 'Error', '状态': 'Status', '导航': 'navigation', '消息': 'message', '当前': 'Current', '配置': 'config', '无效': 'invalid', '认证数据无效': 'Invalid authentication data', '接口': 'API', '队列': 'queue', '不可用': 'unavailable', '缺少': 'Missing', '未找到页面元素': 'Page element not found', '页面元素不可见': 'Page element is not visible', '无法聚焦页面元素': 'Could not focus page element', 'HTTP URL 仅支持 http(s)': 'HTTP URL must use http(s)', '运行记录不存在': 'Run record not found',
+    '错误': 'Error', '状态': 'Status', '导航': 'navigation', '消息': 'message', '当前': 'Current', '配置': 'config', '无效': 'invalid', '认证数据无效': 'Invalid authentication data', '需重新登录': 'Sign in again', '已手动停用': 'Disabled manually', '额度已用尽': 'Quota exhausted', '模型额度已满': 'Model cap reached', '限流中': 'Rate limited', '接口': 'API', '队列': 'queue', '不可用': 'unavailable', '缺少': 'Missing', '未找到页面元素': 'Page element not found', '页面元素不可见': 'Page element is not visible', '无法聚焦页面元素': 'Could not focus page element', 'HTTP URL 仅支持 http(s)': 'HTTP URL must use http(s)', '运行记录不存在': 'Run record not found',
     '会话错误': 'Session error', '会话状态': 'Session status', '会话消息导航': 'Session message navigation', '未获取到当前会话': 'Could not get the current session',
     '回复已停止，但没有发现明确完成证据': 'Reply stopped without clear completion evidence',
     '会话正在等待决策确认': 'Session awaiting a decision confirmation', '会话出现模型或网络错误': 'Session hit a model or network error',
@@ -1758,6 +1758,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (isFinite(expiry) && expiry <= Date.now()) return true;
     }
     return false;
+  }
+
+  // F2：这两个健康态下**不该允许切过去** —— needs_reauth 切过去只会撞登录页，
+  // disabled 是「已从对话流量里摘除」。与 isIdentityExpired 并列使用（口径互补：
+  // 那个看 tokenExpiresAt / 签到 401，这个看 daemon 下发的账号健康视图）。
+  function accountHealthLocked(a) {
+    var h = a && a.health;
+    return !!(h && (h.state === 'needs_reauth' || h.state === 'disabled'));
   }
 
   function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
@@ -13855,6 +13863,26 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       return tag ? '<span class="wbs-checkin-slot">' + tag + '</span>' : '';
     }
 
+    // 账号健康徽标（F2）。只负责「把 4 态翻成人话」，**不做任何判据** ——
+    // 判据只有 scripts/account-health.js 一份（daemon 通过 /api/accounts 的 a.health 下发）。
+    // 剩余冷却时间放 title 里而不是徽标正文：徽标是 10px 小字，塞进数字会把三行都挤坏；
+    // 而 title 不参与 i18n 文本节点走查，不用为它造一个带占位符的词条。
+    function healthBadgeHtml(a) {
+      var h = a && a.health;
+      var state = h && h.state;
+      if (!state || state === 'ok') return '';
+      var text;
+      if (state === 'needs_reauth') text = '需重新登录';
+      else if (state === 'disabled') text = h.manualDisabled === true ? '已手动停用' : '已停用';
+      else if (h.kind === 'quota_hard') text = '额度已用尽';
+      else if (h.kind === 'model_blocked') text = '模型额度已满';
+      else text = '限流中';
+      var why = String(h.reason || '');
+      var minutes = Number(h.remainingMs) > 0 ? Math.max(1, Math.ceil(Number(h.remainingMs) / 60000)) : 0;
+      var title = why + (minutes ? (why ? ' · ' : '') + '约 ' + minutes + ' 分钟后可重试' : '');
+      return '<span class="wbs-badge wbs-health-' + String(state).replace(/_/g, '-') + '" title="' + escAttr(title) + '">' + esc(text) + '</span>';
+    }
+
     function creditBlockHtml(credits, segments, account) {
       // 登录身份过期：展示可诊断文案（token 被服务端拒绝时不伪造积分，也不整格隐藏）
       if (isIdentityExpired(account) || (account && account.creditExpired)) {
@@ -14402,8 +14430,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
     function accountCardLayoutKey() {
       // 积分/签到刷新不应重建切换按钮，保留焦点和两击确认状态。
+      // F2：健康 state/kind 要进 key —— 否则「限流中 → 需重新登录」这种转换不会重建卡片，
+      // 徽标与隐藏切换按钮的改动都显不出来。**不放 remainingMs**：它每秒都在变，放进来等于
+      // 每秒重建一次整列表（切换按钮的两击确认状态会被清掉，正是本函数要避免的事）。
       var rows = state.accounts.map(function (a) {
-        return [a.uid, a.nickname, a.phone, a.uin, a.type, a.enterpriseName, a.tokenExpiresAt, a.authValid, isIdentityExpired(a)];
+        var h = a.health || null;
+        return [a.uid, a.nickname, a.phone, a.uin, a.type, a.enterpriseName, a.tokenExpiresAt, a.authValid, isIdentityExpired(a),
+          h ? h.state : '', h ? String(h.kind || '') : '', h && h.manualDisabled === true ? 1 : 0];
       }).sort(function (a, b) { return String(a[0]).localeCompare(String(b[0])); });
       return JSON.stringify([state.current && state.current.uid, rows]);
     }
@@ -15255,11 +15288,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var currentBadge = isCur ? '<span class="wbs-badge wbs-cur-badge">当前使用中</span>' : '';
         var checkinBadge = checkinBadgeHtml(a);
         var invalidAuthBadge = a.authValid === false ? '<span class="wbs-badge wbs-auth-invalid">认证数据无效</span>' : '';
+        var healthBadge = healthBadgeHtml(a);
         // 当前登录账号隐藏操作；认证已过期的账号保留删除，但隐藏切换，避免进入登录页。
+        // F2 把这条扩到「需重新登录 / 已停用」：这两态切过去只会撞登录页或白等，不如挡在前面。
+        var healthLocked = accountHealthLocked(a);
         var expired = isIdentityExpired(a);
         var ops = (isCur
           ? ''
-          : (expired || a.authValid === false ? '' : '<button class="wbs-icon-btn wbs-acc-switch" type="button" title="切换" data-uid="' + escAttr(a.uid) + '" data-name="' + escAttr(a.nickname || '未命名') + '">' + SWITCH_SVG + '</button>') +
+          : (expired || a.authValid === false || healthLocked ? '' : '<button class="wbs-icon-btn wbs-acc-switch" type="button" title="切换" data-uid="' + escAttr(a.uid) + '" data-name="' + escAttr(a.nickname || '未命名') + '">' + SWITCH_SVG + '</button>') +
             '<button class="wbs-icon-btn wbs-del" type="button" title="删除" data-uid="' + escAttr(a.uid) + '" data-name="' + escAttr(a.nickname || '未命名') + '">' + TRASH_SVG + '</button>');
         ops = '<div class="wbs-ops"' + (isCur ? ' hidden' : '') + '>' + ops + '</div>';
         // 国际版没有手机号：用 UIN（账号唯一数字标识）替代展示；国内版仍显示手机。
@@ -15272,7 +15308,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var idVal = state.mask ? maskAccountId(rawId) : rawId;
         card.innerHTML =
           '<div class="wbs-info">' +
-          '<div class="wbs-row1"><div class="wbs-name-group"><span class="wbs-name">' + esc(nameVal) + '</span>' + currentBadge + badge + dailyRingsHtml(a) + checkinBadge + invalidAuthBadge + '</div>' + ops + '</div>' +
+          '<div class="wbs-row1"><div class="wbs-name-group"><span class="wbs-name">' + esc(nameVal) + '</span>' + currentBadge + badge + dailyRingsHtml(a) + checkinBadge + invalidAuthBadge + '<span class="wbs-health-cell">' + healthBadge + '</span></div>' + ops + '</div>' +
           '<div class="wbs-meta wbs-secondary-row">' +
           '<div class="wbs-mi wbs-phone-cell' + (isUinMode ? ' wbs-uin-cell' : '') + '"><span class="wbs-lbl">' + idLbl + '</span><span class="wbs-val">' + esc(idVal) + '</span></div>' +
           '<div class="wbs-mi wbs-token-cell"><span class="wbs-lbl">有效期至</span><span class="wbs-val' + (ts.warn ? ' wbs-warn' : '') + '">' + esc(ts.label) + '</span></div>' +
@@ -15652,8 +15688,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           // 不再整格隐藏/清空：过期时由 creditBlockHtml 展示「登录身份过期」诊断文案
           cell.classList.remove('wbs-credit-hidden');
           cell.innerHTML = creditBlockHtml(account.credits, account.creditSegments, account);
+          // F2：健康徽标一并重绘（与上面 updateCreditCell 同一理由）。
+          var healthCell = cards[i].querySelector('.wbs-health-cell');
+          if (healthCell) healthCell.innerHTML = healthBadgeHtml(account);
           var switchBtn = cards[i].querySelector('.wbs-acc-switch');
-          if (switchBtn) switchBtn.style.display = hidden || account.creditExpired || account.authValid === false ? 'none' : '';
+          if (switchBtn) switchBtn.style.display = hidden || account.creditExpired || account.authValid === false || accountHealthLocked(account) ? 'none' : '';
         }
       }
       updateDailyProgressCells();
@@ -15871,8 +15910,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var hidden = isIdentityExpired(account);
       elCredit.classList.remove('wbs-credit-hidden');
       elCredit.innerHTML = creditBlockHtml(credits, segments || [], account);
+      // F2：健康徽标随积分刷新一起就地重绘 —— 不然它要等到 layout key 变化（账号增删/改名）才更新，
+      // 冷却到期或状态转换会一直显示旧值。
+      var healthCell = card.querySelector('.wbs-health-cell');
+      if (healthCell) healthCell.innerHTML = healthBadgeHtml(account);
       var cellSwitch = card.querySelector('.wbs-acc-switch');
-      if (cellSwitch) cellSwitch.style.display = hidden || (account && (account.creditExpired || account.authValid === false)) ? 'none' : '';
+      if (cellSwitch) cellSwitch.style.display = hidden || (account && (account.creditExpired || account.authValid === false)) || accountHealthLocked(account) ? 'none' : '';
     }
 
     // ===== 调试：暴露内部状态到 window.__wbsDiag（控制台可调） =====
@@ -16334,6 +16377,17 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
        （'当前使用中' → 'Currently active'），英文界面无需额外适配。 */
     '.wbs-cur-badge{background:color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 76%,#0d2a6b);color:#fff;border-color:transparent;font-weight:600;padding:2px 8px}',
     'html.cb-dark .wbs-cur-badge,html[data-theme="dark"] .wbs-cur-badge,body[data-vscode-theme-name*="dark" i] .wbs-cur-badge{background:color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 82%,#cfe0ff);color:#0b1424}',
+    /* 账号健康徽标（F2）：三态各自一套色。与 .wbs-cur-badge 同理 —— 10px 小字必须靠
+       足够的对比度，不用半透明叠加（浅底上的半透明橙配橙字读不清）。
+       本仓没有 --wb-color-danger/--wb-color-warning 这类语义变量（实测 0 处引用），
+       所以直接给实色 + 深色模式覆盖。文案走既有 i18n 词典，英文界面无需额外适配。 */
+    '.wbs-health-rate-limited{background:#fdf0d5;color:#855200;border-color:#eed9a6}',
+    'html.cb-dark .wbs-health-rate-limited,html[data-theme="dark"] .wbs-health-rate-limited,body[data-vscode-theme-name*="dark" i] .wbs-health-rate-limited{background:rgba(240,180,60,.18);color:#f0c674;border-color:rgba(240,180,60,.3)}',
+    '.wbs-health-needs-reauth{background:#fde7e7;color:#a81b1b;border-color:#f2c2c2;font-weight:600}',
+    'html.cb-dark .wbs-health-needs-reauth,html[data-theme="dark"] .wbs-health-needs-reauth,body[data-vscode-theme-name*="dark" i] .wbs-health-needs-reauth{background:rgba(240,90,90,.18);color:#ff9b9b;border-color:rgba(240,90,90,.3)}',
+    '.wbs-health-disabled{background:rgba(120,124,132,.14);color:var(--wb-color-text-secondary,#5f6368);border-color:rgba(120,124,132,.24)}',
+    'html.cb-dark .wbs-health-disabled,html[data-theme="dark"] .wbs-health-disabled,body[data-vscode-theme-name*="dark" i] .wbs-health-disabled{background:rgba(255,255,255,.07);color:rgba(235,236,240,.6);border-color:rgba(255,255,255,.1)}',
+    '.wbs-health-cell{display:inline-flex;min-width:0;flex-shrink:1}',
     '.wbs-empty{text-align:center;color:var(--wb-icon-tertiary,#999);padding:28px 12px;font-size:13px;line-height:1.8}',
     /* 底部 */
     '.wbs-foot{padding:12px 14px;border-top:1px solid var(--wb-border-subtle,#f0f0f0);display:flex;flex-direction:column;gap:9px;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 30%,transparent)}',

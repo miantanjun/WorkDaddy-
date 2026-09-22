@@ -44,6 +44,7 @@ const SUITES = [
   ['test-growth-tasks.js', 113],  // 成长任务「一键完成」：指纹派生稳定 + 桌面 6 连事件形状 + 四条 CN 通道 + 领奖主备降级 + accept 回读重试 + 档位门控（tier3 默认关）+ 行形状兼容 + 端到端自动领奖 + 面板/daemon 接线 + 全量中文文案 i18n 守卫
   ['test-automation-protocol-v3.js', 111],  // 上游 1.2.5 吸纳/B 组协议 V3：校验负向门（V1/V2 拒 prepare、prepare 只读白名单、condition 形状）+ prepare/condition 真跑语义（切换前执行 / 跳过不切不跑 / 收尾还原不受影响）+ orderCheckinAccounts 稳定排序 + B4 闸门有界可取消 + A9 失败屏障 + A11 409 + 接线静态守卫（含「不搬上游 job.completion / waitAutomationSyncJob」的反向守卫）
   ['test-upstream-125-step4-panel.js', 98],  // 上游 1.2.5 吸纳/Step 4：A7 作业指标（真跑切片函数 + 速率口径）+ A8 大会话提示 + A7/A8 面板文案整句入典（含重复 key 去重守卫）+ A10 会话体积/总量口径（总量不受筛选）+ 体积筛选字节精确
+  ['test-account-health.js', 138],  // v1.4.5 F2：13 层分类顺序（含两条反向对照）+ 三条迁移纪律（不加深 / 取更远者 / 硬不降级）+ A5 分级排除 + A8 双状态位与幂等 + daemon 端点与切片反向守卫 + 面板徽标/i18n/CSS + mac 白名单
 ];
 
 const out = [];

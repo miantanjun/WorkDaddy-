@@ -148,9 +148,9 @@ ok(/const nothingToTry = tried\.length === 0;/.test(core)
   'C2 收尾用 emptyPick.reason 区分「全在限流窗口里」，并用 tried 区分「一开始就没得选」与「试过都没顶上来」');
 ok(core.indexOf('都在限流窗口内') > 0 && core.indexOf('后可重试') > 0,
   'C3 「全在限流窗口里」的提示带上了最早可重试时刻');
-ok(/const failReason = allBlocked \? 'all-blocked' : \(noOthers \? 'no-others' : 'no-usable-target'\);/.test(core)
+ok(/const failReason = allBlocked \? 'all-blocked' : \(noOthers \? 'no-others' : \(allUnhealthy \? 'all-unhealthy' : 'no-usable-target'\)\);/.test(core)
   && /return \{ ok: false, reason: failReason, tried, error: lastError, modelId, fromUid: current\.uid, earliestRecovery: recoveryAt \|\| null \};/.test(core),
-  'C4 返回值把三种原因与最早恢复时刻一起透出去（不再是单一的 no-usable-target）');
+  'C4 返回值把四种原因与最早恢复时刻一起透出去（不再是单一的 no-usable-target）');
 
 ok(/function limitFailoverBlockedUntil[\s\S]{0,400}?limitFailover\.entryBlockedUntil\(entry, limitFailover\.LIMIT_FAILOVER_WINDOW_MS, Date\.now\(\)\)/.test(src),
   'C5 limitFailoverBlockedUntil 改走 limit-failover.js 的唯一真相（不再自己算 blockedAt + 常量）');

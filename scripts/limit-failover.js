@@ -320,6 +320,11 @@ function clearAccountBlocked(state, uid) {
 //  2) 排除窗口内已被判定限流的账号；
 //  3) 有剩余积分段数据时优先「最快到期且有余额」的那个（复用 credit-rotation 的口径）；
 //  4) 没有积分数据就按账号列表原顺序。
+//
+// options.health（可选，A5「分级排除」）：`(account, now) => boolean` 谓词。
+// **缺省不传 ⇒ 与不传时逐字等价**（既有断言不需要改动）。谓词的判据在 account-health.js 里
+// 只有一份（`isUsableView`），本模块不重写那套规则 —— 它只负责「被排除的不参与候选」。
+// 这是本模块唯一一处让健康状态参与选号的地方，且只会**减少**候选，不会新增。
 function pickFailoverTarget(accounts, currentUid, state, now, options = {}) {
   const windowMs = Number(options.windowMs) || LIMIT_FAILOVER_WINDOW_MS;
   const at = Number(now) || Date.now();
@@ -329,11 +334,24 @@ function pickFailoverTarget(accounts, currentUid, state, now, options = {}) {
   // 「压根没有别的账号」和「别的账号全在限流窗口里、最早 X 点才能重试」在日志与
   // 用户提示里长得一模一样（审查 P1-7）。返回带 reason 的对象，两种情形才分得开。
   if (!others.length) {
-    return { account: null, reason: 'no-others', candidates: [], blocked: [], earliestRecovery: 0 };
+    return { account: null, reason: 'no-others', candidates: [], blocked: [], excluded: [], earliestRecovery: 0 };
   }
-  const fresh = others.filter((a) => !isAccountBlocked(state, a.uid, at, windowMs));
+  const healthOk = typeof options.health === 'function' ? options.health : null;
+  const eligible = [];
+  const excluded = [];
+  for (const account of others) {
+    let ok = true;
+    if (healthOk) { try { ok = healthOk(account, at) !== false; } catch (_) { ok = true; } }
+    if (ok) eligible.push(account); else excluded.push(String(account.uid));
+  }
+  if (!eligible.length) {
+    // 全池都被健康判据排除（手动停用 / 需重新认证 / 额度耗尽）—— 必须与「全被限流」分开：
+    // 前者要用户去**重新登录**，后者只要**等一会儿**，提示词完全不能共用。
+    return { account: null, reason: 'all-unhealthy', candidates: [], blocked: [], excluded, earliestRecovery: 0 };
+  }
+  const fresh = eligible.filter((a) => !isAccountBlocked(state, a.uid, at, windowMs));
   if (!fresh.length) {
-    const blocked = others
+    const blocked = eligible
       .map((a) => ({ uid: String(a.uid), until: entryBlockedUntil(normalizeState(state)[String(a.uid)], windowMs, at) }))
       .filter((item) => item.until > at);
     return {
@@ -341,6 +359,7 @@ function pickFailoverTarget(accounts, currentUid, state, now, options = {}) {
       reason: 'all-blocked',
       candidates: [],
       blocked,
+      excluded,
       earliestRecovery: blocked.length ? Math.min(...blocked.map((item) => item.until)) : 0,
     };
   }
@@ -356,12 +375,13 @@ function pickFailoverTarget(accounts, currentUid, state, now, options = {}) {
       return b.segment.remaining - a.segment.remaining;
     });
   const chosen = (withCredit[0] && withCredit[0].account) || pool[0];
-  // 成功分支也带上 blocked/earliestRecovery，返回形状与失败分支一致（消费方不必判字段在不在）。
+  // 成功分支也带上 blocked/excluded/earliestRecovery，返回形状与失败分支一致（消费方不必判字段在不在）。
   return {
     account: chosen,
     reason: withCredit.length ? 'credit' : 'order',
     candidates: pool.map((a) => a.uid),
     blocked: [],
+    excluded,
     earliestRecovery: 0,
   };
 }
