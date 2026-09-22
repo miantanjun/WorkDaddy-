@@ -159,6 +159,9 @@ const { fetchUsageSinceAnchor, startOfLocalDay } = require('./credit-request-usa
 const { createCreditHistorySync, historyRange } = require('./credit-history-sync.js');
 const { createCreditUsageStore } = require('./credit-usage-store.js');
 const { scanTokenStatsCached, tokenStatsCacheReady } = require('./token-stats.js');
+const contextAudit = require('./context-audit.js');
+const contextFix = require('./context-fix.js');
+const memoryGovernance = require('./memory-governance.js');
 const { classifyCheckinResult, checkinEndpointsForToken } = require('./checkin-result.js');
 const {
   DAY_MS: TOKEN_REFRESH_DAY_MS,
@@ -476,10 +479,27 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 const DAEMON_VERSION = '1.5.0';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
-const UPSTREAM_VERSION = '1.2.3';
-// 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.3）。
-// 本机 fork 用自己的修改版版本号（1.4.x = 上游 1.2.3 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.5.0-20260922-account-health';
+const UPSTREAM_VERSION = '1.2.5';
+// 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.5）。
+// 本机 fork 用自己的修改版版本号（1.5.x = 上游 1.2.5 基线 + 本地增强），否则更新检查会误判。
+// 1.5.0-b：省 token 专项批次 —— 账号页通用折叠卡片（自动切换 / 换号续跑 / 上下文体检三卡默认收起，
+//         复用 wbs-idle-card 的 .collapsed + chevron 语言，localStorage 记忆）；
+//         上下文体检「处理路径」：findings 带结构化 fix（auto -> POST /api/context-audit/fix，paste -> 复制指令），
+//         新增 scripts/context-fix.js（只移动不删除，白名单 fixId）；
+//         交接摘要 GET /api/handoff（只读，纯函数 buildHandoff 拼 markdown，面板负责复制）。
+// 1.5.0-b2：B2 记忆治理巡检 —— 新增 scripts/memory-governance.js（三层分层判据 + 只提醒不自动改写）
+//         + GET /api/memory-audit（只读；**刻意没有** /fix 路由）；账号页三卡搬进运维弹出层
+//         + 面板可拖拽缩放（inject.js，不涉及 daemon 版本号）。
+// 1.5.0-b3：云端残留清理的**口径澄清**（仅注释，无行为变化）—— 2026-09-22 实测云端 delete 已幂等：
+//         删不存在的 id 不抛异常、返回 undefined（原先抛 4002 conversation not found；detail 仍抛）。
+//         ⇒ summarizePurgeRun().deleted 的口径是「云端接受的删除请求数」，不是「确实删掉的条数」；
+//         真实调用方只喂已探测为 exists 的 id（plan.current）或走 all:true 重算，故用户可达路径上计数准确。
+// 1.5.0-b4：上游基线常量对齐真实基线 —— UPSTREAM_VERSION 1.2.3 → **1.2.5**（「检查更新」/「关于」页显示的上游版本号）。
+//         真实基线早在 2026-09-21「上游 1.2.5 吸纳」时就已到位（scripts/session-sync.js 就是 1.2.5 原文 + 本地 delta，
+//         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
+//         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
+//         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
+const DAEMON_BUILD_ID = 'release-1.5.0-20260922-token-ui-b4';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -3887,6 +3907,30 @@ const LIMIT_FAILOVER_STATE_FILE = path.join(DATA_DIR, 'limit-failover-state.json
 const LIMIT_FAILOVER_VERIFY_MS = 20000;
 let limitFailoverInFlight = null;
 
+// 面板手动「换号并续跑」的最近一次结果（跑完也留着，供面板显示上次结论）。
+// ⚠️ **不带正文**：这个对象会经 /api/limit-failover/status 透出给面板，与
+//    runLimitFailoverCore 的返回值同一口径（正文只写桌面日志）。
+let limitFailoverManual = null;
+
+function limitFailoverManualPublic() {
+  const job = limitFailoverManual;
+  if (!job) return null;
+  return {
+    startedAt: Number(job.startedAt) || 0,
+    finishedAt: Number(job.finishedAt) || 0,
+    running: job.running === true,
+    ok: job.ok === true,
+    reason: String(job.reason || ''),
+    error: String(job.error || ''),
+    fromUid: String(job.fromUid || ''),
+    fromNickname: String(job.fromNickname || ''),
+    toUid: String(job.toUid || ''),
+    toNickname: String(job.toNickname || ''),
+    markBlocked: job.markBlocked === true,
+    earliestRecovery: Number(job.earliestRecovery) || 0,
+  };
+}
+
 function readLimitFailoverState() {
   try {
     const raw = JSON.parse(fs.readFileSync(LIMIT_FAILOVER_STATE_FILE, 'utf8'));
@@ -4184,7 +4228,7 @@ async function collectCloudGhosts(options) {
 }
 
 /**
- * 逐条调云侧删除。
+ * 逐条调云侧删除。⚠️ 返回的 `deleted` 口径 = 「云端**接受**的删除请求数」：2026-09-22 实测 delete 已幂等（删不存在的 id 也回成功、返回 undefined）⇒ 无法区分「真删掉」与「本来就没有」。真实调用方喂进来的都是已探测为 exists 的 id（`plan.current`），故用户可达路径上计数准确。
  * @param {Array<{id:string,uid?:string}>} items
  */
 async function purgeCloudConversations(items, options) {
@@ -4206,10 +4250,10 @@ async function purgeCloudConversations(items, options) {
     }
     const result = await cloudAgentCall(cloudCleanup.CLOUD_DELETE_METHOD, { conversationId: id });
     if (result && result.ok === true) {
-      deleted += 1;
+      deleted += 1;   // 云端接受了这次删除（幂等语义下 id 不存在也会走到这里，口径见函数 JSDoc）
     } else {
       const classified = cloudCleanup.classifyCloudError(result && result.error);
-      if (classified.kind === 'missing') { skipped += 1; continue; }   // 云端本来就没有：不算失败
+      if (classified.kind === 'missing') { skipped += 1; continue; }   // 云端本来就没有：不算失败（2026-09-22 起 delete 幂等 ⇒ 一般走不到；保留以兼容云端回退成抛 not found）
       failed.push({ id, uid, reason: classified.kind, message: classified.message });
     }
     if (gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
@@ -4373,8 +4417,13 @@ async function runLimitFailoverCore(detail, ports) {
     if (!current || !current.uid) throw new Error('读不到当前账号，无法判断限流归属');
     const now = Date.now();
     let state = readLimitFailoverState();
-    state = limitFailover.markAccountBlocked(state, current.uid, now, 'detected');
-    writeLimitFailoverState(state);
+    // 手动入口「换号并续跑」未必因为限流 —— 把一个健康的号写进限流窗口，它之后
+    // 一整个窗口都不会被选为接管方，那是**写死的硬事实**，不是提示，写错要等它过期。
+    // 缺省（调用方没表态）保持原行为：自动路径永远是「就是限流」。
+    if (d.markBlocked !== false) {
+      state = limitFailover.markAccountBlocked(state, current.uid, now, 'detected');
+      writeLimitFailoverState(state);
+    }
 
     const modelInfo = await ports.readModel().catch(() => null);
     const modelId = String(d.modelId || '').trim() || String((modelInfo && modelInfo.model) || '').trim();
@@ -4412,7 +4461,7 @@ async function runLimitFailoverCore(detail, ports) {
       taskSource = 'lastUserMessage';
     }
     if (!taskText) {
-      await ports.notify('warning', '检测到模型限流，但当前会话里没有可续跑的用户消息');
+      await ports.notify('warning', '没有可续跑的用户消息 —— 当前会话里找不到你刚发的那句话，先手动发一条再点换号');
       return { ok: false, reason: 'no-task-text', modelId, fromUid: current.uid };
     }
     // ⚠️ 源快照必须在**切号之前**抓 —— 切号会 Page.reload，之后就读不到源会话了。
@@ -4601,6 +4650,58 @@ async function runLimitFailoverCore(detail, ports) {
     resolveInFlight();
     limitFailoverInFlight = null;
   }
+}
+
+/**
+ * `runLimitFailoverCore` 的端口装配 —— 与 core **分居两处**是硬要求：
+ * core 会被 .wd-analysis 的切片单测切出来用 `new Function` 重建，切片里出现任何模块级
+ * 新标识符都会在沙箱里抛 ReferenceError，而它被 core 自己的 try/catch 吞掉，表现成
+ * 「静默的业务失败」（维护手册明载的坑）。所以「接哪个函数」留在模块作用域，
+ * core 只认 ports 上的名字。
+ *
+ * 这里挂的全是**模块级函数**，于是「自动」（自动化任务 account.failoverContinue 步骤）与
+ * 「手动」（面板「换号并续跑」按钮）两条入口共用同一份装配 —— 选号、切号、同步副本、
+ * 续跑指令的行为不会因为入口不同而分叉。
+ *
+ * ctx 只带「随调用方而变」的五样东西，全部可选：
+ *   isCancelled / log / notify / captureTaskText / wasPanelOpen
+ */
+function buildLimitFailoverPorts(ctx) {
+  const c = ctx && typeof ctx === 'object' ? ctx : {};
+  const isCancelled = typeof c.isCancelled === 'function' ? c.isCancelled : () => false;
+  const logLine = typeof c.log === 'function' ? c.log : () => {};
+  const notify = typeof c.notify === 'function' ? c.notify : () => {};
+  const capture = typeof c.captureTaskText === 'function' ? c.captureTaskText : () => {};
+  return {
+    readBanner: readLimitBanner,
+    // F2：健康上下文（三个端口全部可选 —— 测试沙箱不注入 ⇒ 行为与加这个功能之前逐字等价）。
+    //   healthFilter→ 备选池的 A5 分级排除谓词（需重新登录 / 手动停用 / 额度耗尽）；
+    //   recordHealth→ 把「被限」贴上类别，并补记 needs_reauth / disabled；
+    //   clearHealth → 备选账号证明自己能干活后，清掉它的自动健康标记。
+    healthFilter: buildFailoverHealthFilter(),
+    recordHealth: (uid, observation) => recordAccountHealth(uid, observation, Date.now()),
+    clearHealth: (uid) => {
+      writeAccountHealth(accountHealth.reviveAuto(readAccountHealth(), uid, Date.now()));
+    },
+    // 收「这次到底发了什么」：core 会回调两次（先登记候选全文，落定后再报最终发出内容与方式）
+    captureTaskText: capture,
+    // 切号前抓源会话指纹、切号后抓副本指纹，判据（compareSnapshot）在 limit-failover.js 里只有一份
+    readSnapshot: () => readFailoverSnapshot(),
+    replyStarted: limitReplyStarted,
+    readModel: readLiveModel,
+    setModel: setLiveModel,
+    readTaskText: readLastUserTaskText,
+    switchAccount: (account) => automationSwitchAccount(account),
+    afterAccountSwitch: (fromUid, toUid) => autoCopyAfterAccountSwitch(fromUid, toUid, 'limit-failover'),
+    prepareContinuation: (prepareCtx) => prepareFailoverContinuation(prepareCtx),
+    ensureNewTask: () => ensureAutomationNewTask({ guard: async () => { if (isCancelled()) throw new Error('任务已停止'); } }),
+    sendPhrase: (text) => acSendPhrase(text, { requireEmpty: true, isCancelled }),
+    guard: async () => { if (isCancelled()) throw new Error('任务已停止'); },
+    log: logLine,
+    notify: notify,
+    setPanelOpen: (open) => automationPanelSetOpen(open),
+    wasPanelOpen: c.wasPanelOpen === true,
+  };
 }
 
 /* ---------------- 续跑结束后自动切回主账号 + 桌面大白话日志 ---------------- */
@@ -5569,36 +5670,13 @@ function startAutomationRun(task, event = null) {
     // 切号前的账号必须在这里抓：core 成功返回时 currentAccount() 已经是新账号了
     const accountBeforeFailover = currentAccount();
     let capturedTask = { text: '', mode: '', taskSource: '' };
-    const result = await runLimitFailoverCore(detail, {
-      readBanner: readLimitBanner,
-      // F2：健康上下文（三个端口全部可选 —— 测试沙箱不注入 ⇒ 行为与加这个功能之前逐字等价）。
-      //   healthFilter→ 备选池的 A5 分级排除谓词（需重新登录 / 手动停用 / 额度耗尽）；
-      //   recordHealth→ 把「被限」贴上类别，并补记 needs_reauth / disabled；
-      //   clearHealth → 备选账号证明自己能干活后，清掉它的自动健康标记。
-      healthFilter: buildFailoverHealthFilter(),
-      recordHealth: (uid, observation) => recordAccountHealth(uid, observation, Date.now()),
-      clearHealth: (uid) => {
-        writeAccountHealth(accountHealth.reviveAuto(readAccountHealth(), uid, Date.now()));
-      },
-      // 收「这次到底发了什么」：core 会回调两次（先登记候选全文，落定后再报最终发出内容与方式）
-      captureTaskText: (payload) => { capturedTask = Object.assign({}, capturedTask, payload || {}); },
-      // 切号前抓源会话指纹、切号后抓副本指纹，判据（compareSnapshot）在 limit-failover.js 里只有一份
-      readSnapshot: () => readFailoverSnapshot(),
-      replyStarted: limitReplyStarted,
-      readModel: readLiveModel,
-      setModel: setLiveModel,
-      readTaskText: readLastUserTaskText,
-      switchAccount: (account) => automationSwitchAccount(account),
-      afterAccountSwitch: (fromUid, toUid) => autoCopyAfterAccountSwitch(fromUid, toUid, 'limit-failover'),
-      prepareContinuation: (ctx) => prepareFailoverContinuation(ctx),
-      ensureNewTask: () => ensureAutomationNewTask({ guard: async () => { if (isCancelled()) throw new Error('任务已停止'); } }),
-      sendPhrase: (text) => acSendPhrase(text, { requireEmpty: true, isCancelled }),
-      guard: async () => { if (isCancelled()) throw new Error('任务已停止'); },
+    const result = await runLimitFailoverCore(detail, buildLimitFailoverPorts({
+      isCancelled: isCancelled,
       log: appendRunLog,
       notify: (level, message) => runNotifier.show(level, message, { duration: 6000, id: 'rl-failover' }),
-      setPanelOpen: (open) => automationPanelSetOpen(open),
-      wasPanelOpen,
-    });
+      captureTaskText: (payload) => { capturedTask = Object.assign({}, capturedTask, payload || {}); },
+      wasPanelOpen: wasPanelOpen,
+    }));
     // 一次切号走完后的统一收尾：桌面大白话日志 + （成功时）排定「续跑结束后切回主账号」。
     // 放在 withInput 里只是为了拿到刚才那次运行的结果；真正的等待/切号在后台跑，不占租约。
     try {
@@ -12564,6 +12642,92 @@ function handleApiRoute(req, res) {
     });
   }
 
+  // 面板手动入口：「换号并续跑」。与上面的 trigger 有**两个前置刻意不要求**：
+  //   · 不要求存在启用中的 account.failoverContinue 任务 —— trigger 没任务直接 404，
+  //     于是「没配自动化」的用户在限流时完全无路可走（这正是本入口要补的洞）；
+  //   · 不要求页面此刻真挂着限流横幅 —— 这是人按的，不是侦测到的。
+  // 选号 / 切号 / 同步副本 / 续跑一句话全部复用 runLimitFailoverCore，判据不复制。
+  // ⚠️ 必须**立即返回 202**：切号会 Page.reload，面板里那个 fetch 一定被掐断；
+  //    结果落进 limitFailoverManual，由 GET /api/limit-failover/status 轮询读出来。
+  if (req.method === 'POST' && p === '/api/limit-failover/manual') {
+    return readBody(req).then(async (body) => {
+      try {
+        if (limitFailoverInFlight || (limitFailoverManual && limitFailoverManual.running)) {
+          return json(res, 200, { ok: true, skipped: true, reason: '已有一次换号续跑正在进行', manual: limitFailoverManualPublic() });
+        }
+        if (!cdp.connected) return json(res, 400, { ok: false, error: 'WorkBuddy 未连接，无法换号续跑' });
+        const current = currentAccount();
+        if (!current || !current.uid) return json(res, 400, { ok: false, error: '读不到当前账号，无法判断该从哪个账号切走' });
+        const others = listAccounts(DATA_DIR).filter((account) => account && String(account.uid || '') && String(account.uid) !== String(current.uid));
+        if (!others.length) return json(res, 400, { ok: false, error: '账号列表里只有当前这一个账号，没有可接管的其它账号' });
+
+        // 手动换号未必因为限流。只有**已被判定限流**的账号才写进限流窗口 —— 那是给选号器
+        // 看的硬事实，把一个健康的号记进去、它之后一整个窗口都不会被选中，等于自断后路。
+        // 判据取自 account-health 的落盘状态（分类器只有一份，这里不重写那套规则）。
+        const healthRecords = readAccountHealth();
+        const currentHealth = (healthRecords.accounts && healthRecords.accounts[String(current.uid)]) || null;
+        const explicit = body && typeof body.markBlocked === 'boolean' ? body.markBlocked : null;
+        const markBlocked = explicit === null
+          ? String((currentHealth && currentHealth.state) || '') === accountHealth.HEALTH_STATES.RATE_LIMITED
+          : explicit;
+
+        const detail = {
+          prompt: String((body && body.prompt) || ''),
+          continueText: String((body && body.continueText) || ''),
+          modelId: String((body && body.modelId) || ''),
+          requireSyncedContent: !(body && body.requireSyncedContent === false),
+          markBlocked: markBlocked,
+        };
+        const wasPanelOpen = await automationPanelIsOpen().catch(() => false);
+        const job = {
+          startedAt: Date.now(), finishedAt: 0, running: true, ok: false, reason: '', error: '',
+          fromUid: String(current.uid), fromNickname: String(current.nickname || ''),
+          toUid: '', toNickname: '', markBlocked: markBlocked, earliestRecovery: 0,
+        };
+        limitFailoverManual = job;
+        let capturedTask = { text: '', mode: '', taskSource: '' };
+        log('[limit-failover] 面板手动触发换号续跑 ' + JSON.stringify({ fromUid: job.fromUid, markBlocked, hasPrompt: !!detail.prompt }));
+        // 刻意不 await：整段含切号（整页 reload）+ 会话同步，等不完，也不该占住这条连接。
+        runLimitFailoverCore(detail, buildLimitFailoverPorts({
+          isCancelled: () => false,
+          log: (message) => log('[limit-failover] ' + message),
+          notify: (level, message) => limitFailoverNotify(level, message),
+          captureTaskText: (payload) => { capturedTask = Object.assign({}, capturedTask, payload || {}); },
+          wasPanelOpen: wasPanelOpen,
+        })).then((result) => {
+          job.running = false;
+          job.finishedAt = Date.now();
+          job.ok = !!(result && result.ok);
+          job.reason = String((result && result.reason) || '');
+          job.error = String((result && result.error) || '');
+          job.toUid = String((result && result.toUid) || '');
+          job.toNickname = String((result && result.toNickname) || '');
+          job.earliestRecovery = Number((result && result.earliestRecovery) || 0);
+          try {
+            handleLimitFailoverOutcome(result, {
+              taskText: capturedTask.text || detail.prompt,
+              sendMode: String(capturedTask.mode || (result && result.sendMode) || ''),
+              taskSource: String(capturedTask.taskSource || (result && result.taskSource) || ''),
+              fromNickname: job.fromNickname,
+            });
+          } catch (error) {
+            log('[limit-failover] 收尾处理失败: ' + String((error && error.message) || error));
+          }
+        }).catch((error) => {
+          job.running = false;
+          job.finishedAt = Date.now();
+          job.ok = false;
+          job.reason = 'threw';
+          job.error = String((error && error.message) || error);
+          log('[limit-failover] 手动换号续跑异常: ' + job.error);
+        });
+        return json(res, 202, { ok: true, started: true, markBlocked: markBlocked, manual: limitFailoverManualPublic() });
+      } catch (error) {
+        return json(res, 400, { ok: false, error: String((error && error.message) || error) });
+      }
+    });
+  }
+
   if (req.method === 'GET' && p === '/api/limit-failover/status') {
     return (async () => {
       const task = findLimitFailoverTask();
@@ -12575,6 +12739,7 @@ function handleApiRoute(req, res) {
         ok: true,
         task: task ? { id: task.id, name: task.name, enabled: task.enabled, schedule: task.schedule || null } : null,
         inFlight: !!limitFailoverInFlight,
+        manual: limitFailoverManualPublic(),
         banner,
         state: readLimitFailoverState(),
         switchBack: {
@@ -13407,6 +13572,104 @@ function handleApiRoute(req, res) {
       const status = /日期范围|开始日期/.test(String(e && e.message)) ? 400 : 500;
       return json(res, status, { ok: false, error: e.message || '读取会话统计失败' });
       });
+  }
+
+  // 上下文体检：把「烧 token 的地方」变成可执行清单。**只读，不写盘。**
+  // 与 /api/token-stats 的分工：那个回答「花了多少」，这个回答「花在哪、怎么省」。
+  if (req.method === 'GET' && p === '/api/context-audit') {
+    return (async () => {
+      try {
+        const days = Math.max(1, Math.min(90, Number(url.searchParams.get('days') || 7)));
+        const home = PROFILE.dataRoot;
+        const report = contextAudit.auditContext({
+          days,
+          home,
+          memoryFiles: [
+            { label: '用户级长期记忆', path: path.join(home, 'MEMORY.md') },
+            { label: '身份 SOUL', path: path.join(home, 'SOUL.md') },
+            { label: '身份 IDENTITY', path: path.join(home, 'IDENTITY.md') },
+            { label: '身份 USER', path: path.join(home, 'USER.md') },
+          ],
+          skillsRoots: [path.join(home, 'skills'), path.join(home, 'plugins', 'cache')],
+          sessionRoot: home,
+        });
+        return json(res, 200, report);
+      } catch (error) {
+        log('[context-audit] 体检失败: ' + error.message);
+        return json(res, 500, { ok: false, error: error.message || '上下文体检失败' });
+      }
+    })();
+  }
+
+  // 上下文体检的「执行侧」：把 findings 里标了 fix.kind='auto' 的动作落地。
+  // 安全设计：前端**只传 fixId，不传路径** —— 路径由 context-fix.js 自己算，
+  // 免得面板成为「任意文件移动」的入口。默认 dryRun，前端确认后才真做。
+  if (req.method === 'POST' && p === '/api/context-audit/fix') {
+    // ⚠️ readBody 回来的是**已解析对象**（空 body 给 `{}`，非空且坏则 reject 并带 status=400）。
+    //    别再 JSON.parse 一遍 —— 对象会被 toString 成 '[object Object]' 而必抛，等于恒 400。
+    return readBody(req).then((body) => {
+      const fixId = String((body && body.fixId) || '');
+      if (!contextFix.AUTO_FIX_IDS.includes(fixId)) {
+        return json(res, 400, { ok: false, error: '未知的修复动作：' + (fixId || '(空)') });
+      }
+      const dryRun = !(body && body.dryRun === false);
+      try {
+        const result = contextFix.applyContextFix(fixId, { dataRoot: PROFILE.dataRoot, dryRun });
+        log('[context-fix] ' + fixId + (dryRun ? ' [dry-run]' : '') + ' -> moved=' + result.moved + ' failed=' + result.failed);
+        return json(res, result.ok ? 200 : 500, result);
+      } catch (error) {
+        log('[context-fix] 执行失败: ' + error.message);
+        return json(res, 500, { ok: false, error: error.message || '执行失败' });
+      }
+    }).catch((error) => json(res, (error && error.status) || 400,
+      { ok: false, error: '请求体不是合法 JSON' }));
+  }
+
+  // 交接摘要：会话太长要换新会话时用。**只读** —— 只返回 markdown 文本，
+  // 面板负责复制到剪贴板；daemon 不写盘（无副作用，也就不需要清理）。
+  if (req.method === 'GET' && p === '/api/handoff') {
+    return (async () => {
+      try {
+        const home = PROFILE.dataRoot;
+        // 只要「会话成本 + findings」两块，skill / 记忆扫描在这里没意义（见面板已经有一份）
+        const report = contextAudit.auditContext({
+          days: Math.max(1, Math.min(90, Number(url.searchParams.get('days') || 7))),
+          home,
+          sessionRoot: home,
+          skillsRoots: [],
+          memoryFiles: [],
+        });
+        const markdown = contextAudit.buildHandoff(report);
+        log('[handoff] 生成交接摘要 ' + markdown.length + ' 字符');
+        return json(res, 200, { ok: true, markdown });
+      } catch (error) {
+        log('[handoff] 生成失败: ' + error.message);
+        return json(res, 500, { ok: false, error: error.message || '生成交接摘要失败' });
+      }
+    })();
+  }
+
+  // 记忆治理巡检（B2）：把「哪条记忆该留在哪一层」变成可执行清单。**只读。**
+  // 与 /api/context-audit 的分工：那个量「上下文花在哪」，这个量「常驻记忆该放哪 / 该多大」。
+  // ⚠️ 刻意**没有**配套的 /fix 路由 —— 记忆是语义资产，自动改写会把结论改坏（本模块恒不产 auto 修复）。
+  // `workspace` 由调用方给（daemon 自己不知道当前工作区）；不给就只巡常驻层，跳过项目/日档两层。
+  if (req.method === 'GET' && p === '/api/memory-audit') {
+    return (async () => {
+      try {
+        const report = memoryGovernance.auditMemoryGovernance({
+          home: PROFILE.dataRoot,
+          workspace: url.searchParams.get('workspace') || '',
+          checkPaths: url.searchParams.get('paths') !== '0',
+        });
+        if (url.searchParams.get('format') === 'md') {
+          return json(res, 200, { ok: true, markdown: memoryGovernance.formatMemoryGovernance(report) });
+        }
+        return json(res, 200, report);
+      } catch (error) {
+        log('[memory-audit] 巡检失败: ' + error.message);
+        return json(res, 500, { ok: false, error: error.message || '记忆治理巡检失败' });
+      }
+    })();
   }
 
   if (req.method === 'GET' && p === '/api/credit-stats') {

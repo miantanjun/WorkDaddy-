@@ -46,3 +46,7 @@ scripts/picker-internal.js
 # probe-*/test-*/verify-* 脚本的文本报告同为「本机证据」，不入库
 .wd-analysis/*.out.txt
 .wd-analysis/*.report.txt
+
+# 维护过程的临时产物（一次性探针 / 补丁脚本 / 命令输出 / 改前备份）
+# 这些是本机专属、可随时重生成的 scratch，禁止入库
+.wd-tmp/

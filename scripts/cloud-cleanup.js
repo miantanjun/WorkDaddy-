@@ -8,12 +8,15 @@
  * 而会话在**其它设备（手机端）看到的那一份来自云端**。本地删除不会通知云端，
  * 于是「桌面删掉了、手机端还在」。
  *
- * ## 云侧的鉴权事实（2026-09-16 实测）
+ * ## 云侧的鉴权事实（2026-09-16 实测；2026-09-22 复核 —— delete 的语义变了）
  * `cloudAgentDeleteConversation({ conversationId })` 与 `cloudAgentGetConversationDetail`
  * 都**按当前登录账号**鉴权：
  *   · 删当前账号的会话           → 正常
  *   · 删别的账号的会话           → `conversation access denied`（存在，但不归你）
- *   · 问一个不存在的 id          → `conversation not found`
+ *   · 问一个不存在的 id          → `conversation not found`（**仅 `detail` 仍如此**）
+ *   · 删一个不存在的 id（delete） → **2026-09-22 起改为幂等**：不抛异常、返回 undefined（原先也抛 not found）
+ * ⇒ 因此「这个 id 本来就没有」在**删除路径上已不可从回执判断**；`summarizePurgeRun().deleted`
+ *    的口径是「云端接受的删除请求数」而非「确实删掉的条数」。调用方应只喂已探测为 exists 的 id。
  *   · 且错误里会带 `for user <uid>`
  * 因此「access denied」是**存在性证据**，而跨账号残留必须切到那个账号才能清。
  *

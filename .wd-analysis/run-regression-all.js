@@ -15,7 +15,7 @@ const SUITES = [
   ['test-space-ui.js', 70],
   ['test-limit-failover.js', 47],
   ['test-limit-switchback.js', 138],
-  ['test-idle-switchback.js', 122],
+  ['test-idle-switchback.js', 128],
   ['test-switch-sync.js', 63],  // 2026-09-21 手动强制覆盖：C18 形态更新 + C22–C27 六条新守卫
   ['test-lineage-dedupe.js', 34],
   ['test-cloud-ghosts.js', 86],
@@ -45,6 +45,10 @@ const SUITES = [
   ['test-automation-protocol-v3.js', 111],  // 上游 1.2.5 吸纳/B 组协议 V3：校验负向门（V1/V2 拒 prepare、prepare 只读白名单、condition 形状）+ prepare/condition 真跑语义（切换前执行 / 跳过不切不跑 / 收尾还原不受影响）+ orderCheckinAccounts 稳定排序 + B4 闸门有界可取消 + A9 失败屏障 + A11 409 + 接线静态守卫（含「不搬上游 job.completion / waitAutomationSyncJob」的反向守卫）
   ['test-upstream-125-step4-panel.js', 98],  // 上游 1.2.5 吸纳/Step 4：A7 作业指标（真跑切片函数 + 速率口径）+ A8 大会话提示 + A7/A8 面板文案整句入典（含重复 key 去重守卫）+ A10 会话体积/总量口径（总量不受筛选）+ 体积筛选字节精确
   ['test-account-health.js', 138],  // v1.4.5 F2：13 层分类顺序（含两条反向对照）+ 三条迁移纪律（不加深 / 取更远者 / 硬不降级）+ A5 分级排除 + A8 双状态位与幂等 + daemon 端点与切片反向守卫 + 面板徽标/i18n/CSS + mac 白名单
+  ['test-failover-manual.js', 62],  // F5：手动「换号并续跑」入口 —— markBlocked 三态（缺省零变化 / false 不写限流窗口）+ ports 装配与 core 分居两处（含模块级名字打错的静态守卫）+ 手动路由两个前置刻意不要求且立即 202 + status 透出不带正文 + 面板整句词条与 data-wbs-i18n-skip（数据不被当文案翻）
+  ['test-context-audit.js', 59],  // 省 token 吸纳：上下文体检（记忆/skill 体积 + 会话成本形状）—— frontmatter 块标量 / 阈值分级 / 目录树行数真数 / 副本行去重 / sessionRoot 默认值回归（第一版传 home 导致会话维度静默全零）+ daemon 路由只读性静态守卫
+  ['test-context-fix.js', 60],  // 省 token 吸纳（执行侧）：context-fix 只移动不删除 + 认 installed_plugins.json 保留激活版本（不靠目录名猜）+ dryRun 不碰盘 + 幂等 + 未知 fixId 拒绝 + daemon fix 路由只收 fixId 不收路径 + 面板折叠化与体检按钮接线 + B1 交接摘要（buildHandoff 纯函数 + GET /api/handoff 只读）
+  ['test-memory-governance.js', 106],  // B2 记忆治理巡检：三层分层判据（云端/用户级/工作区/日档）+ 四类错层假阳性必须被排掉（中缀路径 / HTTP 路由 / 通配 / `..`）+ 死指针只认反引号路径且排占位符 + **只提醒不自动改写**（fix.kind 恒为 paste、counts.autoFixable 恒为 0、无 /api/memory-audit/fix 路由）+ mac 白名单两处 + CRLF 纪律
 ];
 
 const out = [];

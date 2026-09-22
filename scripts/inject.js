@@ -1355,6 +1355,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '一键创建': 'Quick create', '主账号': 'Primary', '设为主账号': 'Set as primary account', '已设为主账号，自动化任务可据此识别主账号': 'Primary account set. Automations can use it to identify your primary account.',
     '账号自动切换': 'Account auto-switch', '闲置后自动切回主账号': 'Switch back to primary when idle',
     '闲置多久算不用了': 'Idle threshold', '分钟': 'min', '未指定': 'Not set',
+    // 折叠头摘要（idle 卡）：这几条会被拼在账号名/数字旁边，所以译文自带尾随空格
+    '未指定主账号': 'No primary account', '闲置': 'Switch back after ', '分钟切回': ' min idle', '已闲置': 'Idle for ',
     '开启后：不在主账号上、且连续闲置超过阈值时自动切回主账号': 'When on: switch back to the primary account after this much idle time on another account',
     '还没指定主账号 —— 指定之后才会自动切回。': 'No primary account set — pick one to enable automatic switch-back.',
     '已关闭：不会自动切回主账号。': 'Disabled: no automatic switch-back.',
@@ -1431,7 +1433,45 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '切换中…': 'Switching…', 'Token 用量统计': 'Token usage statistics', ' 分钟后': ' minutes', ' 小时后': ' hours', ' 天后': ' days',
     '未设置时间': 'no expiry time', '时间': 'Time', '近 7 天': 'Last 7 days', '近 30 天': 'Last 30 days', '近 90 天': 'Last 90 days',
     '账号': 'Account', '全部账号': 'All accounts', '模型': 'Model', '全部模型': 'All models', '刷新': 'Refresh', '刷新统计': 'Refresh statistics', '开始日期': 'From', '结束日期': 'To',
-    '每日趋势': 'Daily trend', '暂无趋势数据': 'No trend data', '模型排行': 'Model ranking', ' 次': ' calls', '暂无模型数据': 'No model data', '暂无账号数据': 'No account data'
+    '每日趋势': 'Daily trend', '暂无趋势数据': 'No trend data', '模型排行': 'Model ranking', ' 次': ' calls', '暂无模型数据': 'No model data', '暂无账号数据': 'No account data',
+    // —— F5：限流时换号并续跑（面板手动出口）。整句登记是硬要求：
+    // applyI18n 是「最长优先匹配」扫描，短词会把**没登记**的句子就地替换成中英混合。
+    // 两条 {x} 模板用于动态部分（账号名单 / 重试时刻），占位符内容不再被二次扫描。
+    '限流时换号并续跑': 'Switch and resume on rate limit', '换号并续跑': 'Switch and resume',
+    '自动接管': 'Auto take-over', '仅手动': 'Manual only',
+    '检测到限流横幅会自动换号并接着做。': 'It switches account and carries on automatically once a rate-limit banner appears.',
+    '没有启用中的限流续跑任务：只能手动点按钮换号。': 'No rate-limit resume task is enabled — use the button to switch manually.',
+    '正在换号续跑…': 'Switching account and resuming…',
+    '上次换号续跑成功': 'Last switch-and-resume succeeded', '上次换号续跑失败': 'Last switch-and-resume failed',
+    // 标签与数据**分两个元素**：标签整句登记走词典；账号名 / 时刻放进 data-wbs-i18n-skip，
+    // 否则扫描器会把账号名里的「账号」也当成词条翻掉（数据被当文案）。
+    '限流窗口内：': 'Inside the rate-limit window: ',
+    '最早可重试：': 'Earliest retry: ',
+    '会话里没有可续跑的消息': 'No message to resume in this conversation',
+    '其他账号都在限流窗口内': 'Every other account is inside the rate-limit window',
+    '没有别的账号可以接管': 'No other account can take over',
+    '其他账号需要先重新登录': 'The other accounts need to sign in again first',
+    '其他账号都无法接管': 'None of the other accounts could take over',
+    '换号续跑没有成功': 'The switch-and-resume did not succeed',
+    '上下文体检': 'Context audit',
+    // 账号页「运维」弹出层 + 面板缩放（新增文案整句入典：最长优先扫描，别只登记半句）
+    '账号策略与运维': 'Account policies & tooling', '拖拽调整面板大小': 'Drag to resize panel',
+    '一键清理': 'Clean up',
+    '复制指令': 'Copy prompt',
+    '已复制': 'Copied',
+    '处理中…': 'Working…',
+    '已清理': 'Cleaned',
+    '生成交接摘要': 'Generate handoff',
+    '交接摘要已复制，粘到新会话开头即可': 'Handoff copied — paste it at the top of a new session',
+    '处理建议：': 'Suggested fix: ',
+    '检查记忆、技能与会话的 token 占用': 'Checks the token footprint of memory, skills and sessions',
+    '开始体检': 'Run audit',
+    '体检中…': 'Auditing…',
+    '未体检': 'Not audited',
+    '查看详情': 'Show details',
+    '收起详情': 'Hide details',
+    '没有发现问题': 'No issues found',
+    '严重 / 警告：': 'Critical / warnings: ',
   };
   function wbsSystemLanguage() {
     var value = String((navigator && (navigator.language || navigator.userLanguage)) || '').toLowerCase();
@@ -2515,6 +2555,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       '</div>',
       '</div>',
       '<div class="wbs-panel">',
+      '<div class="wbs-panel-resize" id="wbs-panel-resize" title="拖拽调整面板大小" aria-hidden="true"></div>',
       '<div class="wbs-head">',
       '<div class="wbs-head-left">',
       '<div class="wbs-title-wrap"><div class="wbs-title-row">',
@@ -2548,6 +2589,64 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       '<div class="wbs-pane" data-pane="automations"></div>',
       '<div class="wbs-pane" data-pane="pc"></div>',
       '<div class="wbs-pane" data-pane="about"></div>',
+      '</div>',
+      // 「运维」弹出层：账号策略与运维三张卡（账号自动切换 / 限流换号并续跑 / 上下文体检）。
+      // 挂在 .wbs-panel 上而不是账号 pane 里 —— .wbs-body{overflow:hidden} 会把下拉层裁掉。
+      '<div class="wbs-ops-popover" id="wbs-ops-popover" hidden role="dialog" aria-label="账号策略与运维">',
+      '<div class="wbs-ops-head">',
+      '<strong class="wbs-ops-title">账号策略与运维</strong>',
+      '<button class="wbs-ops-close" type="button" id="wbs-ops-close" title="关闭" aria-label="关闭">✕</button>',
+      '</div>',
+      '<div class="wbs-ops-body">' +
+        '<div class="wbs-pcard wbs-idle-card" id="wbs-idle-card">' +
+        // 折叠头：收起时也要能一眼看出「主账号是谁、多久切回、现在闲置多久」，否则收起来等于藏了功能
+        '<button class="wbs-idle-head" type="button" id="wbs-idle-toggle" aria-expanded="false" title="展开 / 折叠">' +
+        '<span class="wbs-idle-chevron" aria-hidden="true"></span>' +
+        '<span class="wbs-idle-title">账号自动切换</span>' +
+        '<span class="wbs-idle-summary" id="wbs-idle-summary"></span>' +
+        '</button>' +
+        '<div class="wbs-idle-body" id="wbs-idle-body">' +
+        '<div class="wbs-idle-row"><span class="wbs-idle-label">主账号</span>' +
+        '<select class="wbs-idle-select" id="wbs-idle-primary" aria-label="主账号"></select></div>' +
+        '<div class="wbs-idle-row"><span class="wbs-idle-label">闲置后自动切回主账号</span>' +
+        '<label class="wbs-switch wbs-idle-enabled" title="开启后：不在主账号上、且连续闲置超过阈值时自动切回主账号"><input type="checkbox" id="wbs-idle-enabled" aria-label="闲置后自动切回主账号"><span class="wbs-switch-slider"></span></label></div>' +
+        '<div class="wbs-idle-row"><span class="wbs-idle-label">闲置多久算不用了</span>' +
+        '<input class="wbs-idle-input" id="wbs-idle-minutes" type="number" min="5" max="1440" step="5" aria-label="闲置阈值（分钟）">' +
+        '<span class="wbs-idle-unit">分钟</span></div>' +
+        '<div class="wbs-idle-note" id="wbs-idle-note"></div>' +
+        '</div>' +
+        '</div>' +
+        '<div class="wbs-pcard wbs-failover-card collapsed" id="wbs-failover-card">' +
+        '<button class="wbs-fold-head" type="button" id="wbs-failover-toggle" aria-expanded="false" title="展开 / 折叠">' +
+        '<span class="wbs-fold-chevron" aria-hidden="true"></span>' +
+        '<span class="wbs-fold-title">限流时换号并续跑</span>' +
+        '<span class="wbs-fold-summary" id="wbs-failover-summary"></span>' +
+        '</button>' +
+        '<div class="wbs-fold-body">' +
+        '<div class="wbs-failover-note" id="wbs-failover-note"></div>' +
+        '<div class="wbs-failover-bar">' +
+        '<span class="wbs-failover-status" id="wbs-failover-status"></span>' +
+        '<button class="wbs-failover-go" type="button" id="wbs-failover-go">换号并续跑</button>' +
+        '</div>' +
+        '</div>' +
+        '</div>' +
+        '<div class="wbs-pcard wbs-ca-card collapsed" id="wbs-ca-card">' +
+        '<button class="wbs-fold-head" type="button" id="wbs-ca-toggle" aria-expanded="false" title="展开 / 折叠">' +
+        '<span class="wbs-fold-chevron" aria-hidden="true"></span>' +
+        '<span class="wbs-fold-title">上下文体检</span>' +
+        '<span class="wbs-fold-summary" id="wbs-ca-summary"></span>' +
+        '</button>' +
+        '<div class="wbs-fold-body">' +
+        '<div class="wbs-ca-note" id="wbs-ca-note"></div>' +
+        '<div class="wbs-ca-bar">' +
+        '<span class="wbs-ca-status" id="wbs-ca-status"></span>' +
+        '<button class="wbs-ca-more wbs-ca-handoff" type="button" id="wbs-ca-handoff">生成交接摘要</button>' +
+        '<button class="wbs-ca-more" type="button" id="wbs-ca-more" hidden>查看详情</button>' +
+        '<button class="wbs-ca-go" type="button" id="wbs-ca-go">开始体检</button>' +
+        '</div>' +
+        '</div>' +
+        '</div>' +
+      '</div>',
       '</div>',
       '</div>',
     ].join('');
@@ -5079,6 +5178,66 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var fab = root.querySelector('.wbs-fab');
     var fabAppearance = createFabAppearance({ fab: fab, storage: localStorage, key: 'wbs-fab-style-' + PROFILE_ID });
     var panel = root.querySelector('.wbs-panel');
+    /* ---- 面板可拖拽缩放（2026-09-22）----
+       面板尺寸是硬约束（默认 720×650）。账号多、或体检结果长时，怎么排都挤 —— 给用户一个
+       自己调的出口。抓手在左上角（面板锚在右下角 ⇒ 往左上拖 = 变大）；尺寸存 localStorage，
+       跨会话保留；上界跟着视口走（只钳制显示，不改写用户存的尺寸）。只用户调过之后才接管，
+       否则会把英文界面 880px 的默认宽度用内联样式压掉。*/
+    (function setupPanelResize() {
+      if (!panel) return;
+      var handle = panel.querySelector('#wbs-panel-resize');
+      if (!handle) return;
+      var MIN_W = 380, MIN_H = 340, KEY = 'workdaddy.ui.panelSize';
+      var userSized = false;
+      function maxW() { return Math.max(MIN_W, Math.round(window.innerWidth * 0.96)); }
+      function maxH() { return Math.max(MIN_H, Math.round(window.innerHeight * 0.94)); }
+      function apply(w, h) {
+        if (!w || !h) return;
+        var body = panel.querySelector('.wbs-body');
+        panel.style.width = Math.round(w) + 'px';
+        panel.style.height = Math.round(h) + 'px';
+        panel.style.maxWidth = maxW() + 'px';
+        panel.style.maxHeight = maxH() + 'px';
+        // 650px 时代给 .wbs-body 留了 max-height 兜底；用户自己调过之后就该由面板高度说了算
+        if (body) body.style.maxHeight = 'none';
+      }
+      try {
+        var saved = String(localStorage.getItem(KEY) || '').split('x');
+        var sw = parseInt(saved[0], 10), sh = parseInt(saved[1], 10);
+        if (sw > 0 && sh > 0) {
+          userSized = true;
+          apply(Math.min(Math.max(sw, MIN_W), maxW()), Math.min(Math.max(sh, MIN_H), maxH()));
+        }
+      } catch (_) { /* localStorage 不可用就当没存过 */ }
+      var drag = null;
+      handle.addEventListener('pointerdown', function (event) {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        drag = { x: event.clientX, y: event.clientY, w: panel.offsetWidth, h: panel.offsetHeight };
+        try { handle.setPointerCapture(event.pointerId); } catch (_) {}
+        panel.classList.add('wbs-panel-resizing');
+      });
+      handle.addEventListener('pointermove', function (event) {
+        if (!drag) return;
+        apply(
+          Math.min(Math.max(drag.w - (event.clientX - drag.x), MIN_W), maxW()),
+          Math.min(Math.max(drag.h - (event.clientY - drag.y), MIN_H), maxH())
+        );
+      });
+      function endDrag() {
+        if (!drag) return;
+        drag = null;
+        userSized = true;
+        panel.classList.remove('wbs-panel-resizing');
+        try { localStorage.setItem(KEY, panel.offsetWidth + 'x' + panel.offsetHeight); } catch (_) {}
+      }
+      handle.addEventListener('pointerup', endDrag);
+      handle.addEventListener('pointercancel', endDrag);
+      listen(window, 'resize', function () {
+        if (!userSized) return;
+        apply(Math.min(panel.offsetWidth, maxW()), Math.min(panel.offsetHeight, maxH()));
+      });
+    }());
     var body = root.querySelector('.wbs-body');
     var accountsPane = root.querySelector('[data-pane="account"]');
     var themePane = root.querySelector('[data-pane="theme"]');
@@ -5222,30 +5381,34 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="export" title="选择账号并输入密码后导出备份" aria-label="导出账号">' + EXPORT_ICON + '</button>' +
         '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="import" title="从加密导出文件导入账号备份" aria-label="导入账号">' + IMPORT_ICON + '</button>' +
         '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="account-more" title="账号设置" aria-label="账号设置"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.75a2 2 0 0 1 2 1.4l.4 1.1 1.15.47 1.06-.48a2 2 0 0 1 2.4.45l.8.8a2 2 0 0 1 .45 2.4l-.48 1.06.47 1.15 1.1.4a2 2 0 0 1 0 3.8l-1.1.4-.47 1.15.48 1.06a2 2 0 0 1-.45 2.4l-.8.8a2 2 0 0 1-2.4.45l-1.06-.48-1.15.47-.4 1.1a2 2 0 0 1-3.8 0l-.4-1.1-1.15-.47-1.06.48a2 2 0 0 1-2.4-.45l-.8-.8a2 2 0 0 1-.45-2.4l.48-1.06-.47-1.15-1.1-.4a2 2 0 0 1 0-3.8l1.1-.4.47-1.15-.48-1.06a2 2 0 0 1 .45-2.4l.8-.8a2 2 0 0 1 2.4-.45l1.06.48 1.15-.47.4-1.1A2 2 0 0 1 12 2.75Z"/><circle cx="12" cy="12.5" r="3"/></svg></button>' +
+        // 「运维」：账号策略与运维三卡（自动切换 / 限流换号续跑 / 上下文体检）的入口。
+        // 三卡不再常驻 —— 常驻会把账号列表压到只剩几行（原占 ~135px、展开 ~245px）。
+        '<button class="wbs-acct-io wbs-acct-icon wbs-acct-ops" type="button" data-act="ops" title="账号策略与运维" aria-label="账号策略与运维" aria-expanded="false">' + '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h6M14 7h6M4 17h10M18 17h2"/><circle cx="12" cy="7" r="2"/><circle cx="16" cy="17" r="2"/></svg>' + '<span class="wbs-ops-dot" id="wbs-ops-dot" hidden></span></button>' +
         '</div>' +
         '</div>' +
         '<div class="wbs-acct-list"></div>' +
-        // 账号自动切换：主账号 + 闲置阈值。放在账号页 —— 这是「账号使用策略」，不是自动化任务。
-        '<div class="wbs-pcard wbs-idle-card" id="wbs-idle-card">' +
-        // 折叠头：收起时也要能一眼看出「主账号是谁、多久切回、现在闲置多久」，否则收起来等于藏了功能
-        '<button class="wbs-idle-head" type="button" id="wbs-idle-toggle" aria-expanded="false" title="展开 / 折叠">' +
-        '<span class="wbs-idle-chevron" aria-hidden="true"></span>' +
-        '<span class="wbs-idle-title">账号自动切换</span>' +
-        '<span class="wbs-idle-summary" id="wbs-idle-summary"></span>' +
-        '</button>' +
-        '<div class="wbs-idle-body" id="wbs-idle-body">' +
-        '<div class="wbs-idle-row"><span class="wbs-idle-label">主账号</span>' +
-        '<select class="wbs-idle-select" id="wbs-idle-primary" aria-label="主账号"></select></div>' +
-        '<div class="wbs-idle-row"><span class="wbs-idle-label">闲置后自动切回主账号</span>' +
-        '<label class="wbs-switch wbs-idle-enabled" title="开启后：不在主账号上、且连续闲置超过阈值时自动切回主账号"><input type="checkbox" id="wbs-idle-enabled" aria-label="闲置后自动切回主账号"><span class="wbs-switch-slider"></span></label></div>' +
-        '<div class="wbs-idle-row"><span class="wbs-idle-label">闲置多久算不用了</span>' +
-        '<input class="wbs-idle-input" id="wbs-idle-minutes" type="number" min="5" max="1440" step="5" aria-label="闲置阈值（分钟）">' +
-        '<span class="wbs-idle-unit">分钟</span></div>' +
-        '<div class="wbs-idle-note" id="wbs-idle-note"></div>' +
-        '</div>' +
-        '</div>' +
         '<button class="wbs-logout-btn" type="button" data-act="logout">' + LOGOUT_SVG + '<span>登录新账号</span></button>' +
         '<input type="file" id="wbs-import-file" accept=".json,application/json" style="display:none">';
+    // 通用折叠：卡片头部点击切 collapsed；状态按 PROFILE_ID + 卡片 id 持久化，
+    // 各账号互不影响。收起时 summary 行仍在（它就在头里），所以信息不会丢。
+    function setupFoldCard(card) {
+      if (!card) return;
+      var head = card.querySelector('.wbs-fold-head');
+      if (!head) return;
+      var key = 'workdaddy.ui.fold.' + PROFILE_ID + '.' + card.id;
+      try { if (localStorage.getItem(key) === '0') card.classList.remove('collapsed'); } catch (_) {}
+      function sync() {
+        head.setAttribute('aria-expanded', card.classList.contains('collapsed') ? 'false' : 'true');
+      }
+      sync();
+      head.addEventListener('click', function () {
+        card.classList.toggle('collapsed');
+        try { localStorage.setItem(key, card.classList.contains('collapsed') ? '1' : '0'); } catch (_) {}
+        sync();
+      });
+    }
+      setupFoldCard(root.querySelector('#wbs-failover-card'));
+      setupFoldCard(root.querySelector('#wbs-ca-card'));
       root.querySelector('[data-act="account-more"]').addEventListener('click', openAccountOrderModal);
       setupCreditSummary();
       setupDailyProgressPopover();
@@ -5260,12 +5423,84 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       root.querySelector('#wbs-import-file').addEventListener('change', onImportFile);
     }
 
+    /* ---- 「运维」弹出层（2026-09-22）----
+       三张卡（账号自动切换 / 限流换号并续跑 / 上下文体检）原先常驻在账号列表下方，
+       共占 ~135px、展开时 ~245px，把 650px 面板里的账号列表压到只剩几行。现在收进
+       面板内的下来层：账号页常驻占位归零、列表拿回全部高度；按钮上的红点承担
+       「有限流窗口在进行 / 体检有严重项」这个时间敏感信号（详情点开看）。*/
+    var opsPopover = root.querySelector('#wbs-ops-popover');
+    var opsBtn = root.querySelector('[data-act="ops"]');
+    var opsDot = root.querySelector('#wbs-ops-dot');
+    var opsFlags = { failover: false, audit: false };
+
+    function syncOpsDot() {
+      if (!opsDot) return;
+      opsDot.hidden = !(opsFlags.failover || opsFlags.audit);
+    }
+
+    // 供 renderFailoverCard / renderContextAuditCard 回填（函数声明会提升，可以先用后定义）
+    function setOpsFlag(name, on) {
+      opsFlags[name] = !!on;
+      syncOpsDot();
+    }
+
+    // 下拉层挂在 .wbs-panel 里、absolute 定位：靠面板矩形换算，右边缘对齐按钮。
+    // 不用 fixed —— .wbs-panel 的 backdrop-filter 会把它降格成「相对面板」的绝对定位。
+    function placeOpsPopover() {
+      if (!opsPopover || opsPopover.hidden || !panel || !opsBtn) return;
+      var panelBox = panel.getBoundingClientRect();
+      var btnBox = opsBtn.getBoundingClientRect();
+      var width = opsPopover.offsetWidth || 344;
+      var left = btnBox.right - panelBox.left - width;
+      left = Math.max(10, Math.min(left, Math.max(10, panelBox.width - width - 10)));
+      var top = btnBox.bottom - panelBox.top + 6;
+      var height = opsPopover.offsetHeight || 0;
+      if (height) top = Math.min(top, Math.max(10, panelBox.height - height - 10));
+      opsPopover.style.left = Math.round(left) + 'px';
+      opsPopover.style.top = Math.round(top) + 'px';
+    }
+
+    function setOpsPopover(open) {
+      if (!opsPopover) return;
+      opsPopover.hidden = !open;
+      if (opsBtn) opsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (!open) return;
+      placeOpsPopover();
+      // 三卡里的数字都是实时量（闲置多久 / 限流窗口 / 体检摘要），打开时拉一次最新值
+      refreshIdleCard();
+      refreshFailoverCard();
+    }
+
+    if (opsPopover && opsBtn) {
+      applyI18n(opsPopover);
+      opsBtn.addEventListener('click', function (event) {
+        event.stopPropagation();
+        setOpsPopover(opsPopover.hidden);
+      });
+      var opsCloseBtn = opsPopover.querySelector('#wbs-ops-close');
+      if (opsCloseBtn) opsCloseBtn.addEventListener('click', function () { setOpsPopover(false); });
+      var panelCloseBtn = root.querySelector('[data-act="close"]');
+      if (panelCloseBtn) listen(panelCloseBtn, 'click', function () { setOpsPopover(false); });
+      listen(document, 'pointerdown', function (event) {
+        if (opsPopover.hidden) return;
+        if (opsPopover.contains(event.target) || opsBtn.contains(event.target)) return;
+        setOpsPopover(false);
+      });
+      listen(document, 'keydown', function (event) {
+        if (!opsPopover.hidden && event.key === 'Escape') setOpsPopover(false);
+      });
+      listen(window, 'resize', placeOpsPopover);
+      listen(panel, 'scroll', placeOpsPopover, true);
+      registerDisposer(function () { setOpsPopover(false); });
+      syncOpsDot();
+    }
+
     /* ---- 账号自动切换卡片：主账号 + 闲置超阈值自动切回 ----
        判定与切号都在 daemon 的后台拍子里（见 §19），面板这里只做「设置 + 状态显示」：
        · 主账号走已有的 POST /api/accounts/primary（此前前端没有任何入口，顺手补上）
        · 开关/阈值走 GET|POST /api/idle-switchback
        · 状态行直接读后端算好的 idleMs，前端不自己计时（避免两个时钟对不上）*/
-    var idleCard = accountsPane ? accountsPane.querySelector('#wbs-idle-card') : null;
+    var idleCard = root.querySelector('#wbs-idle-card');
 
     function idleMinutesText(ms) {
       var total = Math.max(0, Math.round((Number(ms) || 0) / 60000));
@@ -5274,17 +5509,33 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       return hours + ' 小时 ' + (total % 60) + ' 分钟';
     }
 
-    // 收起状态下的单行摘要：把「主账号是谁 / 多久切回 / 现在闲置多久」压成一行
-    function idleSummaryText(info) {
-      var parts = [];
-      var primaryLabel = info.primary ? (info.primary.nickname || info.primary.uid) : '';
-      parts.push(primaryLabel ? ('主账号 ' + primaryLabel) : '未指定主账号');
-      if (info.enabled === false) parts.push('已关闭');
-      else {
-        parts.push('闲置 ' + info.minutes + ' 分钟切回');
-        if (info.onOtherAccount) parts.push('已闲置 ' + idleMinutesText(info.idleMs));
+    // 收起状态下的单行摘要：把「主账号是谁 / 多久切回 / 现在闲置多久」压成一行。
+    // ⚠️ 必须**分元素**建，不能拼成一整串 textContent：面板的 i18n 是逐位置最长匹配扫描，
+    //    单节点拼串时 '主账号 面瘫君 · 已关闭' 会输出 "Primary面瘫君 · Disabled"
+    //    （命中词条后还会吞掉紧随的空格）。标签走整句词条，账号名/数字放 skip 子树。
+    function fillIdleSummary(summary, info) {
+      if (!summary) return;
+      summary.textContent = '';
+      function label(text) {
+        var node = document.createElement('span');
+        node.textContent = text;
+        summary.appendChild(node);
       }
-      return parts.join(' · ');
+      function data(text) {
+        var node = document.createElement('span');
+        node.setAttribute('data-wbs-i18n-skip', '1');
+        node.textContent = text;
+        summary.appendChild(node);
+      }
+      function sep() { summary.appendChild(document.createTextNode(' · ')); }
+      function gap() { summary.appendChild(document.createTextNode(' ')); }
+      var primaryLabel = info.primary ? (info.primary.nickname || info.primary.uid) : '';
+      if (primaryLabel) { label('主账号'); gap(); data(primaryLabel); }
+      else label('未指定主账号');
+      sep();
+      if (info.enabled === false) { label('已关闭'); return; }
+      label('闲置'); gap(); data(String(info.minutes)); gap(); label('分钟切回');
+      if (info.onOtherAccount) { sep(); label('已闲置'); gap(); data(idleMinutesText(info.idleMs)); }
     }
 
     function renderIdleCard(data) {
@@ -5309,7 +5560,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var collapsed = info.collapsed !== false;
       idleCard.classList.toggle('collapsed', collapsed);
       if (toggle) toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-      if (summary) summary.textContent = idleSummaryText(info);
+      fillIdleSummary(summary, info);
       enabledBox.checked = info.enabled !== false;
       minutesInput.disabled = info.enabled === false;
       if (document.activeElement !== minutesInput) {
@@ -5387,6 +5638,392 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         }
         return saveIdleCard({ minutes: Math.round(value) });
       });
+    }
+
+
+    /* ---- 限流时换号并续跑（F5）：把「人按的出口」摆到面板上 ----
+       以前只有自动化任务里的 account.failoverContinue 步骤能触发换号续跑，没配那个任务的
+       用户在限流时完全无路可走。后端 POST /api/limit-failover/manual 复用同一条核心
+       （选号 / 切号 / 同步副本 / 续跑指令），这里只负责「问一句、转述结果」。
+       ⚠️ 后端**立刻回 202**：切号会整页 reload，面板里这个 fetch 必被掐断，
+          所以结果只能靠轮询 /api/limit-failover/status 的 manual 字段读回来。
+       ⚠️ 文案一律**整句登记**、且**每行一个文本节点**：applyI18n 是「最长优先匹配」
+          扫描，把短句长句拼进同一个文本节点，短词会被就地替换成中英混合。 */
+    var failoverCard = root.querySelector('#wbs-failover-card');
+    var failoverPollTimer = null;
+
+    function failoverClock(ms) {
+      var date = new Date(Number(ms) || 0);
+      return ('0' + date.getHours()).slice(-2) + ':' + ('0' + date.getMinutes()).slice(-2);
+    }
+
+    function failoverAccountLabel(uid) {
+      var list = state.accounts || [];
+      for (var i = 0; i < list.length; i += 1) {
+        if (String(list[i].uid) === String(uid)) return String(list[i].nickname || list[i].uid || '');
+      }
+      return String(uid || '');
+    }
+
+    // 后端 reason（英文码）→ 一句整句中文词条。半句不命中词典，会被短词撕开。
+    function failoverReasonText(reason) {
+      var key = String(reason || '');
+      if (key === 'no-task-text') return '会话里没有可续跑的消息';
+      if (key === 'all-blocked') return '其他账号都在限流窗口内';
+      if (key === 'no-others') return '没有别的账号可以接管';
+      if (key === 'all-unhealthy') return '其他账号需要先重新登录';
+      if (key === 'no-usable-target') return '其他账号都无法接管';
+      return '换号续跑没有成功';
+    }
+
+    // 一行「标签 + 数据」：标签是整句登记的词典词条，数据（账号名 / 时刻）放进
+    // data-wbs-i18n-skip 子树。**必须分两个元素** —— applyI18n 逐个扫描文本节点，
+    // 拼在一起的账号名会被词典就地替换（「账号B」→「AccountB」，数据被当文案翻了）。
+    function failoverDataRow(label, data) {
+      var row = document.createElement('div');
+      var tag = document.createElement('span');
+      tag.textContent = label;
+      var value = document.createElement('span');
+      value.setAttribute('data-wbs-i18n-skip', '1');
+      value.textContent = data;
+      row.appendChild(tag);
+      row.appendChild(value);
+      return row;
+    }
+
+    // 限流窗口里都有谁 / 最早什么时候能重试。状态来自后端 limit-failover-state.json，
+    // 前端不自己算窗口（两个时钟会对不上）—— 只挑出还没到期的那些。
+    function failoverWindowRows(status) {
+      var map = (status && status.state) || {};
+      var names = [];
+      var earliest = 0;
+      Object.keys(map).forEach(function (uid) {
+        var until = Number((map[uid] || {}).blockedUntil || 0) || 0;
+        if (!until || until <= Date.now()) return;
+        names.push(failoverAccountLabel(uid));
+        if (!earliest || until < earliest) earliest = until;
+      });
+      var out = [];
+      if (names.length) out.push({ label: '限流窗口内：', data: names.join('、') });
+      if (earliest) out.push({ label: '最早可重试：', data: failoverClock(earliest) });
+      return out;
+    }
+
+    function renderFailoverCard(status) {
+      if (!failoverCard) return;
+      var info = status && typeof status === 'object' ? status : {};
+      var manual = info.manual && typeof info.manual === 'object' ? info.manual : null;
+      var autoOn = !!(info.task && info.task.enabled);
+      var running = !!(info.inFlight || (manual && manual.running));
+      var summary = failoverCard.querySelector('#wbs-failover-summary');
+      var note = failoverCard.querySelector('#wbs-failover-note');
+      var statusNode = failoverCard.querySelector('#wbs-failover-status');
+      var goBtn = failoverCard.querySelector('#wbs-failover-go');
+      if (summary) summary.textContent = autoOn ? '自动接管' : '仅手动';
+      var rows = [autoOn
+        ? '检测到限流横幅会自动换号并接着做。'
+        : '没有启用中的限流续跑任务：只能手动点按钮换号。'];
+      var dataRows = failoverWindowRows(info);
+      setOpsFlag('failover', running || dataRows.length > 0);
+      var statusText = '';
+      if (running) statusText = '正在换号续跑…';
+      else if (manual) {
+        statusText = manual.ok ? '上次换号续跑成功' : '上次换号续跑失败';
+        if (manual.ok !== true) rows.push(failoverReasonText(manual.reason));
+      }
+      if (note) {
+        note.innerHTML = '';
+        var i;
+        for (i = 0; i < rows.length; i += 1) {
+          var row = document.createElement('div');
+          row.textContent = rows[i];
+          note.appendChild(row);
+        }
+        // 数据行单独建：标签走词典，账号名 / 时刻走 i18n-skip
+        for (i = 0; i < dataRows.length; i += 1) {
+          note.appendChild(failoverDataRow(dataRows[i].label, dataRows[i].data));
+        }
+      }
+      if (statusNode) statusNode.textContent = statusText;
+      if (goBtn) {
+        goBtn.disabled = running;
+        goBtn.setAttribute('aria-busy', running ? 'true' : 'false');
+      }
+      // 统一补一次翻译：卡片里的文案（说明 / 状态 / 数据行标签）都是整句词条，
+      // 账号名与时刻所在的 span 带 data-wbs-i18n-skip（词典不碰）。每次重绘后都要补，
+      // 否则换语言前建的卡片会一直是中文。
+      applyI18n(failoverCard);
+    }
+
+    function refreshFailoverCard() {
+      if (!failoverCard) return Promise.resolve(null);
+      return api('/api/limit-failover/status').then(function (data) {
+        if (failoverCard && failoverCard.isConnected) renderFailoverCard(data);
+        // 换号在飞时要一直盯着。切号会整页 reload / 面板重建，所以轮询只在
+        // 「卡片还在 DOM 里」时接着排；重建后由 refreshIdleCard 那条路重新拉起来。
+        if (failoverPollTimer) clearTimeout(failoverPollTimer);
+        if (failoverCard && failoverCard.isConnected && data && (data.inFlight || (data.manual && data.manual.running))) {
+          failoverPollTimer = setTimeout(function () { refreshFailoverCard(); }, 3000);
+        }
+        return data;
+      }).catch(function () { return null; });
+    }
+
+    if (failoverCard) {
+      // 先翻一次：说明行要等 /api/limit-failover/status 回来才有内容，但标题与按钮是静态的。
+      applyI18n(failoverCard);
+      var failoverGoBtn = failoverCard.querySelector('#wbs-failover-go');
+      if (failoverGoBtn) failoverGoBtn.addEventListener('click', function () {
+        failoverGoBtn.disabled = true;
+        api('/api/limit-failover/manual', { method: 'POST', body: JSON.stringify({}) })
+          .then(function (data) {
+            if (typeof toast === 'function') {
+              toast(data && data.skipped
+                ? String((data && data.reason) || '已有一次换号续跑正在进行')
+                : '已开始换号并续跑，结果会写进桌面日志', false);
+            }
+            return refreshFailoverCard();
+          })
+          .catch(function (error) {
+            if (typeof toast === 'function') toast((error && error.message) || '发起换号续跑失败', true);
+            return refreshFailoverCard();
+          });
+      });
+    }
+
+
+    /* ---------------- 上下文体检（省 token 吸纳） ----------------
+       为什么要这张卡：/api/token-stats 只回答「花了多少」，这张卡回答「花在哪、怎么省」。
+       ⚠️ 后端的 finding 文案是**数据**（中文，随机器状态变），一律塞进 data-wbs-i18n-skip
+          子树 —— 否则会被词典的短词条就地撕成中英混合。
+       ⚠️ 卡片**不自动拉取**：体检要扫全部会话文件，面板一打开就跑纯属浪费，由用户点按钮触发。 */
+    var caCard = root.querySelector('#wbs-ca-card');
+    var caData = null;
+    var caExpanded = false;
+
+    // 后端生成的 findings 是**数据**（中文、随机器状态变）⇒ 文本整块标 skip；
+    // 但**按钮文案是前端固定词**，必须留在 skip 子树之外，否则英文模式下翻不了。
+    // fix.kind 三态：auto=一键执行 / paste=复制指令粘给 AI / manual=只有建议文本。
+    function caFindingRows(findings, limit) {
+      var box = document.createElement('div');
+      findings.slice(0, limit).forEach(function (f) {
+        var item = document.createElement('div');
+        item.className = 'wbs-ca-item';
+
+        var head = document.createElement('div');
+        head.className = 'wbs-ca-item-head';
+        var dot = document.createElement('span');
+        dot.className = 'wbs-ca-dot ' + (f.severity === 'crit' ? 'wbs-ca-dot-crit' : 'wbs-ca-dot-warn');
+        var title = document.createElement('span');
+        title.className = 'wbs-ca-item-title';
+        title.setAttribute('data-wbs-i18n-skip', '1');
+        title.textContent = String(f.title || '');
+        head.appendChild(dot);
+        head.appendChild(title);
+        item.appendChild(head);
+
+        if (f.detail) {
+          var detail = document.createElement('div');
+          detail.className = 'wbs-ca-item-detail';
+          detail.setAttribute('data-wbs-i18n-skip', '1');
+          detail.textContent = String(f.detail);
+          item.appendChild(detail);
+        }
+        if (f.action) {
+          // 标签走词典、正文是数据 —— 必须分成两个元素（扫描器会把整串撕成中英混合）
+          var act = document.createElement('div');
+          act.className = 'wbs-ca-item-action';
+          var actLabel = document.createElement('span');
+          actLabel.textContent = '处理建议：';
+          var actText = document.createElement('span');
+          actText.setAttribute('data-wbs-i18n-skip', '1');
+          actText.textContent = String(f.action);
+          act.appendChild(actLabel);
+          act.appendChild(actText);
+          item.appendChild(act);
+        }
+
+        var fix = f.fix;
+        if (fix && (fix.kind === 'auto' || fix.kind === 'paste')) {
+          var bar = document.createElement('div');
+          bar.className = 'wbs-ca-item-fix';
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'wbs-ca-fix ' + (fix.kind === 'auto' ? 'wbs-ca-fix-auto' : 'wbs-ca-fix-paste');
+          btn.textContent = fix.kind === 'auto' ? '一键清理' : '复制指令';
+          if (fix.kind === 'auto') btn.addEventListener('click', function () { runContextFix(f, btn); });
+          else btn.addEventListener('click', function () { copyFixPrompt(f.fix, btn); });
+          bar.appendChild(btn);
+          item.appendChild(bar);
+        }
+        box.appendChild(item);
+      });
+      return box;
+    }
+
+    // auto 类：直接调路由落地。前端**只传 fixId**，路径由后端算（避免面板成为任意路径移动的入口）。
+    function runContextFix(finding, btn) {
+      var fix = (finding && finding.fix) || {};
+      if (!fix.fixId || btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = '处理中…';
+      applyI18n(caCard);
+      api('/api/context-audit/fix', { method: 'POST', body: JSON.stringify({ fixId: fix.fixId, dryRun: false }) })
+        .then(function (result) {
+          btn.disabled = false;
+          btn.textContent = '已清理';
+          if (typeof toast === 'function') {
+            toast('已清理 ' + Number((result && result.moved) || 0) + ' 个旧版本目录（移到备份目录，可随时移回）', false);
+          }
+          return loadContextAuditCard();
+        })
+        .catch(function (error) {
+          btn.disabled = false;
+          btn.textContent = '一键清理';
+          if (typeof toast === 'function') toast((error && error.message) || '清理失败', true);
+        });
+    }
+
+    // paste 类：把 prompt 复制走 —— 老叶拿到直接粘给我就能执行，不用自己组织语言。
+    function copyFixPrompt(fix, btn) {
+      var text = String((fix && fix.prompt) || '');
+      if (!text) return;
+      function done() {
+        btn.textContent = '已复制';
+        applyI18n(caCard);
+        setTimeout(function () { btn.textContent = '复制指令'; applyI18n(caCard); }, 1600);
+      }
+      function fallback() {
+        // 剪贴板 API 在非安全上下文 / 无权限时不可用，退化成 textarea + execCommand
+        try {
+          var ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          ta.remove();
+          done();
+        } catch (_) {
+          if (typeof toast === 'function') toast('复制失败，请手动选中文本', true);
+        }
+      }
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done).catch(fallback);
+        } else fallback();
+      } catch (_) { fallback(); }
+    }
+
+    function renderContextAuditCard(data) {
+      if (!caCard) return;
+      caData = data || null;
+      var summary = caCard.querySelector('#wbs-ca-summary');
+      var note = caCard.querySelector('#wbs-ca-note');
+      var status = caCard.querySelector('#wbs-ca-status');
+      var moreBtn = caCard.querySelector('#wbs-ca-more');
+      var goBtn = caCard.querySelector('#wbs-ca-go');
+      var findings = (caData && caData.findings) || [];
+      var counts = (caData && caData.counts) || { crit: 0, warn: 0 };
+      setOpsFlag('audit', Number(counts.crit || 0) > 0);
+      if (summary) {
+        summary.textContent = '';
+        if (caData) {
+          // 标签走整句词条，数字是数据 —— 必须分元素（applyI18n 是逐位置最长匹配扫描）
+          var label = document.createElement('span');
+          label.textContent = '严重 / 警告：';
+          var value = document.createElement('span');
+          value.setAttribute('data-wbs-i18n-skip', '1');
+          value.textContent = Number(counts.crit || 0) + ' / ' + Number(counts.warn || 0);
+          summary.appendChild(label);
+          summary.appendChild(value);
+        } else {
+          // 空态：折叠头是这一行唯一可见的信息，留空等于把「这里还没跑过」藏起来
+          var empty = document.createElement('span');
+          empty.textContent = '未体检';
+          summary.appendChild(empty);
+        }
+      }
+      if (note) {
+        note.innerHTML = '';
+        var row = document.createElement('div');
+        if (!caData) row.textContent = '检查记忆、技能与会话的 token 占用';
+        else if (!findings.length) row.textContent = '没有发现问题';
+        if (!caData || !findings.length) note.appendChild(row);
+        if (findings.length) note.appendChild(caFindingRows(findings, caExpanded ? findings.length : 3));
+      }
+      if (moreBtn) {
+        moreBtn.hidden = findings.length <= 3;
+        moreBtn.textContent = caExpanded ? '收起详情' : '查看详情';
+      }
+      if (status) status.textContent = '';
+      if (goBtn) goBtn.disabled = false;
+      applyI18n(caCard);
+    }
+
+    function loadContextAuditCard() {
+      if (!caCard) return Promise.resolve(null);
+      var status = caCard.querySelector('#wbs-ca-status');
+      var goBtn = caCard.querySelector('#wbs-ca-go');
+      if (status) status.textContent = '体检中…';
+      if (goBtn) goBtn.disabled = true;
+      applyI18n(caCard);
+      return api('/api/context-audit?days=7').then(function (data) {
+        if (caCard && caCard.isConnected) renderContextAuditCard(data);
+        return data;
+      }).catch(function () {
+        if (goBtn) goBtn.disabled = false;
+        if (status) status.textContent = '';
+        return null;
+      });
+    }
+
+    if (caCard) {
+      applyI18n(caCard);
+      renderContextAuditCard(null);
+      var caMoreBtn = caCard.querySelector('#wbs-ca-more');
+      if (caMoreBtn) caMoreBtn.addEventListener('click', function () {
+        caExpanded = !caExpanded;
+        renderContextAuditCard(caData);
+      });
+      // B1：交接摘要 —— daemon 只返回文本，这里复制到剪贴板（不落盘，所以没有要清理的副本）
+      var caHandoffBtn = caCard.querySelector('#wbs-ca-handoff');
+      if (caHandoffBtn) caHandoffBtn.addEventListener('click', function () {
+        if (caHandoffBtn.disabled) return;
+        caHandoffBtn.disabled = true;
+        var original = caHandoffBtn.textContent;
+        caHandoffBtn.textContent = '处理中…';
+        applyI18n(caCard);
+        api('/api/handoff?days=7').then(function (data) {
+          caHandoffBtn.disabled = false;
+          caHandoffBtn.textContent = original;
+          applyI18n(caCard);
+          var text = String((data && data.markdown) || '');
+          if (!text) { if (typeof toast === 'function') toast('没有拿到交接摘要', true); return; }
+          var ok = false;
+          try {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            ok = document.execCommand('copy');
+            ta.remove();
+          } catch (_) { ok = false; }
+          if (typeof toast === 'function') {
+            toast(ok ? '交接摘要已复制，粘到新会话开头即可' : '复制失败，请手动选中文本', !ok);
+          }
+        }).catch(function (error) {
+          caHandoffBtn.disabled = false;
+          caHandoffBtn.textContent = original;
+          applyI18n(caCard);
+          if (typeof toast === 'function') toast((error && error.message) || '生成交接摘要失败', true);
+        });
+      });
+      var caGoBtn = caCard.querySelector('#wbs-ca-go');
+      if (caGoBtn) caGoBtn.addEventListener('click', function () { loadContextAuditCard(); });
     }
 
     function openAccountOrderModal() {
@@ -6524,6 +7161,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (name === 'spaces') { try { refreshSpaceScan(); } catch (e) {} }
       // 账号页：每次进入都刷一次「账号自动切换」卡片的闲置进度（后端算的 idleMs，前端不自己计时）
       if (name === 'account') { try { refreshIdleCard(); } catch (e) {} }
+      if (name === 'account') { try { refreshFailoverCard(); } catch (e) {} }
       // 每次进入会话页都补一次进度探测（面板可能刚重建，定时器已被清理）
       if (name === 'sessions') { try { watchAutoCopyProgress(); } catch (e) {} }
       if (name === 'models' && modelsPane && !modelsPane.dataset.built) buildModelsPane();
@@ -15251,6 +15889,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       state.accounts = mergeAccountSnapshot(previous, data.accounts || []);
       // 账号列表到手后再刷一次「账号自动切换」卡片：主账号下拉要拿账号清单来渲染
       try { refreshIdleCard(); } catch (e) {}
+      // F5：手动换号续跑卡片也在账号页，跟 idle 卡一起刷（换号后限流窗口变了要跟着变）
+      try { refreshFailoverCard(); } catch (e) {}
       state.accountOrder = data.accountOrder || state.accountOrder || { mode: 'expiry' };
       // 页面重载后还没有积分缓存，或刚切换账号：等本轮积分齐备后校正一次顺序。
       if (currentChanged || (!previous.length && state.accounts.some(function (account) { return !Array.isArray(account.creditSegments); }))) {
@@ -17030,6 +17670,25 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-acct-list{flex:1;min-height:0;overflow-y:auto;padding-right:2px}',
     /* 账号自动切换卡片（主账号 + 闲置阈值）：放在账号列表与「登录新账号」之间 */
     '.wbs-idle-card{flex:0 0 auto;margin:8px 0 0}',
+    // 「运维」弹出层：三卡的新家。绝对定位挂 .wbs-panel（不是账号 pane）—— 面板的 overflow:hidden
+    // 会裁掉下拉层；同时 backdrop-filter 会让 fixed 退化成相对面板定位，所以这里就用 absolute。
+    '.wbs-ops-popover{position:absolute;z-index:25;box-sizing:border-box;width:344px;max-width:calc(100% - 20px);max-height:calc(100% - 76px);padding:12px;background:var(--wb-bg-popover,var(--wb-bg-primary,#fff));color:var(--wb-color-text-primary,#1f1f1f);border:1px solid var(--wb-border-default,#e2e4e8);border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.22);overflow:auto;overscroll-behavior:contain}',
+    '.wbs-ops-popover[hidden]{display:none}',
+    '.wbs-ops-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}',
+    '.wbs-ops-title{font-size:13px;font-weight:700}',
+    '.wbs-ops-close{width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--wb-icon-tertiary,#999);font:inherit;font-size:13px;line-height:1;cursor:pointer}',
+    '.wbs-ops-close:hover{background:var(--wb-bg-hover,#f0f0f0);color:var(--wb-color-text-primary,#222)}',
+    '.wbs-ops-close:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:1px}',
+    '.wbs-ops-body>.wbs-pcard{margin:0 0 8px}',
+    '.wbs-ops-body>.wbs-pcard:last-child{margin-bottom:0}',
+    '.wbs-acct-ops{position:relative}',
+    '.wbs-ops-dot{position:absolute;right:2px;top:2px;width:6px;height:6px;border-radius:50%;background:#e24b4a;box-shadow:0 0 0 1.5px var(--wb-bg-primary,#fff)}',
+    '.wbs-ops-dot[hidden]{display:none}',
+    // 面板缩放抓手：面板锚在右下角 ⇒ 抓手放左上角，「往左上拖 = 变大」
+    '.wbs-panel-resize{position:absolute;left:0;top:0;width:20px;height:20px;z-index:40;cursor:nwse-resize;touch-action:none}',
+    '.wbs-panel-resize::before{content:"";position:absolute;left:5px;top:5px;width:8px;height:8px;border-left:2px solid var(--wb-icon-tertiary,#999);border-top:2px solid var(--wb-icon-tertiary,#999);border-top-left-radius:5px;opacity:.45;transition:opacity .15s}',
+    '.wbs-panel-resize:hover::before{opacity:.9}',
+    '.wbs-panel.wbs-panel-resizing{user-select:none}',
     // 云端残留卡片：折叠头常显一行摘要，展开才是检测/清理（跨账号那步要切号，用红色按钮警示）
     '.wbs-cloud-card{flex:0 0 auto;margin:0 0 8px;border:1px solid color-mix(in srgb,var(--wb-color-border,#e5e5e5) 70%,transparent);border-radius:10px;background:color-mix(in srgb,var(--wb-bg-secondary,#f7f7f7) 55%,transparent)}',
     '.wbs-cloud-head{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;user-select:none;border-radius:10px}',
@@ -17051,6 +17710,57 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-cloud-btn:hover{background:var(--wb-bg-hover,#f5f5f5)}',
     '.wbs-cloud-btn-armed{border-color:#e24b4a;color:#e24b4a}',
     '.wbs-cloud-empty,.wbs-cloud-tail{font-size:11px;color:var(--wb-icon-tertiary,#999);margin-top:8px}',
+    /* 通用折叠卡片（账号页：限流换号 / 上下文体检共用；交互语言对齐「账号自动切换」）*/
+    '.wbs-fold-head{display:flex;align-items:center;gap:7px;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}',
+    '.wbs-fold-head:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:2px;border-radius:6px}',
+    '.wbs-fold-chevron{flex:0 0 auto;width:7px;height:7px;margin-left:1px;border-right:1.6px solid var(--wb-icon-tertiary,#999);border-bottom:1.6px solid var(--wb-icon-tertiary,#999);transform:rotate(-45deg);transition:transform .18s}',
+    '.wbs-pcard:not(.collapsed) > .wbs-fold-head > .wbs-fold-chevron{transform:rotate(45deg)}',
+    '.wbs-fold-title{flex:0 0 auto;font-size:12px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-fold-summary{flex:1;min-width:0;text-align:right;font-size:11px;color:var(--wb-icon-tertiary,#999);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.wbs-fold-body{margin-top:8px}',
+    '.wbs-pcard.collapsed > .wbs-fold-body{display:none}',
+    /* 限流时换号并续跑（F5）：复用 .wbs-pcard 的卡片外观，只把外边距对齐上面那张卡 */
+    /* 上下文体检（省 token 吸纳）：复用 .wbs-pcard，风格与上面那张卡对齐 */
+    '.wbs-ca-card{margin:8px 0 0}',
+    '.wbs-ca-head{display:flex;align-items:center;gap:8px}',
+    '.wbs-ca-title{flex:0 0 auto;font-size:12px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-ca-summary{margin-left:auto;font-size:11px;color:var(--wb-icon-tertiary,#999);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.wbs-ca-note{margin-top:6px;font-size:11px;line-height:1.6;color:var(--wb-icon-tertiary,#999);word-break:break-word;max-height:190px;overflow:auto}',
+    '.wbs-ca-bar{display:flex;align-items:center;gap:8px;margin-top:8px}',
+    '.wbs-ca-status{min-width:0;font-size:11px;color:var(--wb-icon-tertiary,#999);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.wbs-ca-more,.wbs-ca-go{flex:0 0 auto;height:26px;padding:0 12px;border-radius:8px;font-size:11px;cursor:pointer}',
+    '.wbs-ca-more{border:1px solid var(--wb-color-border,#e5e5e5);background:transparent;color:var(--wb-color-text-secondary,#666)}',
+    '.wbs-ca-go{margin-left:auto;border:1px solid var(--wb-button-primary-bg,#1f1f1f);background:var(--wb-button-primary-bg,#1f1f1f);color:#fff}',
+    '.wbs-ca-go:hover{opacity:.86}',
+    '.wbs-ca-more:focus-visible,.wbs-ca-go:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:2px}',
+    '.wbs-ca-go:disabled{opacity:.55;cursor:wait}',
+    '.wbs-ca-item{margin-top:8px;padding-top:8px;border-top:1px solid color-mix(in srgb,var(--wb-border-subtle,#f0f0f0) 70%,transparent)}',
+    '.wbs-ca-item:first-child{margin-top:0;padding-top:0;border-top:0}',
+    '.wbs-ca-item-head{display:flex;align-items:center;gap:6px}',
+    '.wbs-ca-dot{flex:0 0 auto;width:6px;height:6px;border-radius:50%}',
+    '.wbs-ca-dot-crit{background:#e24b4a}',
+    '.wbs-ca-dot-warn{background:#c98a20}',
+    '.wbs-ca-item-title{min-width:0;font-size:11px;font-weight:600;color:var(--wb-color-text-primary,#1f1f1f);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.wbs-ca-item-detail{margin-top:3px;font-size:10px;line-height:1.55;color:var(--wb-icon-tertiary,#999);word-break:break-word}',
+    '.wbs-ca-item-action{margin-top:3px;font-size:10px;line-height:1.55;color:var(--wb-icon-secondary,#666);word-break:break-word}',
+    '.wbs-ca-item-fix{margin-top:5px;display:flex;gap:6px}',
+    '.wbs-ca-fix{height:22px;padding:0 9px;border:1px solid var(--wb-color-border,#e5e5e5);border-radius:7px;background:transparent;color:var(--wb-color-text-secondary,#666);font:inherit;font-size:10px;cursor:pointer}',
+    '.wbs-ca-fix:hover{background:var(--wb-bg-hover,#f5f5f5)}',
+    '.wbs-ca-fix-auto{border-color:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-bg,#1f1f1f);font-weight:600}',
+    '.wbs-ca-fix:disabled{opacity:.55;cursor:wait}',
+    '.wbs-ca-fix:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:2px}',
+    '.wbs-ca-handoff{margin-left:auto}',
+    '.wbs-failover-card{margin:8px 0 0}',
+    '.wbs-failover-head{display:flex;align-items:center;gap:8px}',
+    '.wbs-failover-title{flex:0 0 auto;font-size:12px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-failover-summary{margin-left:auto;font-size:11px;color:var(--wb-icon-tertiary,#999);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.wbs-failover-note{margin-top:6px;font-size:11px;line-height:1.6;color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-failover-bar{display:flex;align-items:center;gap:8px;margin-top:8px}',
+    '.wbs-failover-status{min-width:0;font-size:11px;color:var(--wb-icon-tertiary,#999);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.wbs-failover-go{margin-left:auto;flex:0 0 auto;height:26px;padding:0 12px;border:1px solid var(--wb-button-primary-bg,#1f1f1f);border-radius:8px;background:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff);font:inherit;font-size:11px;font-weight:600;white-space:nowrap;cursor:pointer}',
+    '.wbs-failover-go:hover{opacity:.86}',
+    '.wbs-failover-go:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:2px}',
+    '.wbs-failover-go:disabled{opacity:.55;cursor:wait}',
     '.wbs-idle-head{display:flex;align-items:center;gap:7px;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}',
     '.wbs-idle-head:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:2px;border-radius:6px}',
     '.wbs-idle-chevron{flex:0 0 auto;width:7px;height:7px;margin-left:1px;border-right:1.6px solid var(--wb-icon-tertiary,#999);border-bottom:1.6px solid var(--wb-icon-tertiary,#999);transform:rotate(-45deg);transition:transform .18s}',

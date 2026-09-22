@@ -263,12 +263,23 @@ ok(/\.wbs-cloud-btn-armed\{border-color:#e24b4a/.test(injectSrc), 'C16 确认态
     const empty = await apiCall('POST', '/api/cloud/ghosts/purge', {});
     ok(empty.status === 400, 'D8 purge 空选择 → 400（不会误清）', empty.status);
 
+    // 2026-09-22 实测（探针 .wd-analysis/probe-cloud-delete-semantics.js，同一伪造 UUID 对照）：
+    //   cloudAgentDeleteConversation({conversationId}) → **不抛异常、返回 undefined**（幂等）
+    //   cloudAgentGetConversationDetail({conversationId}) → 抛 4002 `conversation not found`
+    // 文件头记录的 2026-09-16「问一个不存在的 id → conversation not found」**对 delete 已失效**（对 detail 仍成立）。
+    // ⇒ 不能再断言 `deleted === 0`：云端不再回 not found，daemon 只能把「云端接受」记成 deleted。
+    // 改为断言**与云端语义无关的守恒式**：这一个 id 要么记 deleted、要么记 skipped，绝不能进 failed。
     const nothing = await apiCall('POST', '/api/cloud/ghosts/purge', { ids: ['__wd_missing_uuid_probe__'] });
-    ok(nothing.status === 200 && nothing.body && nothing.body.ok === true,
-      'D9 purge 不存在的 id → 200（云端回 not found）', nothing.body);
-    ok(nothing.body && nothing.body.deleted === 0, 'D10 一条都没删掉（id 本来就不存在）', nothing.body && nothing.body.deleted);
-    ok(nothing.body && nothing.body.failed && nothing.body.failed.length === 0,
-      'D11 云端"本来就没有"记成 skip，不算失败', nothing.body && nothing.body.failed);
+    const nb = nothing.body || {};
+    const accounted = Number(nb.deleted || 0) + Number(nb.skipped || 0);
+    console.log('  info  对不存在的 id：deleted=' + nb.deleted + ' skipped=' + nb.skipped +
+      ' failed=' + ((nb.failed || []).length) + '（云端回什么就记什么，二者之和必须为 1）');
+    ok(nothing.status === 200 && nb.ok === true,
+      'D9 purge 不存在的 id → 200/ok（云端回 not found 或幂等成功都不得报错）', { deleted: nb.deleted, skipped: nb.skipped });
+    ok(accounted === 1 && Number(nb.requested || 0) === 1,
+      'D10 这一个 id 必须被记账（deleted + skipped === 1，不多不少）', accounted);
+    ok(Array.isArray(nb.failed) && nb.failed.length === 0,
+      'D11 云端"本来就没有"绝不算失败', nb.failed);
 
     const guarded = await apiCall('POST', '/api/cloud/ghosts/purge', {
       ids: ['__wd_missing_uuid_probe2__'], uid: '__wd_other_account__',

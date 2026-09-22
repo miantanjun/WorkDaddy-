@@ -217,7 +217,7 @@ ok(/saveIdleCard\(\{ collapsed: next \}\)/.test(injectSrc), 'C25 点折叠头会
 ok(/\.wbs-idle-card\.collapsed \.wbs-idle-body\{display:none\}/.test(injectSrc), 'C26 收起样式');
 ok(/\.wbs-idle-chevron\{/.test(injectSrc) && /\.wbs-idle-card:not\(\.collapsed\) \.wbs-idle-chevron\{transform:rotate\(45deg\)\}/.test(injectSrc),
   'C27 箭头随展开状态旋转');
-ok(/function idleSummaryText\(info\)/.test(injectSrc), 'C28 摘要文案函数在位');
+ok(/function fillIdleSummary\(summary, info\)/.test(injectSrc) && injectSrc.slice(injectSrc.indexOf('function fillIdleSummary('), injectSrc.indexOf('function fillIdleSummary(') + 1400).indexOf('data-wbs-i18n-skip') >= 0, 'C28 摘要构建函数在位（标签/数据分元素，数据走 skip 子树）');
 const idleMod = fs.readFileSync(path.join(ROOT, 'scripts', 'idle-switchback.js'), 'utf8');
 ok(/collapsed: r\.collapsed === undefined \|\| r\.collapsed === null \? DEFAULTS\.collapsed : !!r\.collapsed/.test(idleMod),
   'C29 配置里持久化 collapsed');

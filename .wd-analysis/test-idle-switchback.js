@@ -372,7 +372,21 @@ const automation = fs.readFileSync(path.join(ROOT, 'scripts', 'automation.js'), 
 
 ok(inject.indexOf('wbs-idle-card') >= 0 && inject.indexOf('id="wbs-idle-primary"') >= 0, 'K1a 账号页有「账号自动切换」卡片 + 主账号下拉');
 ok(inject.indexOf('id="wbs-idle-enabled"') >= 0 && inject.indexOf('id="wbs-idle-minutes"') >= 0, 'K1b 卡片有开关 + 阈值输入框');
-ok(inject.indexOf("'<div class=\"wbs-acct-list\"></div>' +\n        // 账号自动切换") >= 0, 'K1c 卡片夹在账号列表与「登录新账号」之间（不抢列表的滚动区）');
+ok(inject.indexOf("'<div class=\"wbs-acct-list\"></div>' +\n        '<button class=\"wbs-logout-btn\"") >= 0,
+  'K1c 账号列表直接接「登录新账号」（三卡不再常驻列表下方抢高度）');
+ok(inject.indexOf('data-act="ops"') >= 0 && inject.indexOf('id="wbs-ops-dot"') >= 0, 'K1d 工具栏有「运维」入口 + 告警红点');
+ok(inject.indexOf('<div class=\"wbs-ops-popover\" id=\"wbs-ops-popover\"') >= 0 &&
+  inject.indexOf("'<div class=\"wbs-ops-body\">' +\n        '<div class=\"wbs-pcard wbs-idle-card\"") >= 0,
+  'K1e 三卡搬进「运维」弹出层（挂 .wbs-panel 内，避开 .wbs-body 的 overflow:hidden 裁切）');
+ok(inject.indexOf('function setOpsFlag(') >= 0 && inject.indexOf("setOpsFlag('failover', running || dataRows.length > 0)") >= 0 &&
+  inject.indexOf("setOpsFlag('audit', Number(counts.crit || 0) > 0)") >= 0,
+  'K1f 红点由限流窗口 / 体检严重项回填');
+ok(inject.indexOf('id="wbs-panel-resize"') >= 0 && inject.indexOf('(function setupPanelResize()') >= 0 &&
+  inject.indexOf("var MIN_W = 380, MIN_H = 340, KEY = 'workdaddy.ui.panelSize'") >= 0,
+  'K1g 面板可拖拽缩放（左上角抓手 + 尺寸存 localStorage）');
+ok(inject.indexOf('if (!userSized) return;') >= 0, 'K1h 没手动调过尺寸时不覆写面板宽度（英文版 880px 不被内联样式压掉）');
+ok(inject.indexOf("'.wbs-ops-popover{position:absolute;") >= 0 && inject.indexOf("'.wbs-panel-resize{position:absolute;left:0;top:0") >= 0,
+  'K1i 弹出层与抓手样式在（弹出层用 absolute —— 面板的 backdrop-filter 会让 fixed 降格）');
 ok(inject.indexOf("api('/api/idle-switchback')") >= 0, 'K2a 前端读配置走 /api/idle-switchback');
 ok(/api\('\/api\/idle-switchback', \{ method: 'POST'/.test(inject), 'K2b 保存走 POST /api/idle-switchback');
 ok(inject.indexOf("api('/api/accounts/primary', { method: 'POST'") >= 0, 'K2c 主账号下拉接上了此前没人调用的 /api/accounts/primary');
