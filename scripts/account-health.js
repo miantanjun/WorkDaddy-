@@ -600,8 +600,36 @@ function isUsableView(view) {
   return { usable: true, reason: 'ok' };
 }
 
-function isUsableForFailover(health, uid, now) {
-  return isUsableView(readHealth(health, uid, now));
+/**
+ * A3：**可选**模型维度 —— 传了 `modelId` 且该模型仍在冷却窗口 ⇒ 判不可用
+ * （只排除这一个模型，**不切整号**；换号候选池里仍可拿这个号跑别的模型）。
+ *
+ * ⚠️ 不传 `modelId` ⇒ 与加 A3 之前**逐字等价**（只看账号级）—— 现有 47 项断言无需改动即通过。
+ * 账号级已判死时**维持账号级判决**（`reason` 不覆盖）：账号级永远优先于模型级。
+ *
+ * @param {object} health 健康表
+ * @param {string} uid 账号
+ * @param {number} [now]
+ * @param {string} [modelId] 可选：本期要跑的具体模型
+ */
+function isUsableForFailover(health, uid, now, modelId) {
+  const view = readHealth(health, uid, now);
+  const base = isUsableView(view);
+  const mid = String(modelId || '').trim();
+  if (!mid || !base.usable) return base;
+  const models = view && view.models && typeof view.models === 'object' ? view.models : null;
+  const entry = models ? models[mid] : null;
+  const until = entry ? Number(entry.until) || 0 : 0;
+  const at = Number(now) || Date.now();
+  if (until > at) {
+    return {
+      usable: false,
+      reason: 'model-cooling-' + String((entry && entry.kind) || HEALTH_KINDS.ModelBlocked),
+      modelId: mid,
+      until: until,
+    };
+  }
+  return base;
 }
 
 module.exports = {

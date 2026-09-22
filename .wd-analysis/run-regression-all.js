@@ -37,7 +37,7 @@ const SUITES = [
   ['test-failover-clock.js', 42],  // v1.4.1 §9-7：限流窗口绝对到期时刻 + 时钟回拨不可信 + 结构化「选不出账号」
   ['test-build-pin.js', 27],  // v1.4.1 §9-5：ws 钉版本（manifest+lock+npm ci）+ 真跑 vendoring 与内嵌 Python 块
   ['test-session-sync-124.js', 65],  // 上游 1.2.5 会话同步重定基：五态判定 + 选主不猜 + applySnapshot 真写 + fixture/delta provenance 锁（锚 1.2.5）+ 上限取消/惰性读守卫 + readSessionSizes
-  ['test-auto-copy-judge.js', 27],  // 方案 D/D0：judge 开关（默认 mtime ⇒ 零行为变化）+ 快照域切分 + 指纹 memo（命中零读盘）+ slim/writable 护栏
+  ['test-auto-copy-judge.js', 39],  // 方案 D/D0：judge 开关（默认 mtime ⇒ 零行为变化）+ 快照域切分 + 指纹 memo（命中零读盘）+ slim/writable 护栏；2026-09-22 加 [E] D4 灰度入口（GET/POST /api/sessions/auto-copy/judge + 非法值 400 + 全仓唯一调用点反向守卫）12 条
   ['test-auto-copy-leader.js', 67],  // 方案 D/D1+D1.5：内容定源判主偏序 + mtime 不参与定源 + alias 契约 + daemon 接线 + 打包白名单 + 面板文案；2026-09-21 冲突文案抽共用 helper 后 +2（I4 两处共用 / I5 conflict 分支）
   ['test-auto-copy-content-write.js', 54],  // 方案 D/D2：content 模式改走 applySnapshot 事务写入（差异集 + 备份 + journal + 发布后复检）+ 目标多余文件清理 + 产物域不动 + 备份按 mtime 裁剪 + 默认 mtime 路径逐字节未变
   ['test-session-sync-cache-a3.js', 41],  // 上游 1.2.5 吸纳/A3：文件级指纹缓存（命中零 readFileSync / 结论等价 / 同长度改写必失效 / 排除域不污染）+ judge/leader 第 4 参透传 + daemon 接线 + 缓存本体去抖落盘与脏条目剔除
@@ -49,6 +49,7 @@ const SUITES = [
   ['test-context-audit.js', 59],  // 省 token 吸纳：上下文体检（记忆/skill 体积 + 会话成本形状）—— frontmatter 块标量 / 阈值分级 / 目录树行数真数 / 副本行去重 / sessionRoot 默认值回归（第一版传 home 导致会话维度静默全零）+ daemon 路由只读性静态守卫
   ['test-context-fix.js', 60],  // 省 token 吸纳（执行侧）：context-fix 只移动不删除 + 认 installed_plugins.json 保留激活版本（不靠目录名猜）+ dryRun 不碰盘 + 幂等 + 未知 fixId 拒绝 + daemon fix 路由只收 fixId 不收路径 + 面板折叠化与体检按钮接线 + B1 交接摘要（buildHandoff 纯函数 + GET /api/handoff 只读）
   ['test-memory-governance.js', 106],  // B2 记忆治理巡检：三层分层判据（云端/用户级/工作区/日档）+ 四类错层假阳性必须被排掉（中缀路径 / HTTP 路由 / 通配 / `..`）+ 死指针只认反引号路径且排占位符 + **只提醒不自动改写**（fix.kind 恒为 paste、counts.autoFixable 恒为 0、无 /api/memory-audit/fix 路由）+ mac 白名单两处 + CRLF 纪律
+  ['test-structured-error.js', 102],  // F2 第二期（渲染层结构化错误）+ A3（模型级冷却）：形状无关扫描（多字段容错/不误报/循环与深度安全）+ 合成观测「无信号时与 F2 之前逐字相同」+ CDP 表达式自包含且伪页面真跑（幂等/抗 adapter 重建/sink 不外抛/环上限）+ isUsableForFailover 第 4 参 modelId（不传零变化）+ pickFailoverTarget 透传 + 切片反向守卫 + mac 白名单
 ];
 
 const out = [];

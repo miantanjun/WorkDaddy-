@@ -332,8 +332,8 @@ ok(hasD('recordAccountHealth(uid, { source: \'credit-api\', httpStatus: 401, rea
 ok(hasD('healthFilter: buildFailoverHealthFilter(),'), 'E13 端口 healthFilter 已接线（A5 谓词）');
 ok(hasD('recordHealth: (uid, observation) => recordAccountHealth(uid, observation, Date.now()),'), 'E14 端口 recordHealth 已接线');
 ok(hasD('clearHealth: (uid) => {'), 'E15 端口 clearHealth 已接线（备选账号证明能干活后清自动位）');
-ok(hasD("const healthOptions = typeof ports.healthFilter === 'function' ? { health: ports.healthFilter } : {};"),
-  'E16 核心从端口取谓词，没注入就不过滤');
+ok(hasD("const healthOptions = typeof ports.healthFilter === 'function' ? { health: ports.healthFilter, modelId: modelId } : {};"),
+  'E16 核心从端口取谓词（并带上 A3 的 modelId），没注入就不过滤');
 ok(hasD("const allUnhealthy = nothingToTry && !!(emptyPick && emptyPick.reason === 'all-unhealthy');"),
   'E17 收尾区分 all-unhealthy（与 all-blocked / no-others 三足鼎立）');
 ok(hasD('其他账号需要先重新登录（或已被手动停用），已停止自动切号 —— 请到账号面板看各账号的健康状态'),

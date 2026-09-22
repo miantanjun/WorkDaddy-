@@ -106,6 +106,7 @@ const {
   getAutoCopyRules,
   readAutoCopyConfig,
   getAutoCopyJudge,
+  setAutoCopyJudge,
   dedupeAutoCopySessionRows,
   setAutoCopyRule,
   setAutoCopyAllSessions,
@@ -476,7 +477,22 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        拆成两个状态（新增 scripts/account-health.js，纯模块 + DATA_DIR/account-health.json）。
 //        新增 GET /api/account-health 与 disable/enable/revive/clear 四个幂等端点，状态接口透出概览；
 //        切号备选池按健康分级排除（needs_reauth / disabled 不再被选中），面板账号卡片显示健康徽标。
-const DAEMON_VERSION = '1.5.0';
+// 1.6.0：F2 第二期（信号源）+ A3（模型级冷却）+ D4（判据灰度入口）三件一批
+//         · F2 第二期：新增 scripts/structured-error.js —— 走渲染层的**正规事件通道**
+//           （`provider.api.onSessionEvent` → `client.on('session:event')`，频道名出自 asar
+//           /preload/index.js 的 SESSION_RPC_CHANNELS.EVENT）采集结构化错误
+//           （bizCode / httpStatus / stopReason），与 DOM 横幅在**同一处**合并成一条 health 观测；
+//           两个端口缺省即逐字退回老观测。**不做**主进程 --inspect、**不改写**官方请求。
+//           ⚠️ 已实测排除的通路（别重试）：`daemonClient.$invoke` 被闭包绕过、
+//           `adapter.errorCallbacks` 不接云 API 错误（触发后 0 命中）、`showErrorBanner` 非全局。
+//         · A3：`isUsableForFailover(health, uid, now, modelId)` 增加**可选**第 4 参 ——
+//           该模型在 `entry.models[]` 里冷却中就把这一个模型从候选里去掉（**不切整号**）；
+//           不传 modelId 即与加 A3 之前逐字等价（既有断言无需改动）。
+//         · D4 灰度入口：新增 GET/POST `/api/sessions/auto-copy/judge`（默认仍是 `mtime`，
+//           即零行为变化、可一键回退）。`setAutoCopyJudge` 从「全仓无人调用」变成有唯一显式入口。
+//           影响面已量化（.wd-analysis/diag-judge-content.js，本机 25 条血缘 / 21 条多成员）：
+//           源选择变化 3 条、动作变化 1 条（约 28.5 MB 的一次增量同步）、新增分叉 0 条。
+const DAEMON_VERSION = '1.6.0';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.5';
@@ -499,7 +515,7 @@ const UPSTREAM_VERSION = '1.2.5';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.5.0-20260922-token-ui-b4';
+const DAEMON_BUILD_ID = 'release-1.6.0-20260922-structured-error';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -553,6 +569,7 @@ const CREDIT_USAGE_REFRESH_MS = 15000;
 const creditUsageSyncInFlight = new Map();
 const { selectRotationCandidate, nearestExpiringSegment } = require('./credit-rotation.js');
 const limitFailover = require('./limit-failover.js');
+const structuredError = require('./structured-error.js');
 // F2：账号健康状态机（429 冷却 / 需重新认证分流）。纯模块，判据唯一真相仍在 limit-failover.js。
 const accountHealth = require('./account-health.js');
 const accountSwitchLog = require('./account-switch-log.js');
@@ -3996,6 +4013,19 @@ function readLimitBanner() {
   return runCdpExpression(limitFailover.limitBannerProbeExpression(), { awaitPromise: false });
 }
 
+/**
+ * F2 第二期：读渲染层的**结构化错误**信号（并顺手幂等安装监听）。
+ *
+ * 表达式本身自包含（见 `scripts/structured-error.js`）：在页面里挂一次
+ * `provider.api.onSessionEvent(sink)`，把 `session:event` 上扫到的 `bizCode / httpStatus /
+ * stopReason` 存进 `window.__wbsStructuredError`，然后回读最近一条。
+ *
+ * 失败/离线一律返回 null ⇒ 调用方退回 DOM 横幅那条老路，**不报错、不改行为**。
+ */
+function readStructuredError() {
+  return runCdpExpression(structuredError.structuredErrorProbeExpression(), { awaitPromise: false });
+}
+
 function readLiveModel() {
   return runCdpExpression(limitFailover.liveModelExpression('get'), { awaitPromise: false });
 }
@@ -4437,12 +4467,21 @@ async function runLimitFailoverCore(detail, ports) {
       try {
         const detected = await ports.readBanner().catch(() => null);
         const hits = (detected && detected.hits) || [];
-        await ports.recordHealth(current.uid, {
-          source: 'dom-banner',
-          hits,
-          modelId,
-          text: hits.map((hit) => String((hit && hit.text) || '')).filter(Boolean).join(' | '),
-        });
+        // F2 第二期：第二条信号 —— 渲染层结构化错误（`session:event` 上的 bizCode / httpStatus）。
+        // ⚠️ 合并逻辑走 `ports.healthObservation` 注入（本函数是切片沙箱，**不得**引用新的模块级标识符）；
+        //    两个端口缺省时走下面那条兜底 ⇒ 观测对象与 F2 之前**逐字相同**。
+        const structured = typeof ports.readStructuredError === 'function'
+          ? await ports.readStructuredError().catch(() => null)
+          : null;
+        const observation = typeof ports.healthObservation === 'function'
+          ? ports.healthObservation({ hits: hits, modelId: modelId, structured: structured })
+          : {
+            source: 'dom-banner',
+            hits: hits,
+            modelId: modelId,
+            text: hits.map((hit) => String((hit && hit.text) || '')).filter(Boolean).join(' | '),
+          };
+        await ports.recordHealth(current.uid, observation);
       } catch (error) {
         ports.log('limit-failover:health-failed ' + String((error && error.message) || error));
       }
@@ -4488,7 +4527,7 @@ async function runLimitFailoverCore(detail, ports) {
     // （**不在这里自己构造**：核心要被切片单测，引用任何模块级新函数都会让沙箱抛
     //  `ReferenceError`，而它被外层的 try/catch 吞掉 ⇒ 静默变成业务失败）。
     // 没注入 ⇒ 不过滤，与加这个功能之前逐字等价（既有回归断言一条都不用改）。
-    const healthOptions = typeof ports.healthFilter === 'function' ? { health: ports.healthFilter } : {};
+    const healthOptions = typeof ports.healthFilter === 'function' ? { health: ports.healthFilter, modelId: modelId } : {};
     for (let round = 0; round < 6; round++) {
       const pick = limitFailover.pickFailoverTarget(limitFailoverAccounts(), current.uid, readLimitFailoverState(), Date.now(), healthOptions);
       // pickFailoverTarget 现在**永远返回对象**：account 为 null 时带 reason，
@@ -4674,6 +4713,14 @@ function buildLimitFailoverPorts(ctx) {
   const capture = typeof c.captureTaskText === 'function' ? c.captureTaskText : () => {};
   return {
     readBanner: readLimitBanner,
+    // F2 第二期：渲染层结构化错误（读数失败返回 null ⇒ 上层静默退回横幅）。
+    readStructuredError: readStructuredError,
+    // F2 第二期：把「横幅 hits + 结构化信号」合成一条观测。
+    // 判据只有一份（在 structured-error.js），本函数只是把它带出切片沙箱。
+    healthObservation: (payload) => structuredError.observationFrom(
+      payload && payload.structured,
+      { hits: (payload && payload.hits) || [], modelId: payload && payload.modelId },
+    ),
     // F2：健康上下文（三个端口全部可选 —— 测试沙箱不注入 ⇒ 行为与加这个功能之前逐字等价）。
     //   healthFilter→ 备选池的 A5 分级排除谓词（需重新登录 / 手动停用 / 额度耗尽）；
     //   recordHealth→ 把「被限」贴上类别，并补记 needs_reauth / disabled；
@@ -10448,7 +10495,22 @@ function buildFailoverHealthFilter() {
     return null;
   }
   if (!badges) return null;
-  return (account) => accountHealth.isUsableView(badges[String((account && account.uid) || '')]).usable;
+  // A3：谓词签名扩展为 `(account, now, modelId)`。
+  //   · 不传 `modelId`（老调用方 / 老断言）⇒ 只看账号级，**与加 A3 之前逐字等价**；
+  //   · 传了 `modelId` 且该模型在 `models[]` 里冷却中 ⇒ 只把**这一个号**从候选里去掉
+  //     （不切整号：这个号跑别的模型仍然可用）。
+  // 账号级判决仍来自 `badges`（含 `mergeLiveHealth` 的档案信号），**不动**它的来源。
+  return (account, now, modelId) => {
+    const uid = String((account && account.uid) || '');
+    const view = badges[uid];
+    if (!accountHealth.isUsableView(view).usable) return false;
+    const mid = String(modelId || '').trim();
+    if (!mid) return true;
+    const models = view && view.models && typeof view.models === 'object' ? view.models : null;
+    const entry = models ? models[mid] : null;
+    const until = entry ? Number(entry.until) || 0 : 0;
+    return !(until > (Number(now) || Date.now()));
+  };
 }
 
 /** A8 端点的入参校验（与其他路由同一条 uid 口径）。 */
@@ -14557,6 +14619,28 @@ function handleApiRoute(req, res) {
   if (req.method === 'GET' && p === '/api/sessions/auto-copy/active') {
     const job = activeAutoCopyJob();
     return json(res, 200, { ok: true, job: job ? publicAutoCopyJob(job) : null });
+  }
+  // 会话同步判据开关（方案 D4 灰度）：GET 读 / POST 写 `{ judge: 'mtime' | 'content' }`。
+  //   · 默认 `'mtime'`（= 现有实现）⇒ **不调用本端点就是零行为变化**，可一键回退；
+  //   · 只有显式切到 `'content'` 才启用上游 1.2.4 的内容快照判据（sha256 + 逐条记录哈希）。
+  //   · 影响面已量化（2026-09-22 只读诊断 `.wd-analysis/diag-judge-content.js`，本机 25 条血缘 /
+  //     21 条多成员）：源选择变化 3 条、动作变化 1 条（约 28.5 MB 的一次增量同步）、新增分叉 0 条。
+  //   · 鉴权走全局那道 `X-WorkDaddy-Token` 检查（本函数之前的统一入口），无需额外处理。
+  if (req.method === 'GET' && p === '/api/sessions/auto-copy/judge') {
+    return json(res, 200, { ok: true, judge: typeof getAutoCopyJudge === 'function' ? getAutoCopyJudge(DATA_DIR) : 'mtime' });
+  }
+  if (req.method === 'POST' && p === '/api/sessions/auto-copy/judge') {
+    return readBody(req).then((body) => {
+      const raw = String((body && body.judge) || '').trim();
+      if (raw !== 'mtime' && raw !== 'content') {
+        return json(res, 400, { ok: false, error: "judge 只能是 'mtime' 或 'content'" });
+      }
+      if (typeof setAutoCopyJudge !== 'function') return json(res, 500, { ok: false, error: '当前版本不支持切换判据' });
+      const before = typeof getAutoCopyJudge === 'function' ? getAutoCopyJudge(DATA_DIR) : 'mtime';
+      const next = setAutoCopyJudge(DATA_DIR, raw);
+      log('[sessions-auto-copy] judge 切换 ' + before + ' -> ' + next);
+      return json(res, 200, { ok: true, judge: next, changed: next !== before });
+    });
   }
   // 暂停同步：POST /api/sessions/auto-copy/cancel { jobId? }
   //   带 jobId：只停那一个；不带：停「当前正在跑 + 队列里排着的」全部 —— 用户点

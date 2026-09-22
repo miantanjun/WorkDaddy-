@@ -180,6 +180,33 @@ ok(sessionSync.compareSnapshots(skipS, skipT).kind === 'equal',
   ok(judge.judgeSkipPrefixes().includes('workspace/sessions'),
     'D4 judgeSkipPrefixes 暴露排除清单（默认域收敛在一处）', judge.judgeSkipPrefixes());
 
+  /* ==================================================================== */
+  section('[E] D4 灰度入口：/api/sessions/auto-copy/judge（默认仍是 mtime）');
+  /* ==================================================================== */
+
+  const D4DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'wd-d4-'));
+  ok(lib.getAutoCopyJudge(D4DIR) === 'mtime', 'E1 空目录默认判据是 mtime（未灰度 = 零行为变化）');
+  ok(lib.setAutoCopyJudge(D4DIR, 'content') === 'content', 'E2 显式切 content 生效');
+  ok(lib.getAutoCopyJudge(D4DIR) === 'content', 'E3 切换后读回仍是 content（已落盘）');
+  ok(lib.setAutoCopyJudge(D4DIR, 'mtime') === 'mtime', 'E4 可一键回退到 mtime');
+  ok(lib.setAutoCopyJudge(D4DIR, 'CONTENT') === 'mtime', 'E5 非法值归一为 mtime（不产生第三态）');
+  ok(lib.setAutoCopyJudge(D4DIR, '') === 'mtime', 'E6 空值同样归一为 mtime');
+  fs.rmSync(D4DIR, { recursive: true, force: true });
+
+  const daemonSrc = fs.readFileSync(path.join(ROOT, 'scripts', 'daemon.js'), 'utf8').replace(/\r\n/g, '\n');
+  ok(daemonSrc.indexOf("p === '/api/sessions/auto-copy/judge'") >= 0, 'E7 daemon 暴露了 judge 端点');
+  ok(daemonSrc.indexOf("if (req.method === 'GET' && p === '/api/sessions/auto-copy/judge')") >= 0
+    && daemonSrc.indexOf("if (req.method === 'POST' && p === '/api/sessions/auto-copy/judge')") >= 0,
+    'E8 GET 读 / POST 写两条都接上（只读一份实现）');
+  ok(daemonSrc.indexOf("if (raw !== 'mtime' && raw !== 'content') {") >= 0
+    && daemonSrc.indexOf("return json(res, 400, { ok: false, error: \"judge 只能是 'mtime' 或 'content'\" });") >= 0,
+    'E9 非法值被 400 拒绝且不落盘（不做静默归一，用户要知道自己写了什么）');
+  ok(daemonSrc.indexOf('  setAutoCopyJudge,') >= 0, 'E10 daemon 从 lib 引入了 setAutoCopyJudge');
+  const setCalls = (daemonSrc.match(/setAutoCopyJudge\(DATA_DIR/g) || []).length;
+  ok(setCalls === 1, 'E11 【反向守卫】setAutoCopyJudge 全仓只有这一个调用点 ⇒ 没有旁路偷偷改判据', setCalls);
+  ok(daemonSrc.indexOf('const before = typeof getAutoCopyJudge === \'function\' ? getAutoCopyJudge(DATA_DIR) : \'mtime\';') >= 0,
+    'E12 切换响应回带 changed（能回答「这次到底变没变」）');
+
   fs.rmSync(SANDBOX, { recursive: true, force: true });
   fs.rmSync(LIBDIR, { recursive: true, force: true });
 

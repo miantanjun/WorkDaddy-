@@ -321,9 +321,11 @@ function clearAccountBlocked(state, uid) {
 //  3) 有剩余积分段数据时优先「最快到期且有余额」的那个（复用 credit-rotation 的口径）；
 //  4) 没有积分数据就按账号列表原顺序。
 //
-// options.health（可选，A5「分级排除」）：`(account, now) => boolean` 谓词。
+// options.health（可选，A5「分级排除」）：`(account, now, modelId) => boolean` 谓词。
 // **缺省不传 ⇒ 与不传时逐字等价**（既有断言不需要改动）。谓词的判据在 account-health.js 里
 // 只有一份（`isUsableView`），本模块不重写那套规则 —— 它只负责「被排除的不参与候选」。
+// 第三个参数 `modelId` 来自 `options.modelId`（A3 模型级冷却）：老谓词只声明两个形参，
+// 多传一个参数**不会**改变它们的行为；新谓词据此把「该模型正冷却」的号也从候选里去掉。
 // 这是本模块唯一一处让健康状态参与选号的地方，且只会**减少**候选，不会新增。
 function pickFailoverTarget(accounts, currentUid, state, now, options = {}) {
   const windowMs = Number(options.windowMs) || LIMIT_FAILOVER_WINDOW_MS;
@@ -341,7 +343,7 @@ function pickFailoverTarget(accounts, currentUid, state, now, options = {}) {
   const excluded = [];
   for (const account of others) {
     let ok = true;
-    if (healthOk) { try { ok = healthOk(account, at) !== false; } catch (_) { ok = true; } }
+    if (healthOk) { try { ok = healthOk(account, at, options.modelId) !== false; } catch (_) { ok = true; } }
     if (ok) eligible.push(account); else excluded.push(String(account.uid));
   }
   if (!eligible.length) {
