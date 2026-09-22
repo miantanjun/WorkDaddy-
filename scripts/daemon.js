@@ -469,13 +469,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.4.2：成长任务「一键完成」——tier 1/2 默认执行（真实对话/真实专家 id/服务端 requestId），
 //        tier 3（服务端不校验真实性的纯上报）默认关闭、需显式开关；新增 /api/growth/task-actions、
 //        /api/growth/tasks-auto-all、/api/growth/tasks-auto-status 三条接口，面板按档位渲染按钮。
-const DAEMON_VERSION = '1.4.3';
+const DAEMON_VERSION = '1.4.4';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.3';
 // 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.3）。
 // 本机 fork 用自己的修改版版本号（1.4.x = 上游 1.2.3 基线 + 本地增强），否则更新检查会误判。
-const DAEMON_BUILD_ID = 'release-1.4.3-20260921-upstream-125-absorb';
+const DAEMON_BUILD_ID = 'release-1.4.4-20260921-conflict-and-manual-sync';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -6708,6 +6708,26 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   const targetIds = live.map((member) => member.id);
   const targetPresent = targetUid === undefined || live.some((member) => member.uid === String(targetUid || '').trim());
   if (live.length < 2) return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent };
+  // 冲突裁决（2026-09-21）：force=true 时**跳过 mtime 水位线判据**，并按 forceSourceId 指定源。
+  // 只有面板/API 的显式「以某账号为准」才会带上它；默认 false ⇒ 逐行为不变。
+  // 为什么需要它：判冲突分支在写盘之前 return 且**不推进水位线** ⇒ 真分叉一旦发生就永久
+  // 自锁（每次切号都报同一条、最新内容再也下发不出去）。这是给用户留的显式出口，
+  // 不是让判据变松 —— 不传 force 时判据一个字都没改。
+  // 「立即同步 → 强制覆盖」按**账号 uid** 指定源（面板「以本账号为准」则是按副本 id）。
+  // 账号级任务手上只有 uid，而同一血缘的成员 id 因账号而异（同一份会话在每个账号里 id 不同）——
+  // 这里用 records（meta 里本来就带 uid↔id，不用额外 IO）把 uid 归一化成 forceSourceId，
+  // 于是下面 forcedSource / latest 的取源逻辑一个字都不用改。
+  // ⚠️ uid 不在本血缘里 ⇒ **整块 force 作废**、退回默认的保护性判据：用户点名要的那一份既然
+  // 不在这条血缘里，就不该拿别人的副本去覆盖 —— 宁可照常报分叉让人来选，也不能猜。
+  if (options && options.force && !String(options.forceSourceId || '').trim()) {
+    const wantedForceUid = String(options.forceSourceUid || '').trim();
+    const hitForceMember = wantedForceUid
+      ? (records.find((member) => String(member.uid) === wantedForceUid) || null)
+      : null;
+    options = Object.assign({}, options, { forceSourceId: hitForceMember ? String(hitForceMember.id) : '', force: !!hitForceMember });
+  }
+  const forceResolve = !!(options && options.force);
+  const forceSourceId = String((options && options.forceSourceId) || '').trim();
   // ---- 判主偏序（方案 D 的 D1；只有 judge='content' 时才走，默认路径逐行为不变）----
   // 用**内容**定源：找「含住其余全部成员」的那一份当源。有唯一领导者才 fan-out；
   // 全部等价 => 无事可做；谁都不含谁 => 真分叉，**一份都不覆盖**，双方保留交用户裁决。
@@ -6764,7 +6784,7 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   const changedSinceBaseline = (judgeMode === 'content' || !(baselineAt > 0))
     ? []
     : live.filter((member) => Number(member.contentMtime || 0) > baselineAt);
-  if (judgeMode !== 'content' && changedSinceBaseline.length >= 2) {
+  if (!forceResolve && judgeMode !== 'content' && changedSinceBaseline.length >= 2) {
     return {
       members: live.length,
       synced: 0,
@@ -6777,11 +6797,16 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   }
   // The lineage already has the target member and neither side changed since
   // the last successful sync. Avoid a full overwrite of an unchanged session.
-  if (judgeMode !== 'content' && targetPresent && baselineAt > 0 && changedSinceBaseline.length === 0) {
+  if (!forceResolve && judgeMode !== 'content' && targetPresent && baselineAt > 0 && changedSinceBaseline.length === 0) {
     return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent, unchanged: true };
   }
   // judge='content' 时源由内容偏序决定（contentLatest）；只有默认的 mtime 路径才比时间。
-  const latest = contentLatest || selectLatestAutoCopyMember(live);
+  // force 时源由调用方指定（用户点「以本账号为准」那一份），不再按 mtime 选「最新」——
+  // 真分叉下「最新」并不等于「用户想要的那份」，按时间选会静默丢另一边的内容。
+  const forcedSource = (forceResolve && forceSourceId)
+    ? live.find((member) => member.id === forceSourceId)
+    : null;
+  const latest = forcedSource || contentLatest || selectLatestAutoCopyMember(live);
   if (!latest) return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent };
   const sourceRow = latest.row;
   let synced = 0;
@@ -6909,6 +6934,98 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
     }
   }
   return { members: live.length, synced, failedFiles, copiedBytes, sourceId: latest.id, sourcePickedBy: judgeMode, targetIds, targetPresent, payloadTargets };
+}
+
+/* ---------------- 自动复制的「分叉冲突」查询与裁决（2026-09-21） ---------------- */
+//
+// 背景：`syncAutoCopyLineage` 的 mtime 水位线判据在「同一会话被两个账号各自继续聊过」时
+// 会判 conflict 并**拒绝写盘**（保住两边的数据，这个行为是对的），但它同时**不推进水位线**
+// ⇒ 这条血缘永久自锁：此后每次切号都报同一条，而且前端把 'conflict' 落进了 else 分支，
+// 显示成「自动复制失败 / 任务异常终止」——用户以为系统坏了，其实是保护性拒绝覆盖。
+//
+// 这里给出两条**显式**出口（都只在用户主动点/主动调时才走）：
+//   dismiss —— 只把水位线推到「各成员正文 mtime 的最大值」，**不写任何会话内容** ⇒ 停止重复提示。
+//   prefer  —— 以指定账号的副本为源，强制 fan-out 覆盖其余成员（会丢掉另一边的新内容，须用户明确选择）。
+// 真分叉的**内容合并不做**：会话 jsonl 是带父子链的多分支结构，线性合并没有安全实现，
+// 硬合会产出重复/错序的 tool_call 配对 —— 宁可让用户选一份，也不自动产出坏会话。
+function autoCopyConflictSnapshot(lineageId) {
+  const id = String(lineageId || '').trim();
+  if (!id) return null;
+  const records = typeof getAutoCopySessionMemberRecords === 'function'
+    ? getAutoCopySessionMemberRecords(DATA_DIR, id)
+    : [];
+  if (records.length < 2) return null;
+  // 标尺必须与 syncAutoCopyLineage 同源（血缘级 watermark + copies 回退），否则这里说「不冲突」
+  // 而真正复制时又说「冲突」，用户会被两个口径来回打脸。
+  const watermark = typeof getAutoCopyLineageSyncedAt === 'function'
+    ? getAutoCopyLineageSyncedAt(DATA_DIR, id)
+    : 0;
+  const members = [];
+  let maxMtime = 0;
+  for (const member of records) {
+    const bodyMtime = sessionBodyMtime(PROFILE.dataRoot, member.id);
+    if (bodyMtime > maxMtime) maxMtime = bodyMtime;
+    members.push({ uid: member.uid, id: member.id, bodyMtime });
+  }
+  const over = watermark > 0 ? members.filter((m) => m.bodyMtime > watermark) : [];
+  return {
+    lineageId: id,
+    conflicts: over.length >= 2 ? 1 : 0,
+    watermark,
+    baselineAt: watermark,
+    maxMtime,
+    overIds: over.map((m) => m.id),
+    members,
+  };
+}
+
+function listAutoCopyConflicts() {
+  let config = null;
+  try { config = typeof readAutoCopyConfig === 'function' ? readAutoCopyConfig(DATA_DIR) : null; } catch (_) { return []; }
+  if (!config || !config.sessions) return [];
+  const out = [];
+  for (const lineageId of Object.keys(config.sessions)) {
+    const snap = autoCopyConflictSnapshot(lineageId);
+    if (snap && snap.conflicts) out.push(snap);
+  }
+  return out;
+}
+
+// 只推进标尺、不碰会话内容 —— 这是「默认安全」的那一半：解掉自锁，数据一个字节都不动。
+function dismissAutoCopyConflict(lineageId) {
+  const snap = autoCopyConflictSnapshot(lineageId);
+  if (!snap) return { ok: false, status: 404, error: '该会话没有可裁决的跨账号副本' };
+  if (!snap.conflicts) return { ok: true, lineageId: snap.lineageId, action: 'dismiss', alreadyClear: true, watermark: snap.watermark };
+  // +1ms：判据是「mtime > watermark」的严格大于，取 max 会让刚刚那批文件仍然算「超线」。
+  const next = Math.max(snap.maxMtime, snap.watermark) + 1;
+  const stored = typeof setAutoCopyLineageSyncedAt === 'function'
+    ? setAutoCopyLineageSyncedAt(DATA_DIR, snap.lineageId, next)
+    : 0;
+  log('[sessions-auto-copy] 冲突裁决 dismiss ' + snap.lineageId + ' watermark ' + snap.watermark + ' -> ' + stored);
+  return { ok: true, lineageId: snap.lineageId, action: 'dismiss', watermark: stored, members: snap.members.length };
+}
+
+// 「以某个账号为准覆盖其余」——会丢数据，只在用户显式选择时调用。
+async function preferAutoCopyConflict(lineageId, targetUid) {
+  const snap = autoCopyConflictSnapshot(lineageId);
+  if (!snap) return { ok: false, status: 404, error: '该会话没有可裁决的跨账号副本' };
+  const uid = String(targetUid || '').trim();
+  const member = snap.members.find((m) => m.uid === uid);
+  if (!member) return { ok: false, status: 404, error: '该账号不属于这条会话血缘' };
+  const result = await syncAutoCopyLineage(snap.lineageId, uid, { force: true, forceSourceId: member.id });
+  log('[sessions-auto-copy] 冲突裁决 prefer ' + snap.lineageId + ' source=' + member.id
+    + ' synced=' + result.synced + ' failedFiles=' + result.failedFiles + ' stillConflict=' + !!result.conflict);
+  return {
+    ok: !result.conflict,
+    status: result.conflict ? 409 : undefined,
+    error: result.conflict ? '覆盖后仍判冲突，请稍后重试' : undefined,
+    lineageId: snap.lineageId,
+    action: 'prefer',
+    targetUid: uid,
+    sourceId: member.id,
+    synced: result.synced,
+    failedFiles: result.failedFiles,
+  };
 }
 
 /* ---------------- 会话删除的唯一实现（面板端点 + 原生软删探测共用） ---------------- */
@@ -8024,7 +8141,7 @@ function autoCopyAfterAccountSwitch(sourceUid, targetUid, reason) {
  *   · 显式给了源账号 → 只同步它；不存在 / 与目标相同都返回 error
  *   · **留空 → 除目标账号以外的所有账号**（把别的账号开了自动复制的会话都收拢到目标）
  */
-function resolveSyncNowSources(accountUids, targetUid, explicitSource) {
+function resolveSyncNowSources(accountUids, targetUid, explicitSource, options) {
   const all = (Array.isArray(accountUids) ? accountUids : [])
     .map((uid) => String(uid == null ? '' : uid).trim())
     .filter(Boolean);
@@ -8034,6 +8151,12 @@ function resolveSyncNowSources(accountUids, targetUid, explicitSource) {
     if (all.indexOf(explicit) < 0) return { sources: [], explicit: true, error: '源账号不存在' };
     if (explicit === target) return { sources: [], explicit: true, error: '源账号与目标账号相同' };
     return { sources: [explicit], explicit: true, error: '' };
+  }
+  // 强制覆盖必须**点名**一个源账号：源留空 = 「除目标外每个账号各同步一次」会彼此覆盖，
+  // 最终谁赢取决于任务排队顺序 —— 那不是用户能预期的行为，直接拒掉。
+  // 用 400 而不是 409：这是参数错误，不是「环境里没有可用源」那种冲突。
+  if (options && options.force) {
+    return { sources: [], explicit: false, code: 400, error: '强制覆盖必须指定源账号（源账号不能留空）' };
   }
   const sources = all.filter((uid) => uid !== target);
   return { sources, explicit: false, error: sources.length ? '' : '除目标账号外没有其它账号可以作为同步源' };
@@ -8418,7 +8541,7 @@ async function prepareFailoverContinuation(ctx) {
 const AUTO_COPY_LARGE_SESSION_BYTES = 100 * 1024 * 1024;
 const AUTO_COPY_LARGE_WARNING = '会话超过 100 MB，同步可能较慢';
 
-function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
+function startAutoCopyJob(sourceUid, targetUid, plan, labels, opts) {
   const id = crypto.randomUUID();
   const accountLabels = labels && typeof labels === 'object' ? labels : {};
   const job = {
@@ -8426,6 +8549,9 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
     status: 'queued',
     sourceUid,
     targetUid,
+    // 本次任务是否为「手动强制覆盖」（用户在「立即同步」里显式勾选）。
+    // 只影响判据的**显式出口**：默认 undefined ⇒ 逐行为不变。
+    force: !!(opts && opts.force),
     sourceName: String(accountLabels.sourceName || ''),
     targetName: String(accountLabels.targetName || ''),
     plan: Array.isArray(plan) ? plan : [],
@@ -8574,7 +8700,10 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels) {
           // from the account that happened to be active most recently.
           // 本任务自己分两阶段搬产物，lineage 同步也必须跟着跳过产物目录，
           // 否则「正文 N/N」之后又会在这里把几百 MB 的产物一次搬完，phase 拆分形同虚设。
-          const syncOptions = { skipWorkspaceSessions: true, judge: autoCopyJudgeMode };
+          // 「立即同步 → 强制覆盖」把 force 一路透传到判据：只跳过两条冲突闸门，
+          // 定源交给 forceSourceUid 在 syncAutoCopyLineage 顶部解析（账号级任务拿不到成员 id）。
+          // 非强制任务这里是中性值 ⇒ 判据零变化。
+          const syncOptions = { skipWorkspaceSessions: true, judge: autoCopyJudgeMode, force: !!job.force, forceSourceUid: job.force ? String(job.sourceUid || '') : '' };
           const enqueuePayload = (targets) => {
             for (const target of (targets || [])) {
               if (!target || !target.targetId) continue;
@@ -8784,6 +8913,8 @@ function publicAutoCopyJob(job) {
     // 源/目标账号：前端「继续同步」按钮据此按同样的 source/target 起一个新任务。
     sourceUid: job.sourceUid || '',
     targetUid: job.targetUid || '',
+    // 前端据此在结果文案里标明「这次是强制覆盖」，别和自动同步混成一句。
+    force: !!job.force,
     cancelRequested: !!job.cancelRequested,
     pausedAt: job.pausedAt || null,
     total: job.total,
@@ -13830,6 +13961,48 @@ function handleApiRoute(req, res) {
     });
   }
   // ===== 空间占用扫描（Phase 3）=====
+  // 自动复制的分叉冲突：查询 GET /api/sessions/auto-copy/conflicts
+  // 与 syncAutoCopyLineage 的判据同源（血缘级 watermark + 正文 mtime），供面板列出「要人工处理哪几条」。
+  if (req.method === 'GET' && p === '/api/sessions/auto-copy/conflicts') {
+    try {
+      const conflicts = listAutoCopyConflicts();
+      return json(res, 200, { ok: true, conflicts });
+    } catch (e) {
+      return json(res, 500, { ok: false, error: e && e.message || String(e) });
+    }
+  }
+  // 分叉冲突裁决：POST /api/sessions/auto-copy/conflict-resolve { lineageId?, targetUid?, action }
+  //   action=dismiss     只推水位线、不写会话内容 ⇒ 停止重复提示（安全，默认推荐）
+  //   action=dismiss-all 对本轮所有冲突血缘各 dismiss 一次（面板那颗按钮就走这条）
+  //   action=prefer      以 targetUid 的副本为源强制覆盖其余成员（**会丢另一边的新内容**，须显式选择）
+  if (req.method === 'POST' && p === '/api/sessions/auto-copy/conflict-resolve') {
+    return readBody(req).then((body) => {
+      const action = String((body && body.action) || '').trim();
+      const lineageId = String((body && body.lineageId) || '').trim();
+      const targetUid = String((body && body.targetUid) || '').trim();
+      if (action !== 'dismiss' && action !== 'dismiss-all' && action !== 'prefer') {
+        return json(res, 400, { ok: false, error: '未知的处理方式' });
+      }
+      const run = async () => {
+        if (action === 'dismiss-all') {
+          const all = listAutoCopyConflicts();
+          const items = [];
+          for (const item of all) items.push(dismissAutoCopyConflict(item.lineageId));
+          return { ok: true, action, count: items.length, items };
+        }
+        if (!lineageId) return { ok: false, status: 400, error: '缺少会话血缘标识' };
+        if (action === 'dismiss') return dismissAutoCopyConflict(lineageId);
+        if (!targetUid) return { ok: false, status: 400, error: '缺少账号标识' };
+        return preferAutoCopyConflict(lineageId, targetUid);
+      };
+      return run().then((result) => {
+        if (!result || result.ok === false) {
+          return json(res, Number(result && result.status) || 400, { ok: false, error: (result && result.error) || '处理失败' });
+        }
+        return json(res, 200, result);
+      }).catch((e) => json(res, 500, { ok: false, error: e && e.message || String(e) }));
+    });
+  }
   // 开始扫描：POST /api/space/scan/start
   //   同一时刻只跑一个；已有在跑的直接复用它（防连点）。全量扫描可能超过 2 分钟，
   //   所以这里**立即返回**，进度靠 /api/space/scan/status 轮询。
@@ -13891,12 +14064,14 @@ function handleApiRoute(req, res) {
       busy: !!(activeSpaceScanJob && activeSpaceScanJob.status === 'running'),
     });
   }
-  // 立即同步：POST /api/sessions/sync-now { targetUid, sourceUid? }
+  // 立即同步：POST /api/sessions/sync-now { targetUid, sourceUid?, force? }
   //   · targetUid 必填
   //   · sourceUid **可留空** → 留空表示「除目标账号以外的所有账号」：每个源账号各起一个同步任务，
   //     各自只同步它自己开了「自动复制」的会话（已登记 copies 的部分自动跳过，可反复点）
   //   · 传了 sourceUid 时只同步这一个源（旧语义）
   //   不切号、不刷新页面；复用同一个任务队列（startAutoCopyJob），与切号触发的复制共享串行语义与进度接口。
+  //   · force=true ⇒ 手动强制覆盖：跳过分叉保护，以 sourceUid 为准覆盖过去。
+  //     只在弹窗里勾了「强制覆盖」时才传；没传 = false ⇒ 默认路径判据零变化。
   if (req.method === 'POST' && p === '/api/sessions/sync-now') {
     return readBody(req).then((body) => {
       try {
@@ -13905,8 +14080,11 @@ function handleApiRoute(req, res) {
         const accounts = listAccounts(DATA_DIR);
         const account = accounts.find((a) => a.uid === targetUid) || null;
         if (!account) return json(res, 404, { ok: false, error: '目标账号不存在' });
-        const resolved = resolveSyncNowSources(accounts.map((a) => a.uid), targetUid, (body && body.sourceUid) || '');
-        if (resolved.error) return json(res, resolved.explicit ? 400 : 409, { ok: false, error: resolved.error });
+        // force = 用户的「手动强制覆盖」意图：跳过分叉保护、以 sourceUid 为准覆盖过去。
+        // 只认显式传参（默认 false）⇒ 不动默认路径的任何判据。
+        const force = !!(body && body.force);
+        const resolved = resolveSyncNowSources(accounts.map((a) => a.uid), targetUid, (body && body.sourceUid) || '', { force });
+        if (resolved.error) return json(res, resolved.code || (resolved.explicit ? 400 : 409), { ok: false, error: resolved.error });
         // 已在跑 / 排队的同向任务：直接复用它，避免用户连点造成重复排队。
         const jobs = [];
         let reused = false;
@@ -13914,10 +14092,13 @@ function handleApiRoute(req, res) {
           let existing = null;
           for (const job of autoCopyJobs.values()) {
             if ((job.status === 'running' || job.status === 'queued')
+              // force 必须一致才能复用：否则点了「强制覆盖」会接到一个非强制的在跑任务上，
+              // 用户以为已经覆盖过了，实际那条分叉一个字都没动。
+              && !!job.force === force
               && job.sourceUid === sourceUid && job.targetUid === targetUid) { existing = job; break; }
           }
           if (existing) { reused = true; jobs.push(publicAutoCopyJob(existing)); continue; }
-          jobs.push(publicAutoCopyJob(startAutoCopyJob(sourceUid, targetUid, [])));
+          jobs.push(publicAutoCopyJob(startAutoCopyJob(sourceUid, targetUid, [], null, { force })));
         }
         log('[sync-now] 已触发同步 ' + JSON.stringify({ target: targetUid, sources: resolved.sources, jobs: jobs.length, reused }));
         return json(res, 200, {
@@ -13925,6 +14106,7 @@ function handleApiRoute(req, res) {
           reused,
           job: jobs[0] || null,
           jobs,
+          force,
           sourceUids: resolved.sources,
           allSources: !resolved.explicit,
         });

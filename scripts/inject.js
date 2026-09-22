@@ -1059,7 +1059,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '导入中…': 'Importing…', ' 个任务': ' task(s)', '导入任务': 'Import tasks', '导出任务': 'Export tasks', '请先勾选要导出的任务': 'Select tasks to export first', '选择 JSON 或 ZIP 任务文件': 'Choose a JSON or ZIP task file', '读取任务文件…': 'Reading task file…', '任务导出成功': 'Tasks exported', '导入失败': 'Import failed', '导出失败': 'Export failed', '可导入': 'Ready to import', '已存在，将跳过': 'Already exists; skipped', '不兼容，无法导入': 'Incompatible; cannot import', '导入后保持停用，可在任务列表中启用。相同 ID 的任务会跳过。': 'Imported tasks stay disabled until you enable them. Existing task IDs are skipped.', '任务文件不能超过 8 MiB': 'Task files must not exceed 8 MiB', '缺少必填参数': 'Required inputs are missing', '需要更新 WorkDaddy': 'Requires a newer WorkDaddy version', '不支持当前客户端或系统': 'Unsupported client or platform', '文件不是自动化任务 JSON': 'Not an automation task JSON file', '任务格式或能力不受支持': 'Unsupported task format or capabilities',
     '发现更多自动化任务': 'Discover more automations', '正在发现…': 'Discovering…', '搜索任务名称': 'Search task names', '没有匹配的任务': 'No matching tasks', '暂未发现公开任务': 'No public tasks found', '公开任务加载失败': 'Could not load public tasks', '这些任务来自互联网公开仓库，均为第三方内容，与 WorkDaddy 无归属关系。导入后默认停用，请先安全评估再启用。': 'These tasks come from public repositories and are third-party content unaffiliated with WorkDaddy. Imported tasks stay disabled; review them before enabling.', '部分来源暂时无法访问，当前显示上次缓存的结果。': 'Some sources are unavailable. Showing cached results.', '暂无说明': 'No description', '不兼容': 'Incompatible', '无法打开仓库': 'Could not open repository', '任务已导入，启用后生效': 'Task imported. Enable it to run.', '任务已存在，未重复导入': 'Task already exists and was not imported again.', '我也要出现在这里': 'Publish my tasks', '提交公开任务': 'Publish public tasks', '收录 GitHub 和 Gitee 公开仓库。参考': 'Public GitHub and Gitee repositories are indexed. See', '将任务 JSON 放在 tasks/ 目录，并在仓库描述中加入 WorkDaddyAutomationRepository。': 'Put task JSON files in tasks/ and add WorkDaddyAutomationRepository to the repository description.', '查看示例仓库': 'View example repository', '上一页': 'Previous', '下一页': 'Next', ' · 匹配 ': ' · Matches ', '安全评估': 'Safety review', '评估中…': 'Reviewing…', '安全评估会话已创建': 'Safety review session created', '安全评估失败': 'Safety review failed', '会话创建失败': 'Could not create the session', '无法读取评估状态': 'Could not read review status', '未返回安全评估运行记录': 'No safety review run was returned', '无法创建会话': 'Could not create a session', '评估会话仍在创建，请稍后查看 WorkBuddy': 'The review session is still being created. Check WorkBuddy shortly.',
     '会话同步完成': 'Session sync complete', '会话同步完成，发现冲突': 'Session sync complete with conflicts', '会话同步完成，部分项目失败': 'Session sync complete with some failures', '会话同步等待中': 'Session sync waiting', '正在同步会话': 'Syncing session', '会话同步失败': 'Session sync failed', '同步等待中': 'Sync waiting', '同步失败': 'Sync failed', '同步': 'Sync', '已同步': 'Synced ', ' · 新同步': ' · Newly synced ', ' · 有': ' · ', ' 项需要留意': ' item(s) need attention', ' · 请稍后重试': ' · Try again later', '会话同步进度': 'Session sync progress', ' 个会话两边都修改过，未覆盖任何一边': ' session(s) were changed on both sides; neither side was overwritten', '其他账号': 'Other account', '同步完成': 'Sync complete', '同步完成，发现冲突': 'Sync complete with conflicts', '同步完成，部分失败': 'Sync complete with some failures', '正在把已标记的会话同步到「': 'Syncing marked sessions to “', ' 个未变化会话': ' unchanged session(s)', '同步任务未完成，请稍后重试': 'Sync did not finish. Try again later',
-    ' · 跳过': ' · Skipped ', ' · 冲突': ' · Conflicts', '成功': 'Succeeded', '跳过': 'Skipped', '已跳过': 'Skipped', '部分失败': 'Partial failure', '冲突': 'Conflict', '处理中': 'Processing', '两边都修改过，未覆盖': 'Changed on both sides; neither side was overwritten', '部分文件失败': 'Some files failed', '当前任务未记录逐项明细。': 'No per-session details were recorded for this task.', '会话同步明细': 'Session sync details', '会话同步结果筛选': 'Filter session sync results', '当前分类没有会话。': 'No sessions in this category.', '正在把已标记的会话从「': 'Syncing marked sessions from “', '」同步到「': '” to “', '查看明细': 'View details', ' 个候选会话': ' candidate session(s)', ' 秒后自动关闭': ' seconds until automatic close', '会话同步完成，有会话分叉': 'Session sync complete with branched sessions', ' 个会话两边各自分叉，已保留双方，未覆盖任何一边': ' session(s) branched on both sides; both copies were kept and neither was overwritten',
+    ' · 跳过': ' · Skipped ', ' · 冲突': ' · Conflicts', '成功': 'Succeeded', '跳过': 'Skipped', '已跳过': 'Skipped', '部分失败': 'Partial failure', '冲突': 'Conflict', '处理中': 'Processing', '两边都修改过，未覆盖': 'Changed on both sides; neither side was overwritten', '部分文件失败': 'Some files failed', '当前任务未记录逐项明细。': 'No per-session details were recorded for this task.', '会话同步明细': 'Session sync details', '会话同步结果筛选': 'Filter session sync results', '当前分类没有会话。': 'No sessions in this category.', '正在把已标记的会话从「': 'Syncing marked sessions from “', '」同步到「': '” to “', '查看明细': 'View details', ' 个候选会话': ' candidate session(s)', ' 秒后自动关闭': ' seconds until automatic close', '会话同步完成，有会话两边分叉': 'Session sync complete with branched sessions', ' 个会话两边各自分叉，已保留双方，未覆盖任何一边': ' session(s) branched on both sides; both copies were kept and neither was overwritten',
     '收录 GitHub 和 Gitee 公开仓库。参考 ': 'Public GitHub and Gitee repositories are indexed. See ', '。': '.', '克隆示例仓库：': 'Clone the example repository: ', '删除 ': 'Delete ', ' 目录中不需要的示例任务。': ' directory tasks you do not need.', '把你的自动化任务 JSON 放进 ': 'Put your automation task JSON in ', ' 目录。': ' directory.', '提交改动并推送到 GitHub 或 Gitee。': 'Commit and push changes to GitHub or Gitee.', '在仓库简介中加入关键词 ': 'Add the keyword ',
     '导出账号': 'Export accounts', '导入账号': 'Import accounts', '导出会话': 'Export sessions', '导入会话': 'Import sessions', '导出快捷短语': 'Export quick phrases', '导入快捷短语': 'Import quick phrases', '同步选中到其他账号': 'Sync selected to another account', '删除选中': 'Delete selected', '操作会话': 'Session actions', '连通测试': 'Test connection', '编辑模型': 'Edit model', '模型已保存': 'Model saved', '模型已启用': 'Model enabled', '模型已复制': 'Model copied', '模型配置已共用': 'Model configuration shared', '当前模型': 'Current model', '备选模型': 'Backup models', '模型加载失败：': 'Failed to load models: ', '保存模型失败：': 'Failed to save model: ', '删除当前模型失败：': 'Failed to delete current model: ', '启用模型失败：': 'Failed to enable model: ', '连通测试失败：': 'Connection test failed: ',
     '选择要查看的账号': 'Choose an account to view', '选择账号并输入密码后导出备份': 'Choose accounts and enter a password to export backups', '从加密导出文件导入账号备份': 'Import account backups from an encrypted export', '使用密码导出选中会话': 'Export selected sessions with a password', '使用密码导出选中快捷短语': 'Export selected quick phrases with a password', '从加密文件导入会话': 'Import sessions from an encrypted file', '从加密文件导入快捷短语': 'Import quick phrases from an encrypted file', '仅支持 PNG / JPG / WebP': 'PNG / JPG / WebP only', '点击或拖拽上传壁纸': 'Click or drag to upload a wallpaper', '点击选择图片，或拖拽到此处': 'Click to choose an image, or drag it here', '支持 PNG / JPG / WebP，自动压缩；可添加多张': 'PNG / JPG / WebP supported; images are compressed automatically',
@@ -1126,6 +1126,21 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     ' · 点「继续同步」只搬剩下的': ' · Tap “Resume sync” to move only what is left ',
     '复制完成（有失败项）': 'Copy complete (with failures)', '自动复制失败': 'Auto copy failed',
     '任务异常终止': 'Task terminated unexpectedly',
+    // 2026-09-21：切号进度条 / 冲突裁决面板。整句入典（动态拼接的串会被短词条撕成中英混合）。
+    '处理冲突': 'Resolve conflict', '处理会话分叉': 'Resolve session conflicts',
+    '正在检查分叉…': 'Checking for branched sessions…', '检查失败': 'Check failed',
+    '当前没有需要处理的会话分叉': 'No branched sessions to resolve', '无需处理': 'Nothing to resolve',
+    '不再提醒，之后以最新的一份为准': 'Stop reminding; from now on the newest copy wins',
+    '不修改任何内容；下次哪边有更新就以哪边为准，另一边届时会被覆盖': 'Changes nothing now; whichever side is updated next wins, and the other will be overwritten then',
+    '以本账号为准，立即覆盖其余副本': 'Prefer this account and overwrite the other copies now',
+    '马上用本账号的内容覆盖其他账号上的副本，另一边的新内容永久丢失': 'Immediately overwrites the copies on other accounts with this account\u2019s content; the other side\u2019s new content is lost permanently',
+    '检测到有会话在两个账号上各自被继续聊过、内容已经分叉。': 'Some sessions were continued on two accounts and their content has branched. ',
+    'WorkDaddy 已保留双方、未覆盖任何一边 —— 这不是失败，只需你决定怎么处理。': 'WorkDaddy kept both copies and overwrote neither — this is not a failure; it just needs your decision.',
+    '读取账号失败': 'Could not load accounts', '读取账号失败: ': 'Could not load accounts: ',
+    '检查会话分叉失败: ': 'Could not check branched sessions: ', '处理失败: ': 'Could not resolve: ',
+    ' 份副本': ' copies', ' 条会话分叉；下次哪边有更新就以哪边为准': ' branched session(s); whichever side is updated next wins',
+    '已以本账号为准覆盖 ': 'Overwrote the other copies from this account: ', ' 条会话的其余副本': ' session(s)',
+    ' 条处理失败: ': ' could not be resolved: ',
     '暂停': 'Pause', '继续同步': 'Resume sync',
     '暂停同步：停下正在搬运的会话，之后可以「继续同步」接着搬': 'Pause sync: stops the session being moved; resume it later with “Resume sync”',
     '继续同步：只搬运尚未完成的部分（已复制的会话会被跳过）': 'Resume sync: moves only what is left (sessions already copied are skipped)',
@@ -1350,6 +1365,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '已清除主账号设置': 'Primary account cleared', '闲置阈值需要在 5 ~ 1440 分钟之间': 'Idle threshold must be between 5 and 1440 minutes',
     '展开 / 折叠': 'Expand / collapse', '源账号': 'Source account', '目标账号': 'Target account',
     '留空 = 除目标外的所有账号': 'Blank = every account except the target',
+    '分叉处理': 'Divergent copies', '强制覆盖（以源账号为准）': 'Force overwrite (source account wins)',
+    '强制覆盖必须选择源账号': 'Choose a source account for force overwrite',
+    '开始强制覆盖：以源账号为准覆盖其余副本': 'Force overwrite started: the source account wins',
+    '强制覆盖：以源账号为准': 'Force overwrite: the source account wins',
+    '勾上后，两边各自分叉的会话会以源账号为准覆盖过去，目标账号里那一边的新内容会被丢掉，且不可撤销。只在自动同步反复提示「两边分叉」、且你确认要以源账号为准时才勾；勾上后必须点名一个源账号。': 'When enabled, divergent sessions are overwritten from the source account and the other side new content in the target account is lost; this cannot be undone. Use it only when auto-sync keeps reporting divergence and you are sure the source account should win. A source account must be named.',
     '源账号与目标账号不能相同': 'Source and target must be different accounts',
     '模型限流自动切号续跑': 'Auto switch account on rate limit',
     '当前账号被限流时，自动切到另一个账号、保持同一个模型、把同一条任务续跑下去。注意：这与 WorkBuddy 官方内置的「切模型 + 续跑」不是一回事 —— 官方换的是模型，这里换的是账号，模型保持不变。限流提示只出现在输入框上方的横幅里（.rate-limit-info-banner / .cb-input-banner--error 等），不在消息流中，所以探测落在横幅上。快路由 renderer 侧 MutationObserver 侦测到横幅后直接 POST /api/limit-failover/trigger 触发本任务；本任务的 1 分钟定时只作兜底。续跑内容优先取变量 prompt，为空则取当前会话里最后一条用户消息原样重发。被判定限流的账号 10 分钟内不再被选为接管方，交接成功后记录自动清除；所有账号都接管不了则回退原账号并提示。':
@@ -7502,18 +7522,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var percent = total ? Math.round(processed / total * 100) : (active ? 0 : 100);
       // 方案 D/D1：分叉（两边各自分支、双方都留着等你裁决）与旧的「两边都修改过、不知谁全」
       // 是两回事，文案必须分开 —— 否则用户看不出「要不要自己动手」这个关键差别。
-      var divergences = Math.max(0, Number(job.divergences) || 0);
-      var conflictTitle = (divergences > 0 && divergences >= (Number(job.conflicts) || 0))
-        ? '会话同步完成，有会话两边分叉'
-        : '会话同步完成，发现冲突';
+      // 2026-09-21：标题/明细改走共用 helper，与切号进度条（renderAutoCopyProgress）同源。
+      var conflictTitle = autoCopyConflictTitle(job);
       var title = job.status === 'queued' ? '会话同步等待中' : job.status === 'running' ? '正在同步会话' : job.status === 'done' ? '会话同步完成' : job.status === 'conflict' ? conflictTitle : job.status === 'partial' ? '会话同步完成，部分项目失败' : '会话同步失败';
       var route = sessionCopyAccountLabel(job.sourceUid, job.sourceName) + ' → ' + sessionCopyAccountLabel(job.targetUid, job.targetName);
       var detail = route;
       if (active && job.currentLabel) detail += ' · ' + job.currentLabel;
       else if (job.status === 'done') detail += ' · 新同步 ' + (Number(job.copied) || 0) + '，已存在 ' + (Number(job.skipped) || 0);
-      else if (job.status === 'conflict') detail += divergences > 0
-        ? ' · ' + divergences + ' 个会话两边各自分叉，已保留双方，未覆盖任何一边'
-        : ' · ' + (Number(job.conflicts) || 1) + ' 个会话两边都修改过，未覆盖任何一边';
+      else if (job.status === 'conflict') detail += ' · ' + autoCopyConflictDetail(job);
       else if (job.status === 'partial') detail += ' · 有 ' + ((Number(job.failed) || 0) + (Number(job.partial) || 0)) + ' 项需要留意';
       else if (job.status === 'error') detail += ' · 请稍后重试';
       box.className = 'wbs-sess-copy-progress is-' + String(job.status || 'running');
@@ -8197,6 +8213,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           var action = acProgBtn.dataset.acAction;
           if (action === 'pause') pauseAutoCopy();
           else if (action === 'resume') resumeAutoCopy();
+          else if (action === 'conflict') openAutoCopyConflictModal();
         });
       }
       // 时间 Segment 组件
@@ -8441,6 +8458,110 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         toast('加载账号失败: ' + (e.message || e), true, root);
       });
     }
+    // 分叉冲突的人工裁决（2026-09-21）。两种处理方式代价差别很大，必须让用户看清：
+    //   ① 不再提醒、之后以最新为准 —— 只把 daemon 的「共同快照」水位线推到当前最新，
+    //      **一个字节的会话内容都不改**，此后不再重复报这条冲突。（默认，安全）
+    //   ② 以本账号为准覆盖其余 —— 用本账号这份覆盖其他账号上的同源副本，
+    //      另一边新聊的内容会**永久丢失**，所以必须用户手动勾选。
+    // 真分叉的**内容合并不做**：会话 jsonl 是带父子链的多分支结构，线性合并没有安全实现，
+    // 硬合会产出重复/错序的 tool_call 配对 —— 宁可让用户选一份，也不自动产出坏会话。
+    function openAutoCopyConflictModal() {
+      var titleEl = sessionsPane.querySelector('#wbs-sess-modal-title');
+      var body = sessionsPane.querySelector('#wbs-sess-modal-body');
+      var okBtn = sessionsPane.querySelector('#wbs-sess-modal-ok');
+      var cancelBtn = sessionsPane.querySelector('#wbs-sess-modal-cancel');
+      if (!titleEl || !body || !okBtn) return;
+      titleEl.textContent = '处理会话分叉';
+      body.innerHTML = '<div class="wbs-empty">正在检查分叉…</div>';
+      okBtn.textContent = '确定';
+      okBtn.disabled = true;
+      okBtn.onclick = null;
+      showSessModal(true);
+      if (cancelBtn && cancelBtn.focus) cancelBtn.focus();
+      api('/api/sessions/auto-copy/conflicts').then(function (d) {
+        var conflicts = (d && d.conflicts) || [];
+        api('/api/accounts').then(function (a) {
+          var accounts = (a && a.accounts) || [];
+          var cur = (a && a.current) || {};
+          var nameOf = function (uid) {
+            var hit = accounts.filter(function (x) { return String(x.uid) === String(uid); })[0];
+            return (hit && (hit.nickname || hit.phone)) || String(uid || '').slice(0, 6) || '未知账号';
+          };
+          var rows = conflicts.map(function (c) {
+            var names = (c.members || []).map(function (m) { return nameOf(m.uid); });
+            return '<div class="wbs-conflict-row">'
+              + '<div class="wbs-conflict-name">' + esc(names.join(' / ')) + '</div>'
+              + '<div class="wbs-conflict-meta">' + (c.members || []).length + ' 份副本</div>'
+              + '</div>';
+          }).join('');
+          if (!conflicts.length) {
+            body.innerHTML = '<div class="wbs-empty">当前没有需要处理的会话分叉</div>';
+            okBtn.textContent = '无需处理';
+            okBtn.disabled = true;
+            return;
+          }
+          body.innerHTML =
+            '<div class="wbs-modal-warn">检测到有会话在两个账号上各自被继续聊过、内容已经分叉。'
+            + 'WorkDaddy 已保留双方、未覆盖任何一边 —— 这不是失败，只需你决定怎么处理。</div>'
+            + '<div class="wbs-conflict-list">' + rows + '</div>'
+            + '<label class="wbs-conflict-opt"><input type="radio" name="wbs-conflict-action" value="dismiss" checked>'
+            + '<span>不再提醒，之后以最新的一份为准<em>不修改任何内容；下次哪边有更新就以哪边为准，另一边届时会被覆盖</em></span></label>'
+            + '<label class="wbs-conflict-opt"><input type="radio" name="wbs-conflict-action" value="prefer">'
+            + '<span>以本账号为准，立即覆盖其余副本<em>马上用本账号的内容覆盖其他账号上的副本，另一边的新内容永久丢失</em></span></label>';
+          okBtn.disabled = false;
+          okBtn.onclick = function () {
+            var picked = body.querySelector('input[name="wbs-conflict-action"]:checked');
+            var action = picked ? picked.value : 'dismiss';
+            okBtn.disabled = true;
+            var post = function (payload) {
+              return api('/api/sessions/auto-copy/conflict-resolve', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(payload),
+              });
+            };
+            var fail = function (e) {
+              okBtn.disabled = false;
+              toast('处理失败: ' + (e && e.message || e), true, root);
+            };
+            if (action !== 'prefer') {
+              post({ action: 'dismiss-all' }).then(function (res) {
+                showSessModal(false);
+                toast('已忽略 ' + ((res && res.count) || 0) + ' 条会话分叉；下次哪边有更新就以哪边为准', false, root);
+              }).catch(fail);
+              return;
+            }
+            // 「以本账号为准」逐条做：每条都要按以当前账号为源，一条失败了不能把后面的也吞掉。
+            var i = 0;
+            var done = 0;
+            var next = function () {
+              if (i >= conflicts.length) {
+                showSessModal(false);
+                toast('已以本账号为准覆盖 ' + done + ' 条会话的其余副本', false, root);
+                return;
+              }
+              var lineageId = conflicts[i].lineageId;
+              i++;
+              post({ action: 'prefer', lineageId: lineageId, targetUid: String(cur.uid || '') }).then(function () {
+                done++;
+                next();
+              }).catch(function (e) {
+                okBtn.disabled = false;
+                toast('第 ' + i + ' 条处理失败: ' + (e && e.message || e), true, root);
+              });
+            };
+            next();
+          };
+        }).catch(function (e) {
+          body.innerHTML = '<div class="wbs-empty">读取账号失败</div>';
+          toast('读取账号失败: ' + (e && e.message || e), true, root);
+        });
+      }).catch(function (e) {
+        body.innerHTML = '<div class="wbs-empty">检查失败</div>';
+        toast('检查会话分叉失败: ' + (e && e.message || e), true, root);
+      });
+    }
+
     // 「立即同步」：以当前账号为源，把已开启自动复制的会话（含产物目录）同步到目标账号。
     // 不切号、不刷新页面；复用后端同一个任务队列，因此进度条 / 暂停 / 继续 三个能力天然连通。
     function openSyncNowModal() {
@@ -8471,23 +8592,43 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           '<option value="">留空 = 除目标外的所有账号</option>' + accountOptions + '</select></div>' +
           '<div class="wbs-sync-row"><span class="wbs-sync-label">目标账号</span>' +
           '<select class="wbs-sess-select wbs-sync-select" id="wbs-sess-sync-target" title="选择同步目标账号">' + accountOptions + '</select></div>' +
+          '<div class="wbs-sync-row"><span class="wbs-sync-label">分叉处理</span>' +
+          '<label class="wbs-sync-check" title="默认：两边各自改过就保留双方、一份都不覆盖。勾上后改为「以源账号为准」强行覆盖过去">' +
+          '<input type="checkbox" id="wbs-sess-sync-force"><span>强制覆盖（以源账号为准）</span></label></div>' +
+          '<div class="wbs-sync-force-warn" id="wbs-sess-sync-force-warn" hidden>勾上后，两边各自分叉的会话会以源账号为准覆盖过去，目标账号里那一边的新内容会被丢掉，且不可撤销。只在自动同步反复提示「两边分叉」、且你确认要以源账号为准时才勾；勾上后必须点名一个源账号。</div>' +
           '<div class="wbs-modal-warn">只同步<b>已开启「自动复制」</b>的会话及其产物目录；已完成的部分会被自动跳过，可反复点。</div>' +
           '<div class="wbs-sync-note"><b>源账号留空</b> = 除目标账号以外的每个账号各同步一次；源与目标相同时不会执行。</div>';
         var sourceSel = body.querySelector('#wbs-sess-sync-source');
         var targetSel = body.querySelector('#wbs-sess-sync-target');
         // 目标账号默认 = 当前账号（默认场景：把别的账号里开了自动复制的会话收拢到自己这边）
         if (curUid) targetSel.value = curUid;
+        var forceBox = body.querySelector('#wbs-sess-sync-force');
+        var forceWarn = body.querySelector('#wbs-sess-sync-force-warn');
+        // 强制覆盖必须**点名源账号**：勾上后把源下拉的「留空」项禁用，并自动落到第一个具体账号。
+        // 前端先拦一次，与服务端 resolveSyncNowSources 的拦截同源 —— 别等 400 回来才说。
+        function syncForceUi() {
+          var on = !!(forceBox && forceBox.checked);
+          if (forceWarn) forceWarn.hidden = !on;
+          var blank = (sourceSel && sourceSel.options) ? sourceSel.options[0] : null;
+          if (blank) blank.disabled = on;
+          if (on && sourceSel && !sourceSel.value && sourceSel.options.length > 1) sourceSel.selectedIndex = 1;
+          okBtn.textContent = on ? '强制覆盖同步' : '开始同步';
+        }
+        if (forceBox) forceBox.onchange = syncForceUi;
+        syncForceUi();
         okBtn.disabled = false;
         okBtn.onclick = function () {
           var sourceUid = String((sourceSel && sourceSel.value) || '');
           var targetUid = String((targetSel && targetSel.value) || '');
+          var forceNow = !!(forceBox && forceBox.checked);
           if (!targetUid) { toast('请选择目标账号', true, root); return; }
           if (sourceUid && sourceUid === targetUid) { toast('源账号与目标账号不能相同', true, root); return; }
+          if (forceNow && !sourceUid) { toast('强制覆盖必须选择源账号', true, root); return; }
           okBtn.disabled = true;
           api('/api/sessions/sync-now', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ targetUid: targetUid, sourceUid: sourceUid }),
+            body: JSON.stringify({ targetUid: targetUid, sourceUid: sourceUid, force: forceNow }),
           }).then(function (res) {
             showSessModal(false);
             var j = res && res.job;
@@ -8495,7 +8636,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             var jobCount = (res && res.jobs && res.jobs.length) || 1;
             toast(res && res.reused
               ? '已有同向同步任务在跑，已接入进度'
-              : (res && res.allSources ? '已开始同步：' + jobCount + ' 个源账号 → 目标账号' : '已开始同步'), false, root);
+              : (forceNow
+                ? '开始强制覆盖：以源账号为准覆盖其余副本'
+                : (res && res.allSources ? '已开始同步：' + jobCount + ' 个源账号 → 目标账号' : '已开始同步')), false, root);
             watchAutoCopyProgress();
           }).catch(function (e) {
             okBtn.disabled = false;
@@ -14296,12 +14439,40 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         + (Number(job && job.payloadFailedFiles) || 0);
     }
 
+    // 分叉冲突的两段文案。抽成函数是为了让**两处**说同一句话：
+    //   ① 切号后的进度条 renderAutoCopyProgress（原先没有 conflict 分支，落到 else 显示「自动复制失败」）
+    //   ② 会话页常驻的同步面板 renderSessionCopyProgress（早就分开了，但标题字符串写错了一个词）
+    // 两处各写一份的下场是：同一件事，一个说「冲突」、另一个说「失败」。
+    // 「两边各自分叉（双方都有独有内容，需人工裁决）」与「两边都改过、不知谁全（只是没敢覆盖）」
+    // 是两回事，标题必须分开，否则用户看不出「要不要自己动手」这个关键差别。
+    function autoCopyConflictCounts(job) {
+      return {
+        divergences: Math.max(0, Number(job && job.divergences) || 0),
+        conflicts: Math.max(0, Number(job && job.conflicts) || 0),
+      };
+    }
+    function autoCopyConflictTitle(job) {
+      var c = autoCopyConflictCounts(job);
+      return (c.divergences > 0 && c.divergences >= c.conflicts)
+        ? '会话同步完成，有会话两边分叉'
+        : '会话同步完成，发现冲突';
+    }
+    function autoCopyConflictDetail(job) {
+      var c = autoCopyConflictCounts(job);
+      return c.divergences > 0
+        ? c.divergences + ' 个会话两边各自分叉，已保留双方，未覆盖任何一边'
+        : (c.conflicts || 1) + ' 个会话两边都修改过，未覆盖任何一边';
+    }
+
     // A7：数据量 / 速率 / 建议三段的拼接串。daemon 只在实际写过、且分母完整时才给数，
     // 所以这里**每段独立判空**——拿 0 硬凑出「已同步 0 B / 0 B」比不显示更糟（假数据）。
     // 片段各自是独立词条（值带尾随空格），拼进整句时不会被短词条撕成中英混合。
     function autoCopyMetricText(job) {
       if (!job) return '';
       var parts = [];
+      // 强制覆盖是**破坏性动作**：必须在结果里标明这次确实走了这条路，否则「已复制 N」
+      // 与自动同步长得一模一样，事后分不清有没有覆盖过别人。
+      if (job.force) parts.push('强制覆盖：以源账号为准');
       var copied = Number(job.copiedBytes);
       if (job.copiedBytes != null && isFinite(copied) && copied > 0) {
         var text = '已同步 ' + fmtBytes(copied);
@@ -14396,6 +14567,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           + (payloadTotal ? ' · 产物 ' + job.payloadCopied + '/' + payloadTotal : '')
           + (Number(job.payloadLinkedBytes) ? ' · 硬链接省 ' + fmtBytes(job.payloadLinkedBytes) : '')
           + ' · 用时 ' + fmtDuration(job.elapsedMs);
+      } else if (job.status === 'conflict') {
+        // 2026-09-21 修：'conflict' 原先落进下面的 else，显示成「自动复制失败 / 任务异常终止」，
+        // 但 conflict 根本不是失败 —— 那是 daemon **主动拒绝覆盖**（两边都有独有内容，
+        // 覆盖谁都等于丢数据）。真正的错误态只有 error 一种，必须让用户分得清。
+        headLabel = autoCopyConflictTitle(job);
+        sub = '共 ' + total + ' 个 · 已复制 ' + job.copied + ' · 跳过 ' + job.skipped
+          + ' · ' + autoCopyConflictDetail(job)
+          + ' · 用时 ' + fmtDuration(job.elapsedMs);
       } else {
         headLabel = '自动复制失败';
         sub = String(job.error || '任务异常终止');
@@ -14403,7 +14582,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
       var els = autoCopyProgressEls();
       if (els && els.box) {
-        var state = running ? '' : (paused ? ' paused settled' : (job.status === 'done' ? ' ok settled' : ' err settled'));
+        // conflict 用 warn（琥珀）而不是 err（红）：它不是错误，是「需要你拍板」。
+        // 全站唯一的 err 态留给 error，红色才不会被稀释。
+        var state = running ? ''
+          : (paused ? ' paused settled'
+            : (job.status === 'done' ? ' ok settled'
+              : (job.status === 'conflict' ? ' warn settled' : ' err settled')));
         els.box.className = 'wbs-sess-progress on' + state;
         if (els.icon) els.icon.textContent = running ? '' : (paused ? '⏸' : (job.status === 'done' ? '✓' : '!'));
         if (els.label) els.label.textContent = headLabel;
@@ -14422,6 +14606,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             els.btn.textContent = '继续同步';
             els.btn.dataset.acAction = 'resume';
             els.btn.title = '继续同步：只搬运尚未完成的部分（已复制的会话会被跳过）';
+          } else if (job.status === 'conflict') {
+            // 冲突必须给出口：判冲突分支不推进水位线 ⇒ 不给出口就是每次切号都重复报同一条。
+            els.btn.hidden = false;
+            els.btn.textContent = '处理冲突';
+            els.btn.dataset.acAction = 'conflict';
+            els.btn.title = '两个账号各自继续了同一段对话，WorkDaddy 已保留双方、未覆盖任何一边。点这里决定怎么处理';
           } else {
             els.btn.hidden = true;
             els.btn.dataset.acAction = '';
@@ -14987,6 +15177,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
               toast(prefix + '已复制 ' + job.total + ' 个会话' + (job.payloadTotal ? '（含产物 ' + job.payloadCopied + ' 个）' : ''), false, root);
             } else if (job.status === 'partial') {
               toast(prefix + '复制完成，' + autoCopyTotalFailed(job) + ' 项失败', true, root);
+            } else if (job.status === 'conflict') {
+              // 不是失败：daemon 主动保留了两边的分叉。用普通提示色（false），别再吓人。
+              toast(prefix + autoCopyConflictDetail(job), false, root);
             } else {
               toast(prefix + '自动复制失败', true, root);
             }
@@ -16385,6 +16578,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-sess-progress.ok .wbs-sess-progress-icon{color:#1a9c50}',
     '.wbs-sess-progress.err .wbs-sess-progress-icon{color:#e5484d}',
     '.wbs-sess-progress.paused .wbs-sess-progress-icon{color:#c98a20}',
+    '.wbs-sess-progress.warn .wbs-sess-progress-icon{color:#c98a20}',
     // 暂停/继续按钮：贴在被压成 flex:1 的标题右侧。仅在其所在态（跑动中/已暂停）显示。
     '.wbs-sess-progress-btn{flex:0 0 auto;height:24px;padding:0 10px;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:7px;background:var(--wb-bg-popover,#fff);color:var(--wb-color-text-primary,#1f1f1f);font-size:12px;font-weight:600;line-height:1;cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s}',
     '.wbs-sess-progress-btn:hover{background:var(--wb-bg-hover,#f5f5f5)}',
@@ -16396,6 +16590,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-sess-progress.ok .wbs-sess-progress-fill{background:#1a9c50}',
     '.wbs-sess-progress.err .wbs-sess-progress-fill{background:#e5484d}',
     '.wbs-sess-progress.paused .wbs-sess-progress-fill{background:#c98a20}',
+    '.wbs-sess-progress.warn .wbs-sess-progress-fill{background:#c98a20}',
+    '.wbs-conflict-list{max-height:180px;overflow:auto;margin:6px 0 10px;border-top:1px solid var(--wb-border-subtle,#ececec)}',
+    '.wbs-conflict-row{display:flex;align-items:baseline;gap:8px;padding:6px 2px;border-bottom:1px solid var(--wb-border-subtle,#ececec)}',
+    '.wbs-conflict-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:600;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-conflict-meta{flex:0 0 auto;font-size:11px;color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-conflict-opt{display:flex;gap:7px;align-items:flex-start;margin:7px 0;font-size:12px;line-height:1.5;color:var(--wb-color-text-primary,#1f1f1f);cursor:pointer}',
+    '.wbs-conflict-opt input{margin:2px 0 0}',
+    '.wbs-conflict-opt em{display:block;font-style:normal;font-size:11px;color:var(--wb-icon-tertiary,#999)}',
     '.wbs-sess-progress-sub{margin-top:6px;font-size:11px;line-height:1.45;color:var(--wb-icon-tertiary,#999);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     // 说明：曾尝试在 FAB 上挂「15/22」角标，实测 FAB 在安静模式下会被
     // --wbs-fab-quiet-shift 右推出视口（右侧最多出屏 33px），挂在它上面的角标
@@ -16816,6 +17018,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-sync-label{flex:0 0 auto;font-size:12px;color:var(--wb-color-text-secondary,#555)}',
     '.wbs-sync-select{flex:1;min-width:0}',
     '.wbs-sync-note{margin-top:8px;font-size:11px;line-height:1.6;color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-sync-check{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--wb-color-text-secondary,#555);cursor:pointer}',
+    // 强制覆盖用琥珀（与「两边分叉」同一套色）：它不是错误、但比红色更该让人停下来读一眼。
+    '.wbs-sync-force-warn{margin:8px 0 0;font-size:11px;line-height:1.7;color:#c98a20}',
     '.wbs-idle-note b{color:var(--wb-color-text-secondary,#555);font-weight:600}',
     '.wbs-idle-select:focus-visible,.wbs-idle-input:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:1px}',
     '.wbs-logout-btn{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;margin-top:10px;padding:10px 0;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:12px;background:transparent;color:var(--wb-icon-secondary,#666);font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit;flex-shrink:0}',

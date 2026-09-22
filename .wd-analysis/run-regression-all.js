@@ -16,10 +16,10 @@ const SUITES = [
   ['test-limit-failover.js', 47],
   ['test-limit-switchback.js', 138],
   ['test-idle-switchback.js', 122],
-  ['test-switch-sync.js', 57],
+  ['test-switch-sync.js', 63],  // 2026-09-21 手动强制覆盖：C18 形态更新 + C22–C27 六条新守卫
   ['test-lineage-dedupe.js', 34],
   ['test-cloud-ghosts.js', 86],
-  ['test-login-tip-i18n.js', 18],
+  ['test-login-tip-i18n.js', 19],  // 2026-09-21 冲突文案：+1 源码取真身的分叉标题断言
   ['test-space-sort.js', 65],
   ['test-token-stats-attribution.js', 7],
   ['test-scheduled-send.js', 184],
@@ -29,7 +29,7 @@ const SUITES = [
   ['test-copy-manifest.js', 96],  // v1.3.11：空间扫描 → 复制排队清单 → 排序；H4/H4b 拆开新鲜度口径
   ['test-send-verify.js', 81],    // v1.3.12 草稿核验 / 1.3.14 composerSendExpr / 1.3.15 草稿残留 / 1.3.16 busy 落定
   ['test-switch-settle.js', 47],  // v1.3.17 切号闸门：还原因定时任务切走的账号前，先等在飞的回合跑完（v1.4.3 B4 取并集后 42→47）
-  ['test-autocopy-conflict-baseline.js', 35],  // v1.4.1 会话同步「假冲突 + 自锁」：血缘级 watermark 标尺 + 正文 mtime 收窄
+  ['test-autocopy-conflict-baseline.js', 39],  // v1.4.1 会话同步「假冲突 + 自锁」：血缘级 watermark 标尺 + 正文 mtime 收窄
   ['test-automations-guard.js', 41],  // v1.4.1 P0：读失败不得折成空集合（静默清空全部任务）+ 写侧骤减守卫 + 路由级兜底
   ['test-daemon-http.js', 22],  // v1.4.1 §9-3：HTTP 入口层（readBody 一定 settle / 有界 / 解析失败 reject）+ 鉴权契约
   ['test-usage-attribution-guard.js', 32],  // v1.4.1 §9-6：空间归属解析（裸前缀错归）+ 用量入库（NaN 拖垮整批）
@@ -38,7 +38,7 @@ const SUITES = [
   ['test-build-pin.js', 27],  // v1.4.1 §9-5：ws 钉版本（manifest+lock+npm ci）+ 真跑 vendoring 与内嵌 Python 块
   ['test-session-sync-124.js', 65],  // 上游 1.2.5 会话同步重定基：五态判定 + 选主不猜 + applySnapshot 真写 + fixture/delta provenance 锁（锚 1.2.5）+ 上限取消/惰性读守卫 + readSessionSizes
   ['test-auto-copy-judge.js', 27],  // 方案 D/D0：judge 开关（默认 mtime ⇒ 零行为变化）+ 快照域切分 + 指纹 memo（命中零读盘）+ slim/writable 护栏
-  ['test-auto-copy-leader.js', 57],  // 方案 D/D1+D1.5：内容定源判主偏序（repair 方向 + 分叉保留 + 不可读不放行）+ mtime 不参与定源 + alias 契约 + daemon 接线 + 打包白名单 + 面板文案
+  ['test-auto-copy-leader.js', 67],  // 方案 D/D1+D1.5：内容定源判主偏序 + mtime 不参与定源 + alias 契约 + daemon 接线 + 打包白名单 + 面板文案；2026-09-21 冲突文案抽共用 helper 后 +2（I4 两处共用 / I5 conflict 分支）
   ['test-auto-copy-content-write.js', 54],  // 方案 D/D2：content 模式改走 applySnapshot 事务写入（差异集 + 备份 + journal + 发布后复检）+ 目标多余文件清理 + 产物域不动 + 备份按 mtime 裁剪 + 默认 mtime 路径逐字节未变
   ['test-session-sync-cache-a3.js', 41],  // 上游 1.2.5 吸纳/A3：文件级指纹缓存（命中零 readFileSync / 结论等价 / 同长度改写必失效 / 排除域不污染）+ judge/leader 第 4 参透传 + daemon 接线 + 缓存本体去抖落盘与脏条目剔除
   ['test-growth-tasks.js', 113],  // 成长任务「一键完成」：指纹派生稳定 + 桌面 6 连事件形状 + 四条 CN 通道 + 领奖主备降级 + accept 回读重试 + 档位门控（tier3 默认关）+ 行形状兼容 + 端到端自动领奖 + 面板/daemon 接线 + 全量中文文案 i18n 守卫

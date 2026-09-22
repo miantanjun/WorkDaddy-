@@ -332,14 +332,16 @@ section('[G] daemon 接线守卫（静态形态断言，防「改回去也不知
   ok(has('\n  getAutoCopyJudge,\n'), 'G2 已从 lib.js 导入 getAutoCopyJudge（缺它开关永远是 mtime）');
   ok(has("const judgeMode = String((options && options.judge) || (typeof getAutoCopyJudge === 'function' ? getAutoCopyJudge(DATA_DIR) : 'mtime')) === 'content'"),
     'G3 judgeMode 的完整形态（含默认回落 mtime）在源码里');
-  ok(has("const latest = contentLatest || selectLatestAutoCopyMember(live);"),
-    'G4 选源已改为「内容领导者优先，旧实现只作 mtime 路径的兜底」');
+  ok(has("const latest = forcedSource || contentLatest || selectLatestAutoCopyMember(live);")
+    && has('const forcedSource = (forceResolve && forceSourceId)')
+    && has("const forceSourceId = String((options && options.forceSourceId) || '').trim();"),
+    'G4 选源仍是「内容领导者优先，旧实现只作 mtime 路径的兜底」；forcedSource 只在显式裁决（force）时才插到最前');
   ok(has('const changedSinceBaseline = (judgeMode === \'content\' || !(baselineAt > 0))'),
     'G5 mtime 水位线判据在 content 模式下停用');
-  ok(has('if (judgeMode !== \'content\' && changedSinceBaseline.length >= 2) {'),
-    'G6 旧的「≥2 就报冲突」已被 content 模式让路（否则内容判据永远走不到）');
-  ok(has('if (judgeMode !== \'content\' && targetPresent && baselineAt > 0 && changedSinceBaseline.length === 0) {'),
-    'G7 旧的「没变化就跳过」同样让路（否则会抢在判主之前误判 unchanged）');
+  ok(has("if (!forceResolve && judgeMode !== 'content' && changedSinceBaseline.length >= 2) {"),
+    'G6 旧的「≥2 就报冲突」已被 content 模式让路（否则内容判据永远走不到）；!forceResolve 是唯一旁路');
+  ok(has("if (!forceResolve && judgeMode !== 'content' && targetPresent && baselineAt > 0 && changedSinceBaseline.length === 0) {"),
+    'G7 旧的「没变化就跳过」同样让路（否则会抢在判主之前误判 unchanged）；同样只允许 force 旁路');
   ok(has("{ aliases: live.map((member) => member.id), preferredId: String(targetUid || '').trim(), cache: getSessionSyncCache() }"),
     'G8 判主传入的 alias 是**全成员 id**（含自身）、preferredId 只用于等价时代表，且第 3 项透传 A3 文件级指纹缓存');
   ok(has("if (contentLead.kind === 'divergent' || contentLead.kind === 'insufficient') {"),
@@ -348,11 +350,12 @@ section('[G] daemon 接线守卫（静态形态断言，防「改回去也不知
     'G10 分叉明细已透到 job 明细（用户通知的数据通道）');
   ok(has('if (result.divergent) job.divergences += 1;'), 'G11 分叉计数已累加');
   ok(at('autoCopyLeader.resolveContentLeader(') > 0
-    && at('autoCopyLeader.resolveContentLeader(') < at('const latest = contentLatest || selectLatestAutoCopyMember(live);'),
+    && at('autoCopyLeader.resolveContentLeader(') < at('const forcedSource = (forceResolve && forceSourceId)')
+    && at('autoCopyLeader.resolveContentLeader(') < at('const latest = forcedSource || contentLatest || selectLatestAutoCopyMember(live);'),
     'G12 判主发生在选源之前（顺序不能被重排）');
-  ok(has("const syncOptions = { skipWorkspaceSessions: true, judge: autoCopyJudgeMode };")
+  ok(has("const syncOptions = { skipWorkspaceSessions: true, judge: autoCopyJudgeMode, force: !!job.force, forceSourceUid: job.force ? String(job.sourceUid || '') : '' };")
     && has("const autoCopyJudgeMode = typeof getAutoCopyJudge === 'function' ? getAutoCopyJudge(DATA_DIR) : 'mtime';"),
-    'G13 判据模式在任务级读一次并显式下传（别每条会话都重读 meta.json）');
+    'G13 判据模式在任务级读一次并显式下传（别每条会话都重读 meta.json）；force/forceSourceUid 一并下传，默认中性值');
 }
 
 /* ==================================================================== */
@@ -381,12 +384,50 @@ section('[I] 面板文案守卫（inject.js：分叉与旧「两边都改过」�
   const injectSrc = fs.readFileSync(path.join(ROOT, 'scripts', 'inject.js'), 'utf8').replace(/\r\n/g, '\n');
   const has = (needle) => injectSrc.includes(needle);
 
-  ok(has('var divergences = Math.max(0, Number(job.divergences) || 0);'),
+  // 2026-09-21：这两条文案抽进了共用 helper（autoCopyConflictTitle/Detail），
+  // 好让「切号进度条」与「会话同步面板」说同一句话 —— 断言跟着挪到 helper 里，
+  // 同时补一条「两处都调用同一个 helper」的守卫，防止有人再各写一份。
+  ok(has('divergences: Math.max(0, Number(job && job.divergences) || 0),'),
     'I1 面板已读取 job.divergences');
-  ok(has("? ' · ' + divergences + ' 个会话两边各自分叉，已保留双方，未覆盖任何一边'")
-    && has(": ' · ' + (Number(job.conflicts) || 1) + ' 个会话两边都修改过，未覆盖任何一边';"),
+  ok(has("        ? c.divergences + ' 个会话两边各自分叉，已保留双方，未覆盖任何一边'")
+    && has("        : (c.conflicts || 1) + ' 个会话两边都修改过，未覆盖任何一边';"),
     'I2 分叉走新文案、旧的「两边都修改过」仍在（两条都要在，不能被替换掉）');
+  ok(has('var conflictTitle = autoCopyConflictTitle(job);')
+    && has('headLabel = autoCopyConflictTitle(job);')
+    && has("+ ' · ' + autoCopyConflictDetail(job)"),
+    'I4 「会话同步面板」与「切号进度条」共用同一组冲突文案（不再各写一份，避免一个说冲突一个说失败）');
+  ok(has("} else if (job.status === 'conflict') {")
+    && has('toast(prefix + autoCopyConflictDetail(job), false, root);'),
+    'I5 切号进度条与 toast 都补了 conflict 分支（此前落进 else ⇒ 显示「自动复制失败」，是假报错）');
   ok(has("' 个会话两边各自分叉，已保留双方，未覆盖任何一边':"), 'I3 新长句已整句入 i18n 词典（否则会被短词撕成中英混杂）');
+}
+
+/* ==================================================================== */
+section('[J] 手动强制覆盖守卫（「立即同步」勾选后跳过分叉保护；不勾 ⇒ 零变化）');
+/* ==================================================================== */
+
+{
+  const daemonLf = fs.readFileSync(path.join(ROOT, 'scripts', 'daemon.js'), 'utf8').replace(/\r\n/g, '\n');
+  const dHas = (needle) => daemonLf.includes(needle);
+  const injectLf = fs.readFileSync(path.join(ROOT, 'scripts', 'inject.js'), 'utf8').replace(/\r\n/g, '\n');
+  const iHas = (needle) => injectLf.includes(needle);
+
+  ok(dHas("if (options && options.force && !String(options.forceSourceId || '').trim()) {")
+    && dHas('const hitForceMember = wantedForceUid'),
+    'J1 账号级强制覆盖按 uid 定源，且只在「没给 forceSourceId」时归一化（面板 prefer 那条老路径不受影响）');
+  ok(dHas("options = Object.assign({}, options, { forceSourceId: hitForceMember ? String(hitForceMember.id) : '', force: !!hitForceMember });"),
+    'J2 uid 不在本血缘 ⇒ 整块 force 作废、退回保护性判据（宁可不覆盖，也不拿别人的副本顶上）');
+  ok(dHas('function startAutoCopyJob(sourceUid, targetUid, plan, labels, opts) {')
+    && dHas('force: !!(opts && opts.force),'),
+    'J3 任务对象记录 force（不传 opts ⇒ undefined ⇒ 逐行为不变）');
+  ok(dHas('force: !!job.force,'), 'J4 对外任务快照透出 force（面板据此区分「强制覆盖」与普通同步）');
+  ok(dHas("return { sources: [], explicit: false, code: 400, error: '强制覆盖必须指定源账号（源账号不能留空）' };"),
+    'J5 服务端拒绝「强制覆盖 + 源留空」（留空 = 多源互相覆盖，谁赢取决于排队顺序，不是用户能预期的行为）');
+  ok(dHas("const force = !!(body && body.force);"), 'J6 路由默认 force=false（只认显式传参）');
+  ok(iHas("if (job.force) parts.push('强制覆盖：以源账号为准');"),
+    'J7 结果文案标明这次走了强制覆盖（否则事后分不清有没有覆盖过别人）');
+  ok(iHas("'勾上后，两边各自分叉的会话会以源账号为准覆盖过去，目标账号里那一边的新内容会被丢掉，且不可撤销。只在自动同步反复提示「两边分叉」、且你确认要以源账号为准时才勾；勾上后必须点名一个源账号。':"),
+    'J8 警示长句整句入 i18n 词典（句内含 源账号/目标账号 等短词条，不整句入典会被撕成中英混杂）');
 }
 
 /* ==================================================================== */

@@ -189,12 +189,23 @@ ok(injectSrc.indexOf('id="wbs-sess-sync-target"') >= 0 && /if \(curUid\) targetS
 ok(/var sourceUid = String\(\(sourceSel && sourceSel\.value\) \|\| ''\);/.test(injectSrc), 'C16 源账号可以留空（不做非空校验）');
 ok(/sourceUid && sourceUid === targetUid/.test(injectSrc) && /源账号与目标账号不能相同/.test(injectSrc),
   'C17 前端也拦一次「源=目标」');
-ok(/body: JSON\.stringify\(\{ targetUid: targetUid, sourceUid: sourceUid \}\)/.test(injectSrc), 'C18 提交时带上 sourceUid');
+ok(/body: JSON\.stringify\(\{ targetUid: targetUid, sourceUid: sourceUid, force: forceNow \}\)/.test(injectSrc), 'C18 提交时带上 sourceUid 与是否强制覆盖');
 ok(/res\.allSources \? '已开始同步：'/.test(injectSrc), 'C19 留空时提示「N 个源账号 → 目标账号」');
 ok(/源账号留空<\/b> = 除目标账号以外的每个账号各同步一次/.test(injectSrc), 'C20 弹窗里用大白话说明了留空行为');
 ok(/class="wbs-sync-note"/.test(injectSrc) && /\.wbs-sync-note\{/.test(injectSrc),
   'C20b 「留空说明」放在普通说明样式里（提醒才用红色 warn，别整块都是红的）');
 ok(!/源账号：' \+ esc\(cur/.test(injectSrc), 'C21 旧的「源账号固定 = 当前账号」那行已去掉');
+ok(injectSrc.indexOf('id="wbs-sess-sync-force"') >= 0, 'C22 弹窗有「强制覆盖（以源账号为准）」勾选');
+ok(/if \(blank\) blank\.disabled = on;/.test(injectSrc) && /sourceSel\.selectedIndex = 1;/.test(injectSrc),
+  'C23 勾上后禁掉源下拉的「留空」项并自动落到第一个具体账号（与服务端同源，不靠 400 兜底）');
+ok(/if \(forceNow && !sourceUid\) \{ toast\('强制覆盖必须选择源账号'/.test(injectSrc),
+  'C24 前端也拦一次「强制覆盖 + 源留空」');
+ok(/resolveSyncNowSources\(accounts\.map\(\(a\) => a\.uid\), targetUid, \(body && body\.sourceUid\) \|\| '', \{ force \}\)/.test(daemonSrc),
+  'C25 路由把 force 交给解析函数（由它统一判「必须点名源账号」）');
+ok(/&& !!job\.force === force/.test(daemonSrc),
+  'C26 同向任务复用必须 force 一致（否则点了强制会接到非强制的在跑任务上，以为覆盖过了其实没动）');
+ok(/startAutoCopyJob\(sourceUid, targetUid, \[\], null, \{ force \}\)/.test(daemonSrc),
+  'C27 起任务时把 force 带进任务队列（与切号触发的复制共享同一串行语义）');
 
 // 前端：折叠卡片
 ok(injectSrc.indexOf('id="wbs-idle-toggle"') >= 0 && injectSrc.indexOf('id="wbs-idle-body"') >= 0,

@@ -66,7 +66,14 @@ check('方式二描述', '不退出 WorkBuddy，在浏览器完成授权后新�
   'Keeps WorkBuddy running; after authorizing in the browser, the new account is added to the list automatically.');
 
 console.log('== 方案 D/D1：会话同步「分叉」与「两边都改过」的文案必须分开 ==');
-check('分叉标题', '会话同步完成，有会话分叉', 'Session sync complete with branched sessions');
+check('分叉标题', '会话同步完成，有会话两边分叉', 'Session sync complete with branched sessions');
+// 2026-09-21 补：上面这条原先写作「有会话分叉」，而 inject.js 源码里用的是「有会话两边分叉」——
+// 词典 key 对不上 ⇒ 英文界面下这句一直漏译，而本测试**直接拿词典 key 当输入，根本测不出来**。
+// 这里改成「从 inject.js 里取出真正在用的那一句」再翻，把测试输入与源码绑死。
+const titleLiteral = (src.join('\n').match(/'(会话同步完成，有会话[^']*)'/) || [])[1] || '';
+const titleOut = translate(titleLiteral, 'en');
+if (titleLiteral && !CJK.test(titleOut)) { pass++; console.log('  ✔ 源码里真正在用的分叉标题可翻译（' + titleLiteral + '）'); }
+else { fail++; console.log('  ✘ 源码在用的分叉标题漏译: ' + JSON.stringify(titleLiteral) + ' -> ' + JSON.stringify(titleOut)); }
 check('分叉明细片段', ' 个会话两边各自分叉，已保留双方，未覆盖任何一边',
   ' session(s) branched on both sides; both copies were kept and neither was overwritten');
 // 实测形态：面板是把 route + ' · N ' + 片段 拼起来再交给翻译器的，所以必须按**拼接后**的样子验

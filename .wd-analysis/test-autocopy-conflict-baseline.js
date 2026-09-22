@@ -216,7 +216,7 @@ function makeHarness(cfg) {
 
   return {
     dir, world,
-    run: () => fn('L1', cfg.targetUid),
+    run: (options) => fn('L1', cfg.targetUid, options),
     watermark: () => lib.getAutoCopyLineageSyncedAt(dir, 'L1'),
   };
 }
@@ -293,6 +293,57 @@ const rFail = await hFail.run();
 ok(hFail.world.copyCalls.length === 3 && hFail.world.setSyncedAtCalls.length === 0 && hFail.watermark() === 3000,
   'B10 有失败文件 ⇒ 不推进 watermark（判据不能偏松）',
   { copies: hFail.world.copyCalls.length, pushed: hFail.world.setSyncedAtCalls.length });
+
+/* ==================================================================== */
+/* 【B2】手动强制覆盖（「立即同步」勾选后跳过分叉保护）                    */
+/* ==================================================================== */
+//
+// 场景：判冲突（两边各自改过）→ 用户在「立即同步」里手动点名源账号 → 必须真覆盖过去；
+// 点不到源（uid 不在本血缘 / 干脆没点名）⇒ 必须**退回保护性判据**，不许拿别人的副本顶上。
+// 注意 harness 的 copyCalls 是 [源副本id, 目标副本id]，源自己也会被自复制一次，所以
+// 「以谁为准」用 every(c => c[0] === id) 判，不依赖遍历顺序。
+
+section('\n[B2] 手动强制覆盖（force + 点名源账号）');
+
+const conflictMembers = [
+  { uid: 'UX', id: 'f1', mtime: 5000 },
+  { uid: 'UY', id: 'f2', mtime: 4000 },
+  { uid: 'UZ', id: 'f3', mtime: 2000 },
+];
+
+// ── B11：force + forceSourceUid 命中血缘成员 ⇒ 真覆盖 ────────────────────
+const hForceUid = makeHarness({ targetUid: 'UZ', watermark: 3000, members: conflictMembers });
+const rForceUid = await hForceUid.run({ force: true, forceSourceUid: 'UX' });
+ok(rForceUid && rForceUid.conflict !== true
+  && hForceUid.world.copyCalls.length === 3
+  && hForceUid.world.copyCalls.every((c) => c[0] === 'f1'),
+  'B11 force + forceSourceUid 命中本血缘成员 ⇒ 以该账号那份为源 fan-out 覆盖全部，不再报冲突',
+  { result: rForceUid && { conflict: rForceUid.conflict, synced: rForceUid.synced }, calls: hForceUid.world.copyCalls });
+
+// ── B12：老的 forceSourceId 路径（面板「以本账号为准」）不能被顶掉 ─────────
+const hForceId = makeHarness({ targetUid: 'UZ', watermark: 3000, members: conflictMembers });
+const rForceId = await hForceId.run({ force: true, forceSourceId: 'f2' });
+ok(rForceId && rForceId.conflict !== true
+  && hForceId.world.copyCalls.length === 3
+  && hForceId.world.copyCalls.every((c) => c[0] === 'f2'),
+  'B12 老路径 forceSourceId（副本 id）原样可用 —— 新加的 uid 归一化只补位、不夺权',
+  hForceId.world.copyCalls);
+
+// ── B13：uid 不在本血缘 ⇒ 整块 force 作废（安全兜底）─────────────────────
+const hForceMiss = makeHarness({ targetUid: 'UZ', watermark: 3000, members: conflictMembers });
+const rForceMiss = await hForceMiss.run({ force: true, forceSourceUid: 'NOPE' });
+ok(rForceMiss && rForceMiss.conflict === true
+  && hForceMiss.world.copyCalls.length === 0
+  && hForceMiss.world.setSyncedAtCalls.length === 0,
+  'B13 uid 不在本血缘 ⇒ **整块 force 作废**、退回保护性判据（宁可继续报分叉，也不能拿别人的副本顶上）',
+  { result: rForceMiss && rForceMiss.conflict, calls: hForceMiss.world.copyCalls.length });
+
+// ── B14：force 但没点名任何源 ⇒ 同样作废 ────────────────────────────────
+const hForceBare = makeHarness({ targetUid: 'UZ', watermark: 3000, members: conflictMembers });
+const rForceBare = await hForceBare.run({ force: true });
+ok(rForceBare && rForceBare.conflict === true && hForceBare.world.copyCalls.length === 0,
+  'B14 force 但既无 forceSourceId 也无 forceSourceUid ⇒ 作废：「不说以谁为准」的强制覆盖毫无意义',
+  hForceBare.world.copyCalls);
 
 /* ==================================================================== */
 /* 【C】sessionBodyMtime：判据只看对话正文（A′ 收窄）                    */
