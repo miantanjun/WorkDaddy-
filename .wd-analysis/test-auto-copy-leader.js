@@ -24,6 +24,8 @@ const ROOT = path.resolve(__dirname, '..');
 const judge = require(path.join(ROOT, 'scripts', 'auto-copy-judge.js'));
 const leader = require(path.join(ROOT, 'scripts', 'auto-copy-leader.js'));
 const lib = require(path.join(ROOT, 'scripts', 'lib.js'));
+// 打包白名单守卫（共用）：mac DMG 显式白名单 vs Windows cp -R 整目录。
+const packagingGuard = require(path.join(__dirname, 'packaging-whitelist.js'));
 
 let pass = 0;
 const failures = [];
@@ -365,14 +367,22 @@ section('[H] 打包白名单守卫（daemon 启动期 require 的模块必须在
 {
   // mac DMG 走的是**显式白名单**（Windows 走 cp -R 整目录），漏一个就 daemon 启动即崩。
   // 这是既有缺口（SKILL §40.11），这里把它变成一条机器判据。
+  // ⚠️ 2026-09-23：判据从「daemon.js 直接 require」升级为**传递闭包** —— 只查直接
+  // require 会漏掉二级依赖（daemon → token-stats → stats-discipline），那次加
+  // thinking-stats.js 时就漏登记过一次。共用 helper：packaging-whitelist.js。
   const mac = fs.readFileSync(path.join(ROOT, 'scripts', 'build-mac-dmg.sh'), 'utf8');
   const daemonLf = fs.readFileSync(path.join(ROOT, 'scripts', 'daemon.js'), 'utf8').replace(/\r\n/g, '\n');
   const required = [...new Set([...daemonLf.matchAll(/require\('\.\/([A-Za-z0-9._-]+\.js)'\)/g)].map((m) => m[1]))]
     .filter((name) => fs.existsSync(path.join(ROOT, 'scripts', name)));
-  const missing = required.filter((name) => !new RegExp('(^|[\\s"])' + name.replace(/[.]/g, '\\.') + '($|[\\s;])', 'm').test(mac));
+  const directMissing = required.filter((name) => !new RegExp('(^|[\\s"])' + name.replace(/[.]/g, '\\.') + '($|[\\s;])', 'm').test(mac));
+  const reachable = packagingGuard.reachableModules(ROOT);
+  const closureMissing = packagingGuard.macWhitelistMissing(ROOT);
 
   ok(required.includes('auto-copy-leader.js'), 'H1 能从 daemon.js 抓到自建模块清单（含本轮新增的判主模块）');
-  ok(missing.length === 0, 'H2 daemon 启动期 require 的自建模块全在 mac 白名单里', missing);
+  ok(directMissing.length === 0, 'H2 daemon 启动期 require 的自建模块全在 mac 白名单里', directMissing);
+  ok(closureMissing.length === 0,
+    'H3 【传递闭包】daemon 可达的所有自建模块都在 mac 白名单里（含二级依赖，如 stats-discipline.js）'
+    + ' —— 可达 ' + reachable.length + ' 个', closureMissing);
 }
 
 /* ==================================================================== */

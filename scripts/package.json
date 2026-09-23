@@ -1,6 +1,6 @@
 {
   "name": "workdaddy-scripts",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "description": "WorkDaddy 运行时脚本目录。此清单只有一个用途：把发行包内置的 Node 依赖（ws）钉到确定版本，让构建可复现。",
   "dependencies": {

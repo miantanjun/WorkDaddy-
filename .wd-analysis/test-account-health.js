@@ -28,6 +28,8 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
+// 打包白名单守卫（共用）：mac DMG 显式白名单 vs Windows cp -R 整目录。
+const packagingGuard = require(path.join(__dirname, 'packaging-whitelist.js'));
 
 let pass = 0;
 const failures = [];
@@ -370,6 +372,13 @@ ok(hasD('其他账号需要先重新登录（或已被手动停用），已停�
     .filter((name) => fs.existsSync(path.join(ROOT, 'scripts', name)));
   const missing = required.filter((name) => !new RegExp('(^|[\\s"])' + name.replace(/[.]/g, '\\.') + '($|[\\s;])', 'm').test(mac));
   ok(missing.length === 0, 'E24 account-health.js 已进 mac DMG 显式白名单（Windows 走 cp -R 整目录，不受影响）', missing);
+  // ⚠️ 2026-09-23：E24 只看 daemon.js 的**直接** require，会漏二级依赖
+  // （daemon → token-stats → stats-discipline），那次加 thinking-stats.js 就漏登记过。
+  // E25 用传递闭包把这条缺口也变成机器判据（共用 helper：packaging-whitelist.js）。
+  const closureMissing = packagingGuard.macWhitelistMissing(ROOT);
+  ok(closureMissing.length === 0,
+    'E25 【传递闭包】daemon 可达的所有自建模块都在 mac 白名单里（可达 '
+    + packagingGuard.reachableModules(ROOT).length + ' 个）', closureMissing);
 }
 
 /* ==================================================================== */

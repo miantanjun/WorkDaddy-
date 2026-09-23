@@ -160,6 +160,11 @@ const { fetchUsageSinceAnchor, startOfLocalDay } = require('./credit-request-usa
 const { createCreditHistorySync, historyRange } = require('./credit-history-sync.js');
 const { createCreditUsageStore } = require('./credit-usage-store.js');
 const { scanTokenStatsCached, tokenStatsCacheReady } = require('./token-stats.js');
+// T20：思考效率 / 模型性价比（traces 时长 + token-stats token + 权威积分表 credit）
+const { buildThinkingStatsCached, thinkingStatsCacheReady } = require('./thinking-stats.js');
+const { buildUsageUnified } = require('./usage-unified.js');
+const { buildSessionCostCached } = require('./session-cost.js');
+const { renderUsageBoardHtml } = require('./usage-board-html.js');
 const contextAudit = require('./context-audit.js');
 const contextFix = require('./context-fix.js');
 const memoryGovernance = require('./memory-governance.js');
@@ -492,7 +497,28 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //           即零行为变化、可一键回退）。`setAutoCopyJudge` 从「全仓无人调用」变成有唯一显式入口。
 //           影响面已量化（.wd-analysis/diag-judge-content.js，本机 25 条血缘 / 21 条多成员）：
 //           源选择变化 3 条、动作变化 1 条（约 28.5 MB 的一次增量同步）、新增分叉 0 条。
-const DAEMON_VERSION = '1.6.0';
+// 1.7.0：用量与阅读体验批次（七件一批）
+//         · 统一用量看板：scripts/usage-unified.js + usage-board-html.js —— 自绘单文件看板，
+//           账号/模型/日期三维筛选全在客户端内存里算（切换零延迟）；token 走 token-stats.js、
+//           **积分走 credit-usage.db（逐请求，权威）**、思维链走 jsonl；第三方抽取器只补
+//           错误率/思考时长/缓存命中/会话排行，**不混进三维数值**。
+//         · 会话名多源解析：scripts/session-titles.js —— 排行 id 取自官方 trace 的**原始会话 id**，
+//           而 sessions 表存的是切号复制出的**副本 id** ⇒ 直查 12/15 落空。按「官方库 → 副本血缘 →
+//           标题快照 → 正文 aiTitle → 客户端缓存 → 日志首条提问」依次回补；**六个来源一律脱敏**
+//           （标题最易被截图外传）；快照只增不减（usage-board/session-title-snapshot.json）。
+//           ⚠️ 副本 jsonl 的「文件名＝副本 id、内容 sessionId＝原始 id」是打通两套 id 的唯一桥。
+//         · 账号维度归属：本地文件**判不出账号**（副本字节级一致）⇒ 只认官方账单 (uid, 日期, 模型)
+//           请求数，token 侧按账单请求数占比分摊；逐账号积分与账单逐分相等。
+//         · Token 口径更正：total = input + output（cache_read ⊆ input、thinking ⊆ output）⇒
+//           旧公式 i+o+cr+cw 把缓存算两遍，虚增 ≈+98%。
+//         · 积分去重：credit_json 必须按 providerData.conversationRequestId 去重 —— 同一次请求的
+//           每条记录都带它（实测一份 jsonl 里出现 204 次），逐条累加会虚增 ≈49 倍。
+//         · 统计纪律 + 成本卡：scripts/stats-discipline.js（五条纪律，token-stats / thinking-stats /
+//           session-cost 共用）、scripts/thinking-stats.js（模型效率的数据源）、
+//           scripts/session-cost.js（GET /api/session-cost，会话页成本卡）。
+//         · 前端侧（inject.js 热更，与本常量无关）：md 快速查看器（右侧停靠 + 接管自动打开）、
+//           token 速度读数、运维弹出层与面板缩放。
+const DAEMON_VERSION = '1.7.0';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.5';
@@ -515,7 +541,7 @@ const UPSTREAM_VERSION = '1.2.5';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.6.0-20260922-structured-error';
+const DAEMON_BUILD_ID = 'release-1.7.0-20260923-session-titles-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -10707,6 +10733,97 @@ const THEMES_DIR = path.join(DATA_DIR, 'themes');
 // 官方背景图库：面板「主题」页的默认壁纸（wallpaper-01.webp ~ wallpaper-NN.webp）
 const WALLPAPERS_DIR = path.join(THEMES_DIR, 'wallpapers');
 
+// ---- 使用状态看板（第三方 skill workbuddy-usage-status 的产物目录） ----
+// 静态服务 /usage-board/<file>：无鉴权（与 /wallpapers 同构），供面板 iframe 内嵌，
+// 与自绘的 /api/token-stats 并列，方便两套口径对比。
+const USAGE_BOARD_DIR = process.env.WORKDADDY_USAGE_BOARD_DIR || path.join(DATA_DIR, 'usage-board');
+const USAGE_STATUS_SCRIPT = process.env.WORKDADDY_USAGE_STATUS_SCRIPT || path.join(os.homedir(), '.workbuddy', 'skills', 'workbuddy-usage-status', 'scripts', 'usage_extractor.py');
+
+/** 解析可用的 python：环境变量 → 托管 venv → 托管 base（版本目录）→ PATH 兜底。 */
+function resolveUsageBoardPython() {
+  const cands = [];
+  if (process.env.WORKDADDY_PYTHON) cands.push(process.env.WORKDADDY_PYTHON);
+  const base = path.join(os.homedir(), '.workbuddy', 'binaries', 'python');
+  if (IS_WIN) {
+    cands.push(path.join(base, 'envs', 'default', 'Scripts', 'python.exe'));
+    try {
+      const vdir = path.join(base, 'versions');
+      if (fs.existsSync(vdir)) for (const v of fs.readdirSync(vdir)) cands.push(path.join(vdir, v, 'python.exe'));
+    } catch (_) {}
+  } else {
+    cands.push(path.join(base, 'envs', 'default', 'bin', 'python'));
+    try {
+      const vdir = path.join(base, 'versions');
+      if (fs.existsSync(vdir)) for (const v of fs.readdirSync(vdir)) cands.push(path.join(vdir, v, 'bin', 'python'));
+    } catch (_) {}
+  }
+  for (const c of cands) { try { if (fs.existsSync(c)) return c; } catch (_) {} }
+  return IS_WIN ? 'python.exe' : 'python3';
+}
+
+/** usage-board 目录里最新一份看板 HTML 文件名；没有则返回 null。 */
+function latestUsageBoardHtml() {
+  try {
+    if (!fs.existsSync(USAGE_BOARD_DIR)) return null;
+    const files = fs.readdirSync(USAGE_BOARD_DIR).filter((f) => /-dashboard-\d+.*\.html$/i.test(f));
+    if (!files.length) return null;
+    files.sort();
+    return files[files.length - 1];
+  } catch (_) { return null; }
+}
+
+/** 统一用量看板的产物：unified-board-<stamp>.html。 */
+function latestUsageUnifiedHtml() {
+  try {
+    if (!fs.existsSync(USAGE_BOARD_DIR)) return null;
+    const files = fs.readdirSync(USAGE_BOARD_DIR).filter((f) => /^unified-board-\d+.*\.html$/i.test(f));
+    if (!files.length) return null;
+    files.sort();
+    return files[files.length - 1];
+  } catch (_) { return null; }
+}
+
+/** 权威积分源：credit-usage.db 的 credit_usage_records（逐请求，自带 uid / usage_date / model）。
+ *  为什么不用 session_usage.credit_json：那里的键是请求 id、没有日期和模型，得靠 jsonl 反查；
+ *  而同一 id 会出现在多条 jsonl 记录里，逐条累加会重复计数（实测虚增 ~50×，且几乎全堆在「今天」）。 */
+let CREDIT_QUERY_DB = null;
+function creditUsageQuery() {
+  if (!CREDIT_QUERY_DB) CREDIT_QUERY_DB = createSessionDb({ dbPath: CREDIT_USAGE_DB_FILE });
+  const db = CREDIT_QUERY_DB;
+  return async (sql, params = []) => db.all(sql, params);
+}
+
+/** 第三方 usage-status.json 路径 + 安全读取（缺失/损坏返回 null）。 */
+const USAGE_STATUS_JSON = path.join(USAGE_BOARD_DIR, 'usage-status.json');
+function readUsageStatusJson() {
+  try { return JSON.parse(fs.readFileSync(USAGE_STATUS_JSON, 'utf8')); } catch (_) { return null; }
+}
+
+/** 跑一次第三方抽取器（只为补充指标）。失败/超时都只返回 ok:false，绝不抛。 */
+function runUsageStatusExtractor() {
+  return new Promise((resolve) => {
+    const py = resolveUsageBoardPython();
+    if (!py) return resolve({ ok: false, error: '未找到可用的 Python 解释器' });
+    if (!fs.existsSync(USAGE_STATUS_SCRIPT)) return resolve({ ok: false, error: '第三方抽取器不存在：' + USAGE_STATUS_SCRIPT });
+    let settled = false;
+    const done = (r) => { if (!settled) { settled = true; resolve(r); } };
+    let child;
+    try {
+      child = spawn(py, [USAGE_STATUS_SCRIPT, '--out', USAGE_BOARD_DIR], {
+        cwd: path.dirname(USAGE_STATUS_SCRIPT),
+        windowsHide: true,
+        env: Object.assign({}, process.env, { PYTHONIOENCODING: 'utf-8' }),
+      });
+    } catch (e) { return done({ ok: false, error: '启动失败: ' + e.message }); }
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch (_) {}
+      done({ ok: false, error: '超时（90s）' });
+    }, 90000);
+    child.on('error', (e) => { clearTimeout(timer); done({ ok: false, error: '启动失败: ' + e.message }); });
+    child.on('close', (code) => { clearTimeout(timer); done(code === 0 ? { ok: true } : { ok: false, error: '退出码 ' + code }); });
+  });
+}
+
 /** 内置资产源目录（首次启动初始化的来源，WorkDaddy.app 自包含打包）：
  * 1) 脚本同目录 builtin/（app 内置模式：Contents/Resources/scripts/builtin）
  * 2) 项目模式：<项目>/WorkDaddy.app/Contents/Resources/scripts/builtin
@@ -13371,6 +13488,40 @@ function handleApiRoute(req, res) {
     });
   }
 
+  // md 快速查看器（T30）：把客户端渲染好的**独立** HTML 落到 .md 的同级目录。
+  // 安全边界刻意收窄：只接受绝对路径、只接受 .md/.markdown 源、目标只能是「同目录 + 同名 .html」，
+  // 绝不覆盖原 md。若同名 .html 已存在且**不是我们生成的**（无 id="wbs-mdp-doc" 标记），
+  // 则退到 `<名字>-md.html`，不碰用户的文件。
+  if (req.method === 'POST' && p === '/api/md-export-html') {
+    return readBody(req, 64 * 1024 * 1024).then((body) => {
+      const src = String((body && body.path) || '');
+      const html = (body && body.html) || '';
+      if (!src) return json(res, 400, { ok: false, error: '缺少 path' });
+      if (typeof html !== 'string' || html.length < 32) return json(res, 400, { ok: false, error: 'html 内容为空' });
+      if (!/\.(md|markdown)$/i.test(src)) return json(res, 400, { ok: false, error: '仅支持 .md / .markdown 源文件' });
+      if (!path.isAbsolute(src)) return json(res, 400, { ok: false, error: 'path 必须是绝对路径' });
+      const abs = path.resolve(src);
+      let st;
+      try { st = fs.statSync(abs); } catch (_) { return json(res, 404, { ok: false, error: '源文件不存在' }); }
+      if (!st.isFile()) return json(res, 400, { ok: false, error: '源路径不是文件' });
+      const dir = path.dirname(abs);
+      const base = path.basename(abs).replace(/\.(md|markdown)$/i, '');
+      let target = path.join(dir, base + '.html');
+      try {
+        const fd = fs.openSync(target, 'r');
+        const head = Buffer.alloc(4096);
+        const read = fs.readSync(fd, head, 0, 4096, 0);
+        fs.closeSync(fd);
+        if (head.slice(0, read).toString('utf8').indexOf('id="wbs-mdp-doc"') < 0) {
+          target = path.join(dir, base + '-md.html');
+        }
+      } catch (_) { /* 目标不存在 ⇒ 直接用 base.html */ }
+      if (path.resolve(target) === abs) return json(res, 400, { ok: false, error: '目标与原文件相同' });
+      fs.writeFileSync(target, html, 'utf8');
+      return json(res, 200, { ok: true, htmlPath: target, bytes: Buffer.byteLength(html, 'utf8') });
+    }).catch((e) => json(res, 500, { ok: false, error: e && e.message ? e.message : String(e) }));
+  }
+
   if (req.method === 'GET' && p === '/api/status') {
     const authenticated = hasApiToken(req);
     const status = {
@@ -13634,6 +13785,211 @@ function handleApiRoute(req, res) {
       const status = /日期范围|开始日期/.test(String(e && e.message)) ? 400 : 500;
       return json(res, status, { ok: false, error: e.message || '读取会话统计失败' });
       });
+  }
+
+  // 思考效率 / 模型性价比（T20）。回答「花得值不值」而不是「花了多少」。
+  // 三条源，缺一条就显式留空而不是摊派（纪律「数字错比报错糟糕」）：
+  //   ① 思考秒数 ← traces/*/trace_*.json 的 generation span duration（按 (mtime,size) 增量缓存，
+  //      窗口外文件只读 64 KB 头即跳过；冷跑约 3 s / 2732 文件，热跑 <150 ms）
+  //   ② 输出/思考 token ← token-stats（与本仓三维统计同源，避免两处数字打架）
+  //   ③ credit ← credit_usage_records 的 model 列直接 SUM（权威源，不做 token 占比摊派）
+  if (req.method === 'GET' && p === '/api/thinking-stats') {
+    if (PROFILE.kind !== 'workbuddy') return json(res, 400, { ok: false, error: '当前客户端不支持思考效率统计' });
+    if (url.searchParams.get('cacheStatus') === '1') return json(res, 200, { ok: true, cacheReady: thinkingStatsCacheReady(PROFILE.dataRoot) });
+    const days = Math.max(1, Math.min(90, Number(url.searchParams.get('days') || 7)));
+    return (async () => {
+      const tokenStats = scanTokenStatsCached(PROFILE.dataRoot, {
+        days,
+        withCallPoints: true,
+        accountOptions: listAccounts(DATA_DIR),
+      });
+      // 积分窗口与 token 窗口取同一个区间：分子分母同区间，否则 credit/1k 会被拉偏。
+      const dayOf = (ms) => {
+        const date = new Date(ms);
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      };
+      let creditRows = [];
+      try {
+        creditRows = await CREDIT_USAGE_STORE.listModelUsageRange(dayOf(tokenStats.since), dayOf(tokenStats.until));
+      } catch (e) {
+        log('[thinking-stats] 读权威积分表失败（credit 列将留空）: ' + e.message);
+      }
+      const creditByModel = Object.fromEntries(creditRows.map((row) => [row.model, { credit: row.credit, count: row.count }]));
+      const stats = buildThinkingStatsCached({
+        root: PROFILE.dataRoot,
+        days,
+        models: tokenStats.models,
+        callPoints: tokenStats.callPoints,
+        creditByModel,
+      });
+      return json(res, 200, { ok: true, stats });
+    })().catch((e) => {
+      log('[thinking-stats] 统计失败: ' + ((e && e.message) || e));
+      const badParam = /^(bad-param|shape-mismatch)$/.test(String(e && e.code));
+      return json(res, badParam ? 400 : 500, { ok: false, error: (e && e.message) || '读取思考效率失败' });
+    });
+  }
+
+  // 使用状态看板状态：前端据此判断「有没有产物 / 什么时候生成的 / 脚本在不在」，
+  // 首次打开时若还没有产物就直接触发一次生成，避免点开一个空窗口。
+  if (req.method === 'GET' && p === '/api/usage-board/status') {
+    return (async () => {
+      const html = latestUsageBoardHtml();
+      let mtime = 0;
+      try { if (html) mtime = fs.statSync(path.join(USAGE_BOARD_DIR, html)).mtimeMs; } catch (_) {}
+      return json(res, 200, { ok: true, exists: !!html, file: html, mtime, url: '/usage-board/', scriptReady: fs.existsSync(USAGE_STATUS_SCRIPT), dir: USAGE_BOARD_DIR });
+    })();
+  }
+  // 使用状态看板生成：跑第三方 skill 的抽取器，产出离线 HTML 到 DATA_DIR/usage-board。
+  // 只读本机数据；不联网（除非用户显式给 --billing-token-file，本接口不传）。
+  if (req.method === 'POST' && p === '/api/usage-board/generate') {
+    if (PROFILE.kind !== 'workbuddy') return json(res, 400, { ok: false, error: '当前客户端不支持使用状态看板' });
+    return (async () => {
+      const py = resolveUsageBoardPython();
+      if (!py) return json(res, 500, { ok: false, error: '未找到可用的 Python 解释器' });
+      if (!fs.existsSync(USAGE_STATUS_SCRIPT)) {
+        return json(res, 404, { ok: false, error: '看板脚本不存在：' + USAGE_STATUS_SCRIPT });
+      }
+      try { fs.mkdirSync(USAGE_BOARD_DIR, { recursive: true }); } catch (_) {}
+      const started = Date.now();
+      return new Promise((resolve) => {
+        const child = spawn(py, [USAGE_STATUS_SCRIPT, '--out', USAGE_BOARD_DIR], {
+          cwd: path.dirname(USAGE_STATUS_SCRIPT),
+          windowsHide: true,
+          env: Object.assign({}, process.env, { PYTHONIOENCODING: 'utf-8' }),
+        });
+        let out = '';
+        let err = '';
+        let done = false;
+        const finish = (payload) => {
+          if (done) return;
+          done = true;
+          resolve(json(res, payload.ok ? 200 : 500, payload));
+        };
+        const timer = setTimeout(() => {
+          try { child.kill(); } catch (_) {}
+          finish({ ok: false, error: '看板生成超时（120s）' });
+        }, 120000);
+        child.stdout.on('data', (d) => { out += d.toString('utf8'); if (out.length > 20000) out = out.slice(-20000); });
+        child.stderr.on('data', (d) => { err += d.toString('utf8'); if (err.length > 8000) err = err.slice(-8000); });
+        child.on('error', (e) => { clearTimeout(timer); finish({ ok: false, error: '启动失败: ' + e.message }); });
+        child.on('close', (code) => {
+          clearTimeout(timer);
+          const html = latestUsageBoardHtml();
+          log('[usage-board] 生成 rc=' + code + ' 用时 ' + (Date.now() - started) + 'ms → ' + (html || '(无产物)'));
+          if (code !== 0) return finish({ ok: false, error: String(err || out || ('看板脚本退出码 ' + code)).slice(-600) });
+          // 只保留最近 3 份带时间戳的看板 HTML / CSV，避免无限堆积。
+          try {
+            const prune = (re, keep) => {
+              const hits = fs.readdirSync(USAGE_BOARD_DIR).filter((f) => re.test(f)).sort();
+              for (const f of hits.slice(0, Math.max(0, hits.length - keep))) {
+                try { fs.unlinkSync(path.join(USAGE_BOARD_DIR, f)); } catch (_) {}
+              }
+            };
+            prune(/-dashboard-\d+.*\.html$/i, 3);
+            prune(/^usage-full-\d+.*\.csv$/i, 3);
+          } catch (_) {}
+          finish({ ok: true, file: html, url: '/usage-board/' + encodeURIComponent(html || ''), elapsedMs: Date.now() - started, tail: String(out).slice(-1200) });
+        });
+      });
+    })();
+  }
+  // ---- 统一用量看板（自绘离线 HTML，2026-09-23）----
+  // 把「原用量统计」与「第三方 usage-status」合成一份面板：三维统计（日期×账号×模型）由我们自己的
+  // 抽取器算（含 credit 归因），错误/思考时长/缓存命中/会话排行由第三方抽取器补。筛选全部在客户端做，
+  // 数据内嵌进 HTML ⇒ 切筛选零延迟，且不触碰 /api/ 的 token 鉴权（iframe 带不了请求头）。
+  if (req.method === 'GET' && p === '/api/usage-unified/status') {
+    return (async () => {
+      const file = latestUsageUnifiedHtml();
+      let mtime = 0;
+      try { if (file) mtime = fs.statSync(path.join(USAGE_BOARD_DIR, file)).mtimeMs; } catch (_) {}
+      return json(res, 200, { ok: true, exists: !!file, file, mtime, url: '/usage-unified/', enrichReady: fs.existsSync(USAGE_STATUS_JSON), dir: USAGE_BOARD_DIR });
+    })();
+  }
+  if (req.method === 'POST' && p === '/api/usage-unified/generate') {
+    if (PROFILE.kind !== 'workbuddy') return json(res, 400, { ok: false, error: '当前客户端不支持用量看板' });
+    return (async () => {
+      const started = Date.now();
+      // ① 第三方抽取器：best-effort，只补指标，失败绝不影响三维统计。
+      let enrich = readUsageStatusJson();
+      let enrichNote = enrich ? '' : '未找到第三方产物';
+      try {
+        const r = await runUsageStatusExtractor();
+        if (r.ok) { enrich = readUsageStatusJson() || enrich; enrichNote = ''; }
+        else if (!enrich) enrichNote = String(r.error || '第三方抽取器未成功');
+      } catch (e) {
+        if (!enrich) enrichNote = String((e && e.message) || e);
+      }
+      // ② 自绘三维统计（credit 归因 + orphan 警告都在这条链路上）
+      const payload = await buildUsageUnified({
+        root: PROFILE.dataRoot,
+        days: 90,
+        query: sqliteQuery,
+        queryCredit: creditUsageQuery(),
+        profileId: PROFILE.id,
+        accountOptions: listAccounts(DATA_DIR),
+        enrich,
+        // 会话排行标题要靠副本血缘（meta.json 的 autoCopy）与标题快照，两者都在 DATA_DIR 下。
+        dataDir: DATA_DIR,
+      });
+      payload.meta.currentUid = String((currentAccount() || {}).uid || '');
+      if (enrichNote) payload.warnings.push({ type: 'enrich-unavailable', detail: '补充指标不可用：' + enrichNote + '（不影响上面的三维统计）' });
+      // ③ 渲染单文件 HTML + 落一份 JSON 证据（便于事后核对，不参与渲染）
+      const html = renderUsageBoardHtml(payload);
+      try { fs.mkdirSync(USAGE_BOARD_DIR, { recursive: true }); } catch (_) {}
+      const d = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '-' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+      const htmlName = 'unified-board-' + stamp + '.html';
+      const jsonName = 'unified-usage-' + stamp + '.json';
+      fs.writeFileSync(path.join(USAGE_BOARD_DIR, htmlName), html, 'utf8');
+      fs.writeFileSync(path.join(USAGE_BOARD_DIR, jsonName), JSON.stringify(payload), 'utf8');
+      // 只保留最近 3 份，避免无限堆积（与第三方看板的裁剪策略一致）。
+      try {
+        const prune = (re, keep) => {
+          const hits = fs.readdirSync(USAGE_BOARD_DIR).filter((f) => re.test(f)).sort();
+          for (const f of hits.slice(0, Math.max(0, hits.length - keep))) {
+            try { fs.unlinkSync(path.join(USAGE_BOARD_DIR, f)); } catch (_) {}
+          }
+        };
+        prune(/^unified-board-\d+.*\.html$/i, 3);
+        prune(/^unified-usage-\d+.*\.json$/i, 3);
+        // 第三方抽取器的副产物同样会无限堆积（每天 1 份 ≈507KB HTML + 1 份 CSV）⇒ 一并裁剪。
+        prune(/-dashboard-\d+.*\.html$/i, 3);
+        prune(/^usage-full-\d+.*\.csv$/i, 3);
+      } catch (_) {}
+      log('[usage-unified] 生成用时 ' + (Date.now() - started) + 'ms → ' + htmlName + ' buckets=' + payload.buckets.length);
+      return json(res, 200, {
+        ok: true, file: htmlName, url: '/usage-unified/', elapsedMs: Date.now() - started,
+        buckets: payload.buckets.length, accounts: payload.accounts.length, models: payload.models.length,
+        days: payload.days.length, enrichUsed: !!(payload.enrich && payload.enrich.available), enrichNote,
+        creditSource: (payload.meta && payload.meta.credit && payload.meta.credit.source) || '',
+        creditTotal: (payload.totals && payload.totals.credit) || 0,
+        creditRequests: (payload.meta && payload.meta.credit && payload.meta.credit.requests) || 0,
+        warnings: payload.warnings,
+      });
+    })().catch((e) => {
+      log('[usage-unified] 生成失败: ' + ((e && e.stack) || e));
+      return json(res, 500, { ok: false, error: String((e && e.message) || e) });
+    });
+  }
+
+  // ---- 单会话成本卡（T21，2026-09-23）----
+  // 给面板「会话」页提供当前会话的实时成本读数。数据源与口径全部落在
+  // session-cost.js 头部注释里（关键：credit_json 的键是 providerData.conversationRequestId，
+  // 必须按它去重，否则会重复计到 ≈50×）。这里只做路由 + 参数兜底。
+  if (req.method === 'GET' && p === '/api/session-cost') {
+    return (async () => {
+      const sessionId = String(url.searchParams.get('sessionId') || '').trim();
+      const rounds = Math.max(1, Math.min(50, Number(url.searchParams.get('rounds') || 10) || 10));
+      try {
+        const data = await buildSessionCostCached({ root: PROFILE.dataRoot, sessionId, rounds, query: sqliteQuery });
+        return json(res, 200, { ok: true, data });
+      } catch (e) {
+        log('[session-cost] 失败: ' + ((e && e.stack) || e));
+        return json(res, 500, { ok: false, error: String((e && e.message) || e) });
+      }
+    })();
   }
 
   // 上下文体检：把「烧 token 的地方」变成可执行清单。**只读，不写盘。**
@@ -15989,6 +16345,62 @@ function startServer() {
           return res.end('not found');
         }
         res.writeHead(200, { 'Content-Type': 'image/webp', 'Cache-Control': 'no-cache, no-store, must-revalidate' });
+        return res.end(fs.readFileSync(file));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('error: ' + e.message);
+      }
+    }
+    // 统一用量看板静态服务（无鉴权，与 /usage-board 同构）：/usage-unified/ 或 /usage-unified/<name>
+    if (req.method === 'GET' && /^\/usage-unified(\/|$|\?)/.test(req.url)) {
+      try {
+        let name = decodeURIComponent(String(req.url).split('?')[0]).replace(/^\/usage-unified\/?/, '');
+        if (!name) name = latestUsageUnifiedHtml() || '';
+        if (!name) {
+          res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+          return res.end('<!doctype html><meta charset="utf-8"><body style="font-family:sans-serif;padding:28px;color:#333">尚未生成用量看板。<br><br>请回到 WorkDaddy 面板，点「用量统计」自动生成。</body>');
+        }
+        name = path.basename(name);
+        const file = path.join(USAGE_BOARD_DIR, name);
+        if (!fs.existsSync(file)) {
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end('not found');
+        }
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate' });
+        return res.end(fs.readFileSync(file));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('error: ' + e.message);
+      }
+    }
+    // 使用状态看板（离线 HTML）静态服务：/usage-board/<name>
+    // /usage-board 或 /usage-board/ → 最新一份 dashboard；其余按文件名取（chart.umd.min.js 等）。
+    if (req.method === 'GET' && /^\/usage-board(\/|$|\?)/.test(req.url)) {
+      try {
+        let name = decodeURIComponent(String(req.url).split('?')[0]).replace(/^\/usage-board\/?/, '');
+        if (!name) name = latestUsageBoardHtml() || '';
+        if (!name) {
+          res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+          return res.end('<!doctype html><meta charset="utf-8"><body style="font-family:sans-serif;padding:28px;color:#333">尚未生成使用状态看板。<br><br>请回到 WorkDaddy 面板，点「用量看板」重新生成。</body>');
+        }
+        name = path.basename(name);
+        const file = path.join(USAGE_BOARD_DIR, name);
+        if (!fs.existsSync(file)) {
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end('not found');
+        }
+        const ext = path.extname(name).toLowerCase();
+        const USAGE_BOARD_TYPES = {
+          '.html': 'text/html; charset=utf-8',
+          '.js': 'application/javascript; charset=utf-8',
+          '.css': 'text/css; charset=utf-8',
+          '.json': 'application/json; charset=utf-8',
+          '.csv': 'text/csv; charset=utf-8',
+          '.png': 'image/png',
+          '.svg': 'image/svg+xml',
+          '.webp': 'image/webp',
+        };
+        res.writeHead(200, { 'Content-Type': USAGE_BOARD_TYPES[ext] || 'application/octet-stream', 'Cache-Control': 'no-cache, no-store, must-revalidate' });
         return res.end(fs.readFileSync(file));
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });

@@ -697,6 +697,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     for (var ni = 0; ni < nav.length; ni++) nav[ni].remove();
     var ss = document.querySelectorAll('#wbs-style');
     for (var j = 0; j < ss.length; j++) ss[j].remove();
+    // md 快速查看器的阅读层也要一并清掉：否则旧副本留下的浮层会挡住新代码的界面。
+    var mdp = document.querySelectorAll('#wbs-mdp-modal');
+    for (var m = 0; m < mdp.length; m++) mdp[m].remove();
     var dbg = document.querySelectorAll('#wbs-diag-badge, #wbs-debug-panel');
     for (var k = 0; k < dbg.length; k++) dbg[k].remove();
     // 销毁所有历史 build：置 alive=false、断开全部 observer/事件监听。
@@ -713,6 +716,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // findWbsAdapter 的缓存校验会直接复用旧 shim，导致「修好代码重注入后仍跑旧逻辑」。
     try { delete window.__wbsAdapter; } catch (e) { window.__wbsAdapter = null; }
   })();
+  // 本副本的代标记。写在清理之后、守卫之前 —— 旧副本的 window.__wbsGeneration 会被这里覆盖，
+  // 于是旧副本里带代际守卫的监听器（见 mdqvInstall）下次事件就自动让位，不再抢事件。
+  var WBS_GENERATION = 'g' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  window.__wbsGeneration = WBS_GENERATION;
   // ===== 顶部红色角标已移除（用户要求）；仅保留 console 标记 =====
   try { console.log('[WBS] inject.js 已执行于', location.href, 'body=', !!document.body); } catch (_) {}
   if (window.__wbsWidget) return; // 理论上 cleanup 已清除，保留为兜底
@@ -1053,7 +1060,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '安全传输': 'Secure transfer', '选择内容': 'Select content', '选择账号': 'Select accounts', '选择目标账号': 'Select target account', '选择目标账号…': 'Select a target account…', '密码': 'Password', '请输入密码': 'Enter password', '密码不能为空': 'Password cannot be empty', '请至少选择一项': 'Select at least one item', '处理中…': 'Processing…', '新版文件请输入密码': 'Enter the password for the new file', '新版文件必须输入密码；旧版导出文件可留空。': 'New files require a password; older exports may be left blank.', '新版文件请输入密码；已有的相同短语会自动跳过。': 'Enter the password for the new file; duplicate phrases are skipped.',
     '电脑休眠': 'Computer sleep', '允许电脑休眠': 'Allow computer sleep', '持续禁止休眠': 'Keep awake', '所有会话结束允许休眠': 'Allow sleep when all sessions end', '系统默认，空闲后正常休眠': 'System default; sleep normally when idle', '保持唤醒，防黑屏锁屏': 'Stay awake to prevent screen lock', '任一会话运行中都保持唤醒': 'Stay awake while any session is running', '允许显示器休眠': 'Allow display sleep', '禁止休眠时，是否允许显示器单独黑屏': 'When sleep is blocked, allow the display to turn off',
     '发送错误诊断': 'Send error diagnostics', '推荐开启': 'Recommended', '由环境变量控制': 'Controlled by environment variable', '默认开启 · 设置读取失败': 'Enabled by default · failed to read setting', '保存中…': 'Saving…', '此开关控制脱敏错误诊断。匿名安装数和日活独立统计（随机安装标识、系统、架构、版本、客户端类型及出口国家），不受此开关影响。不包含账号、会话内容、Token 或 API Key。': 'This switch controls redacted error diagnostics. Anonymous installation and daily active counts are collected independently (random installation ID, system, architecture, version, client type, and network country). No accounts, session content, tokens, or API keys.', '查看错误诊断说明': 'View diagnostics details', '问题反馈': 'Report an issue', '会话监听日志': 'Session monitor log', '仅保存在当前页面内存': 'Stored only in this page memory',
-    '权限免打扰': 'Permission quiet mode', '异常中断会话': 'Continue interrupted sessions', '决策弹窗': 'Decision prompts', '用弹窗提问': 'Ask with a dialog', '确认弹窗自动允许': 'Auto-allow confirmation dialogs', '自动同步所有会话': 'Auto-sync all sessions', '会话消息索引': 'Message index', '引用消息文本': 'Quote message text', '选择登录方式': 'Choose a login method', '假退出': 'Soft logout', '无感登录': 'Seamless login',
+    '权限免打扰': 'Permission quiet mode', '异常中断会话': 'Continue interrupted sessions', '决策弹窗': 'Decision prompts', '用弹窗提问': 'Ask with a dialog', '确认弹窗自动允许': 'Auto-allow confirmation dialogs', '自动同步所有会话': 'Auto-sync all sessions', '会话消息索引': 'Message index', 'token 速度读数': 'Token speed readout', 'md 快速查看': 'Quick md viewer', 'md 快速查看（插件内置）': 'Quick md viewer (built into plugin)', '默认开启。点对话里的 md 产物卡、或产物面板里的 md 条目，都不再等官方文档查看器冷启动（首开约 30 秒），改由插件内置渲染器在右侧面板秒开；关掉则完全走官方': 'On by default. Clicking an md artifact — either the card in the conversation or the entry in the artifacts panel — renders instantly in a right-side panel with the built-in viewer, instead of waiting for the official docs viewer to cold-start (~30 s). Turn off to always use the official one.', '用官方查看器打开': 'Open with official viewer', '复制正文': 'Copy source', '导出 HTML': 'Export HTML', '已复制 md 正文': 'md source copied', '复制失败，请手动选中': 'Copy failed — select manually', '正在读取…': 'Reading…', '文件太大，未渲染': 'File too large to render', '读不到文件': 'Cannot read file', '读取失败': 'Read failed', '导出失败': 'Export failed', '已导出 HTML': 'HTML exported', '此段数学公式请用官方查看器打开': 'Math in this block needs the official viewer', '此段 mermaid 图请用官方查看器打开': 'This mermaid block needs the official viewer', '行': 'lines', '渲染耗时': 'Rendered in', '已关闭 md 快速查看': 'Quick md viewer disabled', '已开启 md 快速查看': 'Quick md viewer enabled', 'md 快速查看器': 'md quick viewer', '拖动调整宽度': 'Drag to resize', '双击恢复默认宽度': 'Double-click to reset width', '复制': 'Copy', '已复制': 'Copied', '复制失败': 'Copy failed', '代码': 'CODE', '接管自动打开的 md': 'Adopt auto-opened md', '默认开启。任务跑完后官方自动打开 md 时，插件会立刻换成自己的面板（官方冷启动约 30 秒）。关掉则只拦手动点击': 'On by default. When WorkBuddy auto-opens an md after a task, the plugin swaps in its own panel right away (the official viewer cold-starts in ~30 s). Turn off to only intercept manual clicks.',
+ '输入框下方实时显示 ≈ N tok/s，可拖动、双击复位': 'Live ≈ N tok/s under the input box; draggable, double-click to reset', '引用消息文本': 'Quote message text', '选择登录方式': 'Choose a login method', '假退出': 'Soft logout', '无感登录': 'Seamless login',
     '未设置': 'Not set', '当前使用中': 'Currently active', '停止生成': 'Stop generating', '正常重启': 'Restart normally', '清空日志': 'Clear log', '开发者工具': 'Developer tools', '隐藏功能': 'Hidden feature', '卡死': 'Stuck', '任务': 'Task', '空间': 'Workspace', '全部': 'All', '今天': 'Today', '近 7 天': 'Last 7 days', '近 30 天': 'Last 30 days', '企业配额': 'Enterprise quota', '积分到期分布': 'Credit expiry distribution',
     '连接新服务…': 'Connecting to service…', '等待中': 'Waiting', '运行中': 'Running', '空闲': 'Idle', '已中断': 'Interrupted', '已停止': 'Stopped', '未确认': 'Unconfirmed', '等待确认': 'Waiting for confirmation', '等待新回复': 'Waiting for a new reply', '等待会话': 'Waiting for session', '等待允许': 'Waiting for approval', '整理中': 'Organizing', '恢复中': 'Restoring', '即将完成…': 'Finishing…', '已继续': 'Continued', '检测到会话异常中断，即将自动发送「': 'An interrupted session was detected. Sending “', '自动发送失败，请手动点击发送': 'Automatic send failed. Please click Send manually', '底层发送失败，请手动发送': 'Underlying send failed. Please send manually',
     '导入中…': 'Importing…', ' 个任务': ' task(s)', '导入任务': 'Import tasks', '导出任务': 'Export tasks', '请先勾选要导出的任务': 'Select tasks to export first', '选择 JSON 或 ZIP 任务文件': 'Choose a JSON or ZIP task file', '读取任务文件…': 'Reading task file…', '任务导出成功': 'Tasks exported', '导入失败': 'Import failed', '导出失败': 'Export failed', '可导入': 'Ready to import', '已存在，将跳过': 'Already exists; skipped', '不兼容，无法导入': 'Incompatible; cannot import', '导入后保持停用，可在任务列表中启用。相同 ID 的任务会跳过。': 'Imported tasks stay disabled until you enable them. Existing task IDs are skipped.', '任务文件不能超过 8 MiB': 'Task files must not exceed 8 MiB', '缺少必填参数': 'Required inputs are missing', '需要更新 WorkDaddy': 'Requires a newer WorkDaddy version', '不支持当前客户端或系统': 'Unsupported client or platform', '文件不是自动化任务 JSON': 'Not an automation task JSON file', '任务格式或能力不受支持': 'Unsupported task format or capabilities',
@@ -1472,6 +1480,25 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '收起详情': 'Hide details',
     '没有发现问题': 'No issues found',
     '严重 / 警告：': 'Critical / warnings: ',
+    '单会话成本': 'Session cost',
+    '待首轮结算': 'Awaiting first settlement',
+    '累计积分': 'Total credits',
+    '边际成本': 'Marginal cost',
+    '上下文占用': 'Context use',
+    '缓存命中率': 'Cache hit rate',
+    '未识别到当前会话': 'No active session detected',
+    // 思考效率与模型性价比（T20）面板：**整句入典**（最长优先扫描，别只登记半句，
+    // 否则 '模型生成秒数' 里的 '模型' 会被单独翻成 Model，整句变中英混杂）。
+    '思考效率与模型性价比': 'Thinking efficiency & model value',
+    '模型效率': 'Model efficiency',
+    '模型效率（思考秒数 × tok/s × 每次积分）': 'Model efficiency (thinking seconds × tok/s × credit per call)',
+    '正在读取 traces…（首次约 3 秒）': 'Reading traces… (about 3 s on first run)',
+    '暂无数据': 'No data',
+    '每次': 'Per call', // 表头单列：与 '每 '（Every ）区分，长度优先保证命中本词
+    '模型归属率': 'Model attribution ', // 尾随空格必须留在译文里（后面直接接 '91%'）
+    '另有 {n} 个模型只有积分记录、没有可观测的 token 或时长，未列入本表': '{n} model(s) have credit records but no observed tokens or duration — omitted from this table',
+    '读取失败（traces 统计不可用）': 'Failed to read (traces stats unavailable)',
+    'tok/s = 输出 token ÷ 模型生成秒数（端到端，含排队/网络）｜credit/1k = 积分 ÷ 千输出 token｜每次 = 每个 agent 轮次均摊的积分': 'tok/s = output tokens ÷ model generation seconds (end-to-end, incl. queueing/network) | credit/1k = credits ÷ 1k output tokens | per call = credits averaged over each agent turn',
   };
   function wbsSystemLanguage() {
     var value = String((navigator && (navigator.language || navigator.userLanguage)) || '').toLowerCase();
@@ -1757,6 +1784,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   var TOKEN_STATS_ICON =
     '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M4 19V5M4 19h16"/><path d="m7 15 3-4 3 2 5-7"/></svg>';
+  // 用量看板（第三方 skill 生成的离线 HTML）入口图标：四宫格仪表盘，与上面的折线「用量统计」区分开。
+  var USAGE_BOARD_ICON =
+    '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<rect x="3.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="3.5" width="7" height="4.5" rx="1.6"/>' +
+    '<rect x="13.5" y="11" width="7" height="9.5" rx="1.6"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.6"/></svg>';
+  // 模型效率入口图标：速度表（区别于折线「用量统计」与四宫格「用量看板」）。
+  var THINKING_PERF_ICON =
+    '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M3.9 17.8a8.8 8.8 0 1 1 16.2 0"/><path d="m12 14.2 4.2-4.6"/><circle cx="12" cy="15.4" r="1.6"/></svg>';
   // 脱敏小眼睛：睁眼 = 明文可见（点击后隐藏）；闭眼（斜线） = 已脱敏（点击后显示明文）
   var EYE_SVG =
     '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
@@ -2055,7 +2091,22 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   // 旧实现 document.querySelector('[data-slate-editor="true"]') 会**错把消息历史当成输入框**，
   // 导致 composerHasContent 永远 true（消息历史永远有内容）。修正后：优先在操作栏祖先链内找
   // 可编辑节点；否则取所有 contenteditable 中 y 距 voice-mic-wrap 最近且在其上方的节点（输入框紧贴操作栏上方）。
+  // 【性能】findComposer 会 querySelectorAll 全部 contenteditable，再逐个 getBoundingClientRect/
+  // getComputedStyle（强制同步布局）。而同一轮里 sendInfo / composerInfo / shouldShowStash /
+  // findActionRow 都会调它 ⇒ 白白重算 4~5 次。加 1s TTL + isConnected 校验：
+  // 换会话导致输入框被替换时 isConnected=false，立刻重算，语义不变。
+  var findComposerCache = { el: null, at: 0 };
   function findComposer() {
+    var now = Date.now();
+    if (findComposerCache.el && findComposerCache.el.isConnected && (now - findComposerCache.at) < 1000) {
+      return findComposerCache.el;
+    }
+    var found = findComposerRaw();
+    findComposerCache.el = found;
+    findComposerCache.at = now;
+    return found;
+  }
+  function findComposerRaw() {
     var mic = document.querySelector('.voice-mic-wrap');
     if (!mic) {
       // 新版布局（无 voice-mic-wrap）：输入框特征是 [contenteditable=true]，且位于视口下半部、
@@ -3536,6 +3587,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var syncTimer = null;
       var tooltipTimer = null;
       var activeFrame = null;
+      // 【2026-09-23 性能】滚动期降载：小圆点高亮上限 ~12.5Hz（带尾沿补偿，保证停下后一定落到正确那条）；
+      //   虚拟项列表缓存 1s（querySelectorAll 每次都要遍历整棵会话子树，滚动时 60Hz 调用很亏）。
+      var WBS_ACTIVE_MIN_GAP = 80;
+      var activeLastAt = 0, activeTrail = null, virtualCache = null, virtualCacheAt = 0;
       var dragPointerId = null;
       var dragLastIndex = -1;
       var suppressPointerClick = false;
@@ -3698,7 +3753,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }
 
       function updateActive() {
-        if (!surface || !turns.length) return;
+        if (!surface || !turns.length || hidden) return;   // 索引条不可见 ⇒ 无需更新高亮
         // 末条消息较短时无法顶齐视口；到底后直接对应最后一轮，避免顶部位置推断选回上一轮。
         var scroll = surface.scrollElement;
         if (scroll && scroll.scrollHeight > scroll.clientHeight &&
@@ -3707,7 +3762,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           return;
         }
         var viewport = surface.viewportElement.getBoundingClientRect();
-        var frames = surface.conversationElement.querySelectorAll('.cr-document__virtual-item[data-index]');
+        var framesAt = Date.now();
+        if (!virtualCache || framesAt - virtualCacheAt > 1000) {
+          virtualCache = surface.conversationElement.querySelectorAll('.cr-document__virtual-item[data-index]');
+          virtualCacheAt = framesAt;
+        }
+        var frames = virtualCache;
         var visibleMessageIndex = -1;
         var bestDistance = Infinity;
         for (var i = 0; i < frames.length; i++) {
@@ -3729,8 +3789,17 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
       function scheduleActive() {
         if (activeFrame != null) return;
+        var nowMs = Date.now();
+        if (nowMs - activeLastAt < WBS_ACTIVE_MIN_GAP) {
+          // 节流命中：补一个尾沿定时器，保证滚动停下后高亮一定会再落一次到正确位置
+          if (activeTrail == null) {
+            activeTrail = setBuildTimeout(function () { activeTrail = null; scheduleActive(); }, WBS_ACTIVE_MIN_GAP);
+          }
+          return;
+        }
         activeFrame = requestAnimationFrame(function () {
           activeFrame = null;
+          activeLastAt = Date.now();
           updateActive();
         });
       }
@@ -3743,6 +3812,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         lastMessages = messageState.messages;
         lastVersion = messageState.version;
         turns = WBS_COMPAT.collectMessageNavigationTurnsFromMessages(messageState.messages);
+        virtualCache = null;   // 消息列表变了 ⇒ 虚拟项缓存作废
         hidden = turns.length <= 1;
         ensureRoot();
         if (hidden) {
@@ -3965,7 +4035,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var next = event.key === 'ArrowDown' ? index + 1 : index - 1;
         if (next >= 0 && next < rail.children.length) { event.preventDefault(); rail.children[next].focus(); }
       }
-      function onWindowChange() { position(); scheduleActive(); }
+      function onWindowChange() {
+        // window 捕获阶段的 scroll 事件非常密集（页面上任何可滚容器都会走到这里），
+        // position() 内含 getBoundingClientRect，故与高亮共用同一个 ~12.5Hz 闸门。
+        if (Date.now() - activeLastAt >= WBS_ACTIVE_MIN_GAP) position();
+        scheduleActive();
+      }
 
       listen(window, 'resize', onWindowChange);
       listen(window, 'scroll', onWindowChange, true);
@@ -3976,6 +4051,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         if (tooltipTimer) clearTimeout(tooltipTimer);
         if (suppressClickTimer) clearTimeout(suppressClickTimer);
         if (activeFrame != null) cancelAnimationFrame(activeFrame);
+        if (activeTrail) { clearTimeout(activeTrail); activeTrail = null; }
         if (resizeObserver) resizeObserver.disconnect();
         if (scrollElement) scrollElement.removeEventListener('scroll', scheduleActive);
         unbindStore();
@@ -4115,6 +4191,37 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         }
       }, 500);
     }
+    // ===== 【性能】可见性与 mutation 过滤（2026-09-23 修「打开 md 报告卡顿」）=====
+    // 背景：把一份大 markdown 报告渲染进详情/预览区后，DOM 从 ~2.9k 涨到 ~10.2k 元素（含 33 张表），
+    // 且内容会**常驻**在文档里。此时我们那些「无条件周期性 DOM 工作」每次都要付出全量样式/布局代价：
+    // 实测打开报告后主线程被吃到 ~100%，其中 inject.js 占 99.6%（官方 markdown 渲染器只占 ~6ms）。
+    // 因此：① 只在可见时做面板内的工作；② 只对「与注入功能相关」的 mutation 反应。
+    function wbsPanelShown() {
+      try {
+        var p = root.querySelector(".wbs-panel");
+        return !!(p && p.classList && p.classList.contains("show"));
+      } catch (_) { return false; }
+    }
+    function wbsTabActive(name) {
+      try { var t = root.querySelector(".wbs-tab[data-tab=\"" + name + "\"]"); return !!(t && t.classList.contains("active")); } catch (_) { return false; }
+    }
+    // 详情面板 / 文档预览 / 成品卡（present_files 卡片）这些区域与注入功能无关。
+    // 大文档渲染会灌进来上万条 mutation，整批都不相关时直接丢弃，别进 onDomChange。
+    var WBS_IRRELEVANT_SEL = ".detail-panel-container,.detail-layout,.detail-main,.detail-sidebar,.cb-overview-panel,[class*=\"preview-slot\"],[class*=\"docs-viewer\"],[class*=\"artifact-view\"],[class*=\"wbs-token-rate-shield\"]";
+    function wbsMutationsRelevant(records) {
+      if (!records || !records.length) return false;
+      for (var i = 0; i < records.length; i++) {
+        var t = records[i] && records[i].target;
+        if (!t) continue;
+        if (t.nodeType !== 1) t = t.parentElement;
+        if (!t || !t.closest) return true;
+        if (t.closest(".wbs-root")) continue;            // 自家面板：我们主动重绘，不需要 observer 驱动
+        if (t.closest(WBS_IRRELEVANT_SEL)) continue;     // 详情/预览/文档查看器：与注入功能无关
+        return true;
+      }
+      return false;
+    }
+
     function onDomChange() {
       if (!alive) return;
       acLimitWatchTick(); // 限流横幅监听：内部有 1.5s 时间闸，不会每帧都查 DOM
@@ -4166,7 +4273,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       });
     }
     if (typeof MutationObserver !== 'undefined') {
-      bodyObserver = new MutationObserver(scheduleDomChange);
+      bodyObserver = new MutationObserver(function (records) {
+        if (!wbsMutationsRelevant(records)) return;
+        scheduleDomChange();
+      });
       bodyObserver.observe(document.body, { childList: true, subtree: true });
     }
 
@@ -5377,7 +5487,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<button class="wbs-acct-eye" type="button" data-act="credit-summary" title="汇总" aria-label="积分汇总" aria-expanded="false">' + CREDIT_SUMMARY_ICON + '</button>' +
         '</div>' +
         '<div class="wbs-acct-actions">' +
-        '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="token-stats" title="用量统计" aria-label="用量统计">' + TOKEN_STATS_ICON + '</button>' +
+        '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="usage-board" title="用量看板（统一版：按账号/模型/日期统计 token 与积分）" aria-label="用量看板">' + USAGE_BOARD_ICON + '</button>' +
+        '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="thinking-perf" title="模型效率（思考秒数 × tok/s × 每次积分）" aria-label="模型效率（思考秒数 × tok/s × 每次积分）">' + THINKING_PERF_ICON + '</button>' +
         '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="export" title="选择账号并输入密码后导出备份" aria-label="导出账号">' + EXPORT_ICON + '</button>' +
         '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="import" title="从加密导出文件导入账号备份" aria-label="导入账号">' + IMPORT_ICON + '</button>' +
         '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="account-more" title="账号设置" aria-label="账号设置"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.75a2 2 0 0 1 2 1.4l.4 1.1 1.15.47 1.06-.48a2 2 0 0 1 2.4.45l.8.8a2 2 0 0 1 .45 2.4l-.48 1.06.47 1.15 1.1.4a2 2 0 0 1 0 3.8l-1.1.4-.47 1.15.48 1.06a2 2 0 0 1-.45 2.4l-.8.8a2 2 0 0 1-2.4.45l-1.06-.48-1.15.47-.4 1.1a2 2 0 0 1-3.8 0l-.4-1.1-1.15-.47-1.06.48a2 2 0 0 1-2.4-.45l-.8-.8a2 2 0 0 1-.45-2.4l.48-1.06-.47-1.15-1.1-.4a2 2 0 0 1 0-3.8l1.1-.4.47-1.15-.48-1.06a2 2 0 0 1 .45-2.4l.8-.8a2 2 0 0 1 2.4-.45l1.06.48 1.15-.47.4-1.1A2 2 0 0 1 12 2.75Z"/><circle cx="12" cy="12.5" r="3"/></svg></button>' +
@@ -5416,7 +5527,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var eyeBtn = root.querySelector('.wbs-acct-eye');
       if (eyeBtn) eyeBtn.addEventListener('click', toggleAccountMask);
       root.querySelector('[data-act="export"]').addEventListener('click', onExportAccounts);
-      root.querySelector('[data-act="token-stats"]').addEventListener('click', onTokenStats);
+      root.querySelector('[data-act="usage-board"]').addEventListener('click', onUsageBoard);
+      root.querySelector('[data-act="thinking-perf"]').addEventListener('click', onThinkingPerf);
       root.querySelector('[data-act="import"]').addEventListener('click', function () {
         openAccountImportChoice();
       });
@@ -7087,6 +7199,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           });
         });
       });
+      // 思考效率与模型性价比（T20）的表已搬到同作用域的 onThinkingPerf（独立入口「模型效率」）。
+      // 这里原来挂了一份渲染副本，但本函数（onTokenStats）在 2026-09-23 融合进「用量看板」时
+      // 就失去了入口 ⇒ 死代码里的副本永远看不到，只会与真实现漂移，故摘掉。
       function load() {
         var serial = ++tokenReadSerial;
         mask.querySelectorAll('[data-token-days]').forEach(function (button) { button.disabled = true; });
@@ -7144,6 +7259,243 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       load();
     }
 
+    // ===== 模型效率（T20：思考效率与模型性价比）=====
+    // 为什么单独一个入口，而不是并进「用量看板」（2026-09-23 决策，两条理由）：
+    //   ① 看板是**生成期把数据内嵌**的离线快照（还带「重新生成」按钮），而思考秒数来自
+    //      traces、每天新增几百个文件 —— 塞进快照当场就旧了，还会拖慢看板首屏；
+    //   ② 看板已有「积分效率（积分 ÷ 百万 token）」，与本表的「credit/1k（积分 ÷ 千 token）」
+    //      是**同一比值的两种刻度** —— 两处并存就得回答「为什么两个数」（本仓『同页两个数
+    //      不许打架』纪律）。⇒ 独立入口，只回答一个问题：哪个模型快、哪个划算。
+    // ⚠️ 历史：原「用量统计」（自绘折线/排行）的入口在 2026-09-23 融合进看板时被刻意摘掉
+    //    （见 .wd-tmp/patch-inject-unified.js），其 onTokenStats 已成死代码 —— 所以 T20 的表
+    //    不能挂在那里（挂上去用户永远看不到）。
+    var perfDays = 7;
+    function perfTableHtml(stats) {
+      var all = (stats && stats.models) || [];
+      // 本表只表达「时间维度 × token 维度」两列（输出 / tok/s）。只有积分、既没有可观测
+      // token 又没有时长的模型（实测本机 7 天里的 glm-5.2）留在这里就是**一行全是「—」**，
+      // 看着像 bug。⇒ 不列入，但**明说省了多少**，不静默丢。
+      var rows = all.filter(function (item) { return item.thinkingSec || item.output; });
+      var creditOnly = all.length - rows.length;
+      var pick = function (value, digits) {
+        if (value === null || value === undefined) return '—';
+        if (!Number.isFinite(Number(value))) return '—';
+        return digits === undefined ? String(Math.round(Number(value))) : Number(value).toFixed(digits);
+      };
+      if (!rows.length) return '<div class="wbs-perf-note">暂无数据</div>';
+      var html = '<div class="wbs-perf-table">' +
+        '<div class="wbs-perf-row wbs-perf-head"><span>模型</span><span>输出</span><span>tok/s</span><span>credit/1k</span><span>每次</span></div>' +
+        rows.slice(0, 10).map(function (item) {
+          return '<div class="wbs-perf-row"><span title="' + escAttr(item.model) + '">' + esc(item.model) + '</span>' +
+            '<b>' + (item.output === null || item.output === undefined ? '—' : esc(formatTokenCount(item.output))) + '</b>' +
+            '<b>' + esc(pick(item.tokPerSec, 1)) + '</b>' +
+            '<b>' + esc(pick(item.creditPer1kTokens, 3)) + '</b>' +
+            '<em>' + esc(pick(item.creditPerTrace, 2)) + '</em></div>';
+        }).join('') + '</div>' +
+        '<div class="wbs-perf-note">tok/s = 输出 token ÷ 模型生成秒数（端到端，含排队/网络）｜credit/1k = 积分 ÷ 千输出 token｜每次 = 每个 agent 轮次均摊的积分</div>';
+      // 一行一个文本节点（禁 join 拼整句）：i18n 扫描器逐个文本节点查词典，
+      // 拼成一整句会让「模型归属率 91%」这类带动态数的句子整句落空。
+      var ratio = stats.coverage && stats.coverage.attributedRatio;
+      if (Number.isFinite(Number(ratio))) {
+        html += '<div class="wbs-perf-note">模型归属率 ' + esc(String(Math.round(Number(ratio) * 100))) + '%</div>';
+      }
+      if (creditOnly > 0) {
+        html += '<div class="wbs-perf-note">另有 ' + esc(String(creditOnly)) + ' 个模型只有积分记录、没有可观测的 token 或时长，未列入本表</div>';
+      }
+      var warn = (stats.warnings || [])[0];
+      // 服务端告警是「数据」不是「文案」：加 data-wbs-i18n-skip，别让翻译层去猜它
+      if (warn) html += '<div class="wbs-perf-note" data-wbs-i18n-skip>' + esc(warn) + '</div>';
+      return html;
+    }
+    function onThinkingPerf() {
+      if (typeof hideCreditTooltip === 'function') hideCreditTooltip();
+      if (typeof closeDailyProgressPopover === 'function') closeDailyProgressPopover();
+      var existing = document.getElementById('wbs-thinking-perf-modal');
+      if (existing) { if (existing.__wbsClose) existing.__wbsClose(); else existing.remove(); }
+      var mask = document.createElement('div');
+      mask.id = 'wbs-thinking-perf-modal';
+      mask.className = 'wbs-modal-mask wbs-usage-modal-mask';
+      mask.innerHTML = '<div class="wbs-modal wbs-token-stats-modal wbs-perf-modal" role="dialog" aria-modal="true" aria-labelledby="wbs-thinking-perf-title">' +
+        '<div class="wbs-usage-header"><div class="wbs-modal-title" id="wbs-thinking-perf-title">模型效率</div>' +
+        '<div class="wbs-usage-period"><span>时间</span><div class="wbs-usage-segment" role="group" aria-label="统计时间">' +
+        [1, 7, 30, 90].map(function (days) {
+          return '<button type="button" data-perf-days="' + days + '" aria-pressed="' + (days === perfDays) + '"' + (days === perfDays ? ' class="active"' : '') + '>' +
+            ({ 1: '今天', 7: '近 7 天', 30: '近 30 天', 90: '近 90 天' })[days] + '</button>';
+        }).join('') + '</div></div></div>' +
+        '<div class="wbs-usage-scroll"><div class="wbs-token-stats-body" data-perf-body>' +
+        '<div class="wbs-token-stats-loading" role="status">正在读取 traces…（首次约 3 秒）</div></div></div>' +
+        '<div class="wbs-modal-actions"><button class="wbs-modal-btn" type="button" data-perf-close>关闭</button></div></div>';
+      root.appendChild(mask);
+      var body = mask.querySelector('[data-perf-body]');
+      var focusBefore = document.activeElement;
+      var serial = 0;
+      function closePerf() {
+        mask.remove();
+        if (focusBefore && focusBefore.isConnected) focusBefore.focus();
+      }
+      mask.__wbsClose = closePerf;
+      registerDisposer(function () { mask.remove(); });
+      mask.querySelector('[data-perf-close]').addEventListener('click', closePerf);
+      mask.addEventListener('click', function (event) { event.stopPropagation(); if (event.target === mask) closePerf(); });
+      ['pointerdown', 'pointerup', 'keyup', 'keypress'].forEach(function (name) { mask.addEventListener(name, function (event) { event.stopPropagation(); }); });
+      mask.addEventListener('keydown', function (event) {
+        event.stopPropagation();
+        if (event.key === 'Escape') { event.preventDefault(); closePerf(); }
+      });
+      // 首屏慢（要扫 traces，首次 3–8 秒）⇒ 先渲染骨架再异步填表，绝不阻塞面板。
+      function load() {
+        var current = ++serial;
+        body.innerHTML = '<div class="wbs-token-stats-loading" role="status">正在读取 traces…（首次约 3 秒）</div>';
+        api('/api/thinking-stats?days=' + encodeURIComponent(perfDays)).then(function (reply) {
+          if (current !== serial || !mask.isConnected) return;
+          body.innerHTML = perfTableHtml((reply && reply.stats) || {});
+          applyI18n(body);
+        }).catch(function () {
+          if (current !== serial || !mask.isConnected) return;
+          body.innerHTML = '<div class="wbs-perf-note">读取失败（traces 统计不可用）</div>';
+          applyI18n(body);
+        });
+      }
+      mask.querySelectorAll('[data-perf-days]').forEach(function (button) {
+        button.addEventListener('click', function () {
+          var next = Number(button.getAttribute('data-perf-days'));
+          if (!next || next === perfDays) return;
+          perfDays = next;
+          mask.querySelectorAll('[data-perf-days]').forEach(function (item) {
+            var on = Number(item.getAttribute('data-perf-days')) === perfDays;
+            item.classList.toggle('active', on);
+            item.setAttribute('aria-pressed', on ? 'true' : 'false');
+          });
+          load();
+        });
+      });
+      load();
+      applyI18n(mask);
+    }
+
+    // ===== 用量看板（统一版）=====
+    // 2026-09-23 融合：原「用量统计」（自绘折线/排行）与第三方 Usage Status 看板合成**一个** HTML 面板。
+    // 面板侧只做两件事：把 daemon 静态服务 /usage-unified/ 的最新产物塞进 iframe、按需 POST 重算；
+    // 三维筛选（日期 × 账号 × 模型）与全部图表都在 HTML 内完成（数据内嵌 ⇒ 切筛选零延迟、断网可用）。
+    function wbsIsDarkTheme() {
+      try {
+        var h = document.documentElement;
+        if (h.classList.contains('cb-dark')) return true;
+        var t = String(h.getAttribute('data-theme') || '').toLowerCase();
+        if (!t) t = String(document.body.getAttribute('data-theme') || '').toLowerCase();
+        if (t === 'dark') return true;
+        var v = String(document.body.getAttribute('data-vscode-theme-name') || '').toLowerCase();
+        return v.indexOf('dark') >= 0;
+      } catch (_) { return false; }
+    }
+
+    function onUsageBoard() {
+      if (typeof hideCreditTooltip === 'function') hideCreditTooltip();
+      if (typeof closeDailyProgressPopover === 'function') closeDailyProgressPopover();
+      var existing = document.getElementById('wbs-usage-board-modal');
+      if (existing) { if (existing.__wbsClose) existing.__wbsClose(); else existing.remove(); }
+      var mask = document.createElement('div');
+      mask.id = 'wbs-usage-board-modal';
+      mask.className = 'wbs-modal-mask wbs-usage-modal-mask';
+      mask.innerHTML = '<div class="wbs-modal wbs-usage-board-modal" role="dialog" aria-modal="true" aria-labelledby="wbs-usage-board-title">' +
+        '<div class="wbs-usage-header wbs-usage-board-head"><div class="wbs-token-stats-head">' +
+        '<div class="wbs-modal-title" id="wbs-usage-board-title">用量看板<span class="wbs-usage-board-tag">统一版 · 账号 × 模型 × 日期</span><span class="wbs-usage-board-time" data-board-time></span></div>' +
+        '<span class="wbs-usage-board-acts">' +
+        '<button type="button" class="wbs-usage-board-refresh" data-board-src title="切到第三方 Usage Status 原版看板（与补充指标同源）">第三方原版</button>' +
+        '<button type="button" class="wbs-usage-board-refresh" data-board-refresh title="重新扫描本机数据并重算看板">重新生成</button>' +
+        '</span>' +
+        '</div></div>' +
+        '<div class="wbs-usage-board-body">' +
+        '<iframe class="wbs-usage-board-frame" data-board-frame title="WorkBuddy 用量看板"></iframe>' +
+        '<div class="wbs-usage-board-overlay" data-board-overlay role="status" aria-live="polite"><div class="wbs-token-stats-spinner"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle></svg></div><span data-board-msg>正在载入看板…</span></div>' +
+        '</div>' +
+        '<div class="wbs-modal-actions"><button class="wbs-modal-btn" type="button" data-board-close>关闭</button></div></div>';
+      root.appendChild(mask);
+      var frame = mask.querySelector('[data-board-frame]');
+      var overlay = mask.querySelector('[data-board-overlay]');
+      var msg = mask.querySelector('[data-board-msg]');
+      var refreshBtn = mask.querySelector('[data-board-refresh]');
+      var srcBtn = mask.querySelector('[data-board-src]');
+      var timeLabel = mask.querySelector('[data-board-time]');
+      var unifiedUrl = API + '/usage-unified/';
+      var legacyUrl = API + '/usage-board/';
+      var useLegacy = false;
+      var focusBefore = document.activeElement;
+      var loadTimer = null;
+      function boardUrl() {
+        var base = useLegacy ? legacyUrl : unifiedUrl;
+        return base + '?theme=' + (wbsIsDarkTheme() ? 'dark' : 'light');
+      }
+      function closeBoard() {
+        if (loadTimer) clearTimeout(loadTimer);
+        mask.remove();
+        if (focusBefore && focusBefore.isConnected) focusBefore.focus();
+      }
+      mask.__wbsClose = closeBoard;
+      registerDisposer(function () { if (loadTimer) clearTimeout(loadTimer); mask.remove(); });
+      mask.querySelector('[data-board-close]').addEventListener('click', closeBoard);
+      mask.addEventListener('click', function (event) { event.stopPropagation(); if (event.target === mask) closeBoard(); });
+      ['pointerdown', 'pointerup', 'keyup', 'keypress'].forEach(function (name) { mask.addEventListener(name, function (event) { event.stopPropagation(); }); });
+      mask.addEventListener('keydown', function (event) {
+        event.stopPropagation();
+        if (event.key === 'Escape') { event.preventDefault(); closeBoard(); }
+      });
+      function showOverlay(text) { if (msg) msg.textContent = text; overlay.removeAttribute('hidden'); }
+      function hideOverlay() { overlay.setAttribute('hidden', ''); }
+      function syncSrcBtn() { if (srcBtn) srcBtn.textContent = useLegacy ? '返回统一版' : '第三方原版'; }
+      function loadBoard(bust) {
+        showOverlay('正在载入看板…');
+        if (loadTimer) clearTimeout(loadTimer);
+        loadTimer = setTimeout(function () {
+          if (!overlay.hasAttribute('hidden')) showOverlay('看板仍在载入…若长时间空白，点右上角「重新生成」。');
+        }, 6000);
+        frame.addEventListener('load', function onLoad() {
+          frame.removeEventListener('load', onLoad);
+          if (loadTimer) clearTimeout(loadTimer);
+          hideOverlay();
+        });
+        frame.src = boardUrl() + (bust ? '&t=' + Date.now() : '');
+      }
+      function fmtBoardTime(ms) {
+        if (!ms) return '';
+        var d = new Date(ms);
+        function p2(n) { return String(n).padStart(2, '0'); }
+        return '生成于 ' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+      }
+      function generateBoard(reloadAfter) {
+        refreshBtn.disabled = true;
+        if (srcBtn) srcBtn.disabled = true;
+        showOverlay('正在扫描本机数据并重算看板…约 10–30 秒（含第三方补充指标）');
+        return api('/api/usage-unified/generate', { method: 'POST' }).then(function (r) {
+          if (timeLabel && r && r.elapsedMs) timeLabel.textContent = '本次重算 ' + Math.round(r.elapsedMs / 1000) + 's';
+          showOverlay('生成完成，正在载入…');
+          if (useLegacy) { useLegacy = false; syncSrcBtn(); }
+          loadBoard(reloadAfter !== false);
+        }).catch(function (err) {
+          showOverlay('生成失败：' + ((err && err.message) || '未知错误') + '\n可点右上角「重新生成」重试；原始数据未受影响。');
+        }).then(function () { refreshBtn.disabled = false; if (srcBtn) srcBtn.disabled = false; });
+      }
+      refreshBtn.addEventListener('click', function () {
+        if (refreshBtn.disabled) return;
+        generateBoard(true);
+      });
+      if (srcBtn) srcBtn.addEventListener('click', function () {
+        useLegacy = !useLegacy;
+        syncSrcBtn();
+        if (useLegacy) { loadBoard(true); return; }
+        api('/api/usage-unified/status').then(function (s) {
+          if (s && s.exists) loadBoard(true); else generateBoard(true);
+        }).catch(function () { generateBoard(true); });
+      });
+      mask.querySelector('[data-board-close]').focus();
+      // 首次打开先问状态：有产物直接载入；没有就自动算一次（否则用户点开的是一个空窗口）。
+      api('/api/usage-unified/status').then(function (s) {
+        if (timeLabel) timeLabel.textContent = (s && s.exists) ? fmtBoardTime(s.mtime) : '';
+        if (s && s.exists) return loadBoard(false);
+        return generateBoard(false);
+      }).catch(function () { loadBoard(false); });
+    }
+
     // ===== Tab 切换 =====
     function switchTab(name) {
       var tabs = root.querySelectorAll('.wbs-tab');
@@ -7164,9 +7516,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (name === 'account') { try { refreshFailoverCard(); } catch (e) {} }
       // 每次进入会话页都补一次进度探测（面板可能刚重建，定时器已被清理）
       if (name === 'sessions') { try { watchAutoCopyProgress(); } catch (e) {} }
+      // 成本卡：进入会话页立刻取一次，之后按 20s 轮询（仅本页可见且窗口未隐藏时）
+      if (name === 'sessions') { try { refreshSessionCost(); startSessionCostPolling(); } catch (e) {} }
+      else { try { stopSessionCostPolling(); } catch (e) {} }
       if (name === 'models' && modelsPane && !modelsPane.dataset.built) buildModelsPane();
       if (name === 'enhance' && enhancePane && !enhancePane.dataset.built) buildEnhancePane();
       if (name === 'automations' && automationPane && !automationPane.dataset.built) buildAutomationPane();
+      // 轮询已改为「可见才跑」，故进入本页时主动补一次加载（已内置过则走 __wbsReload）
+      if (name === 'automations' && automationPane && typeof automationPane.__wbsReload === 'function') { try { automationPane.__wbsReload(); } catch (e) {} }
       if (name === 'pc' && pcPane && !pcPane.dataset.built) buildPcPane();
       if (name === 'about' && aboutPane && !aboutPane.dataset.built) buildAboutPane();
       if (name === 'settings' && settingsPane && !settingsPane.dataset.built) buildSettingsPane();
@@ -7250,6 +7607,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var list = automationPane.querySelector('#wbs-auto-list');
         var count = automationPane.querySelector('#wbs-auto-count');
         if (!list) return;
+        // 【性能】不可见就别重建（innerHTML + scrollTop 读写 = 两次强制布局）
+        if (!wbsPanelShown() || !wbsTabActive("automations")) return;
         if (count) count.textContent = automationState.tasks.length ? String(automationState.tasks.length) : '';
         var scrollTop = list.scrollTop;
         list.innerHTML = '';
@@ -8124,7 +8483,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       load();
       loadAgentInfo();
       loadAutomationDiscovery();
-      automationState.pollTimer = setInterval(load, 2500);
+      // 【性能】面板收起 / 不在自动化页时不要轮询：render() 会重建整个任务列表并读写 scrollTop
+      // （强制布局）。2026-09-23 实测：面板全程关闭时它仍以 ~0.7Hz 重绘，独占主线程 42%。
+      // 改为「可见才轮询」；切到本页时由 switchTab 主动补一次 load。
+      automationPane.__wbsReload = load;
+      automationState.pollTimer = setInterval(function () {
+        if (!wbsPanelShown() || !wbsTabActive("automations")) return;
+        load();
+      }, 2500);
     }
 
     // ===== 会话 pane（构建：账号/时间筛选 + 按空间分组[默认2条/展开10条] + 刷新 + 批量操作[迁移/删除]）=====
@@ -8200,10 +8566,120 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         scheduleSessionCopyProgressPoll(job && (job.status === 'queued' || job.status === 'running') ? 700 : 2500);
       }).catch(function () { scheduleSessionCopyProgressPoll(3000); });
     }
+    // ---- 单会话成本卡（T21，2026-09-23）----
+    // 数据层在 daemon 的 scripts/session-cost.js（口径与踩坑都记在那个文件头部）。
+    // 三条设计取舍是照抄 wb-credits 的，别顺手「优化」掉：
+    //   ① 边际成本用**最近 N 轮已结算均值**，不用全程均值 —— 全程会被早期冷缓存轮拉高，
+    //      用户会以为「以后每轮都这么贵」；
+    //   ② 没有已结算轮次时显示「待首轮结算」，**绝不显示 0** —— 0 会被读成「免费」；
+    //   ③ 缓存命中率**单独一行**，并写清「钱花在每轮重复的上下文上」这个因果，
+    //      否则用户的第一反应是「让模型少说话」，方向是错的。
+    var SESSION_COST_ROUNDS = 10;
+    var sessionCostState = { timer: null, fetching: false, lastSessionId: '' };
+
+    function fmtCostInt(n) { return (Number(n) || 0).toLocaleString('en-US'); }
+
+    function renderSessionCostCard(data) {
+      var body = sessionsPane && sessionsPane.querySelector('#wbs-cost-body');
+      var badge = sessionsPane && sessionsPane.querySelector('#wbs-cost-badge');
+      if (!body) return;
+      var state = (data && data.state) || 'no-session';
+      var note = (data && data.notes && data.notes.length) ? data.notes.join('；') : '';
+      if (state !== 'ok' && state !== 'pending-first-settlement') {
+        if (badge) { badge.textContent = '不可用'; badge.className = 'wbs-cost-badge is-off'; }
+        body.innerHTML = '<div class="wbs-cost-empty">' + esc(note || '未识别到当前会话') + '</div>';
+        return;
+      }
+      var c = data.credit || {}, ctx = data.context || null, cache = data.cache || {};
+      var settled = Number(c.settledRounds) || 0;
+      var winN = Number(c.windowCount) || 0;
+      var pending = settled <= 0;
+      if (badge) {
+        badge.textContent = pending ? '待首轮结算' : ('已结算 ' + settled + ' 轮');
+        badge.className = 'wbs-cost-badge' + (pending ? ' is-pending' : '');
+      }
+      var total = pending ? '—' : (Number(c.total) || 0).toFixed(2);
+      var marginal = c.marginal != null ? (Number(c.marginal) || 0).toFixed(2) : '—';
+      var nextCost = c.nextRoundsCost != null ? (Number(c.nextRoundsCost) || 0).toFixed(1) : '—';
+      var ctxPct = (ctx && ctx.ratio != null) ? (ctx.ratio * 100).toFixed(1) + '%' : '—';
+      var ctxTxt = ctx ? (fmtCostInt(ctx.used) + ' / ' + fmtCostInt(ctx.size) + ' tokens') : '—';
+      var hit = cache.hitRate != null ? (cache.hitRate * 100).toFixed(1) + '%' : '—';
+      var html = '<div class="wbs-cost-grid">';
+      html += '<div class="wbs-cost-cell wbs-cost-main"><span class="wbs-cost-k">累计积分</span>' +
+        '<span class="wbs-cost-v">' + total + '</span><span class="wbs-cost-sub">' +
+        (pending ? '等首轮结算后开始统计' : ('本会话 ' + settled + ' 轮合计（官方已结算值）')) + '</span></div>';
+      html += '<div class="wbs-cost-cell"><span class="wbs-cost-k">边际成本 · 最近 ' + SESSION_COST_ROUNDS + ' 轮均值</span>' +
+        '<span class="wbs-cost-v">' + marginal + '</span><span class="wbs-cost-sub">' +
+        (winN ? ('按最近 ' + winN + ' 个已结算轮算') : '尾部窗口内无已结算轮') + '</span></div>';
+      html += '<div class="wbs-cost-cell"><span class="wbs-cost-k">再聊 ' + SESSION_COST_ROUNDS + ' 轮约</span>' +
+        '<span class="wbs-cost-v">' + nextCost + '</span><span class="wbs-cost-sub">= 边际成本 × ' + SESSION_COST_ROUNDS + '（估算）</span></div>';
+      html += '<div class="wbs-cost-cell"><span class="wbs-cost-k">上下文占用</span>' +
+        '<span class="wbs-cost-v">' + ctxPct + '</span><span class="wbs-cost-sub">' + ctxTxt + '</span></div>';
+      html += '</div>';
+      html += '<div class="wbs-cost-hitrow"><span class="wbs-cost-k">缓存命中率' +
+        (winN ? '（最近 ' + winN + ' 轮）' : '') + '</span><span class="wbs-cost-hit">' + hit + '</span></div>';
+      html += '<div class="wbs-cost-note">钱主要花在<b>每轮重复的上下文</b>上——命中率越高说明复用越多。要压成本请<b>缩上下文</b>（拆分会话、精简附件与工具输出），而不是让模型少说话。</div>';
+      if (data.model) html += '<div class="wbs-cost-foot">模型 ' + esc(data.model) + '</div>';
+      if (settled > winN && !pending) {
+        html += '<div class="wbs-cost-warn">只统计了尾部窗口内的已结算轮；更早的轮次不在边际成本里。</div>';
+      }
+      if (note) html += '<div class="wbs-cost-warn">' + esc(note) + '</div>';
+      body.innerHTML = html;
+    }
+
+    function refreshSessionCost() {
+      if (!sessionsPane || !sessionsPane.dataset.built) return;
+      var btn = sessionsPane.querySelector('#wbs-cost-refresh');
+      if (btn && !btn.__wbsBound) {
+        btn.__wbsBound = 1;
+        btn.addEventListener('click', function () { refreshSessionCost(); });
+      }
+      if (sessionCostState.fetching) return;
+      var sid = '';
+      try { sid = String(getConversationId() || ''); } catch (e) { sid = ''; }
+      // getConversationId 在拿不到 id 时会退化成 title:xxx 或 unknown —— 那不是会话 id，别拿去查。
+      if (!sid || sid === 'unknown' || sid.indexOf('title:') === 0) {
+        renderSessionCostCard({ state: 'no-session', notes: ['未识别到当前会话（标题兜底值不是会话 id，先随意发一条消息再回来看）'] });
+        return;
+      }
+      sessionCostState.lastSessionId = sid;
+      sessionCostState.fetching = true;
+      api('/api/session-cost?sessionId=' + encodeURIComponent(sid) + '&rounds=' + SESSION_COST_ROUNDS)
+        .then(function (r) { sessionCostState.fetching = false; renderSessionCostCard(r && r.data); })
+        .catch(function () {
+          sessionCostState.fetching = false;
+          renderSessionCostCard({ state: 'error', notes: ['读取失败（daemon 可能没在运行）'] });
+        });
+    }
+
+    function startSessionCostPolling() {
+      if (sessionCostState.timer) return;
+      sessionCostState.timer = setInterval(function () {
+        if (!sessionsPane || !wbsTabActive('sessions') || document.hidden) { stopSessionCostPolling(); return; }
+        refreshSessionCost();
+      }, 20000);
+      buildIntervals.push(sessionCostState.timer);
+    }
+
+    function stopSessionCostPolling() {
+      if (!sessionCostState.timer) return;
+      clearInterval(sessionCostState.timer);
+      removeTimer(buildIntervals, sessionCostState.timer);
+      sessionCostState.timer = null;
+    }
+
     function buildSessionsPane() {
       if (!sessionsPane) return;
       sessionsPane.dataset.built = '1';
       sessionsPane.innerHTML =
+        '<div class="wbs-pcard" id="wbs-cost-card">' +
+        '<div class="wbs-cost-head">' +
+        '<span class="wbs-cost-title">单会话成本</span>' +
+        '<span class="wbs-cost-badge" id="wbs-cost-badge">读取中…</span>' +
+        '<button class="wbs-cost-refresh" type="button" id="wbs-cost-refresh" title="重新读取">\u21bb</button>' +
+        '</div>' +
+        '<div class="wbs-cost-body" id="wbs-cost-body"></div>' +
+        '</div>' +
         '<div class="wbs-pcard">' +
         '<div class="wbs-sess-filters">' +
         '<div class="wbs-sess-filter-row"><span class="wbs-sess-flabel">账号</span><select class="wbs-sess-select" id="wbs-sess-account-select" title="选择要查看的账号"><option value="">加载中…</option></select></div>' +
@@ -10067,6 +10543,21 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<span class="wbs-nd-title">会话消息索引</span>' +
         '<span class="wbs-nd-hint">悬停预览，点击或拖动快速定位消息</span>' +
         '<label class="wbs-switch" title="在会话左侧显示消息索引"><input type="checkbox" id="wbs-sess-message-nav"><span class="wbs-switch-slider"></span></label>' +
+        '</div>' +
+        '<div class="wbs-nd-row">' +
+        '<span class="wbs-nd-title">token 速度读数</span>' +
+        '<span class="wbs-nd-hint">默认关闭。打开后在输入框下方显示 ≈ N tok/s（按正文字符分类估算，非真实用量），可拖动、双击复位</span>' +
+        '<label class="wbs-switch" title="关闭后不再显示 token 速度读数"><input type="checkbox" id="wbs-sess-token-rate"><span class="wbs-switch-slider"></span></label>' +
+        '</div>' +
+        '<div class="wbs-nd-row">' +
+        '<span class="wbs-nd-title">md 快速查看</span>' +
+        '<span class="wbs-nd-hint">默认开启。点对话里的 md 产物卡、或产物面板里的 md 条目，都不再等官方文档查看器冷启动（首开约 30 秒），改由插件内置渲染器在右侧面板秒开；关掉则完全走官方</span>' +
+        '<label class="wbs-switch" title="关闭后 .md 一律用官方查看器打开"><input type="checkbox" id="wbs-md-quick-view"><span class="wbs-switch-slider"></span></label>' +
+        '</div>' +
+        '<div class="wbs-nd-row">' +
+        '<span class="wbs-nd-title">接管自动打开的 md</span>' +
+        '<span class="wbs-nd-hint">默认开启。任务跑完后官方自动打开 md 时，插件立刻换成自己的面板（官方冷启动约 30 秒）。关掉则只拦手动点击</span>' +
+        '<label class="wbs-switch" title="关闭后官方自动打开 md 时不再接管"><input type="checkbox" id="wbs-md-auto-adopt"><span class="wbs-switch-slider"></span></label>' +
         '</div>' +
         '<div class="wbs-nd-row">' +
         '<span class="wbs-nd-title">分支到新会话</span>' +
@@ -13926,6 +14417,21 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         writeMessageNavigationEnabled(sessState.messageNav);
         if (messageNavigation) messageNavigation.setEnabled(sessState.messageNav);
       });
+      var swT = pane2.querySelector('#wbs-sess-token-rate');
+      if (swT) {
+        swT.checked = readTokenRateEnabled();
+        swT.addEventListener('change', function () { applyTokenRateEnabled(!!this.checked); });
+      }
+      var swM = pane2.querySelector('#wbs-md-quick-view');
+      if (swM) {
+        swM.checked = mdqvReadEnabled();
+        swM.addEventListener('change', function () { mdqvWriteEnabled(!!this.checked); });
+      }
+      var swA = pane2.querySelector('#wbs-md-auto-adopt');
+      if (swA) {
+        swA.checked = mdqvReadAdopt();
+        swA.addEventListener('change', function () { mdqvWriteAdopt(!!this.checked); });
+      }
       var swQ = pane2.querySelector('#wbs-sess-selection-quote');
       if (swQ) swQ.addEventListener('change', function () {
         sessState.selectionQuote = !!this.checked;
@@ -16580,6 +17086,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     document.body.appendChild(debugPanel);
     function updateDebugPanel() {
       if (!alive) return;
+      // 【性能】调试面默认 display:none（Alt+D 才开），却每 500ms 跑一遍 findSendButton /
+      // findComposer / shouldShowStash —— 全是强制布局。没人看就一律不测量。
+      if (debugPanel.style.display !== "block") return;
       try {
         var sd = window.__wbsDiag.sendInfo, ed = window.__wbsDiag.composerInfo;
         var should = window.__wbsDiag.shouldShowStash();
@@ -16647,6 +17156,352 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     //     保留代码与元素，需要时恢复下面两行即可。
     // sessionHealthTimer = setBuildInterval(scanSessionHealth, 1000);
     // setBuildTimeout(scanSessionHealth, 250);
+    // ---- token 速度读数（估算值 ≈，非真值）2026-09-23 ----
+    // 挂点：输入框「下方」的空置提示带 .conversation-input-area__disclaimer
+    //   （实测 1368×36、position:static、pointer-events:none、原生内容只有一行居中的
+    //    「内容由 AI 生成…」⇒ 左侧整块空置）。我们给它加 position:relative 当定位祖先，
+    //    再把读数以绝对定位挂进去 ⇒ 不参与原生布局、不挤动任何控件。
+    //   （早先版本挂在右下角 .wbs-fab 上，但该图标本身只有 41×32，13px 字号实际看不清，已废弃。）
+    // 数据源（CDP 实测比对确定）：
+    //   当前助手消息 = document.querySelectorAll('[class*="cr-frame--left"]') 的末元素
+    //   （实测 --left 是助手、--right 是用户）；
+    //   帧内 '[class*="cr-text-block"]' 是本轮「纯正文」分块——已排除 cr-reasoning（实测 3090 字）
+    //   与工具区（cr-tool-call__slot / cr-tool-exec__command）。其 textContent 长度之和在流式期间
+    //   单调增长，且「正在输出的那一段」也计入（实测 6404 → 6466 → 7315）。
+    //   不用帧总长：帧总长会因工具块折叠而回退（实测 14421 → 12499 → 13824），做差分会出现负增量。
+    // 纪律：① 不新增 body 级 MutationObserver（本文件 16644 行记过这个坑：监听整个 body 会为
+    //          每次 React class mutation 付费）；② 1s tick、空闲即早退；
+    //       ③ 只用 querySelectorAll / textContent —— innerText 与 getBoundingClientRect 会强制
+    //          同步布局，流式期间每秒 reflow 会拖慢渲染本身；
+    //       ④ 读数节点标 data-wbs-i18n-skip（否则每次变值都会触发全局 i18n 扫描）。
+    // 【2026-09-23 定案】默认关闭：读数本质是字符估算（口径见 readRateEstTokens），非真实用量；
+    //   常开会误导，且拖动在跨 iframe 场景易丢事件（已加事件盾修好）。需要时手动开。
+    var TOKEN_RATE_FRAME = '[class*="cr-frame--left"]';
+    var TOKEN_RATE_BLOCKS = ['[class*="cr-text-block"]', '[class*="cr-markdown"]'];
+    var TOKEN_RATE_HOST = '.conversation-input-area__disclaimer';
+    var TOKEN_RATE_WINDOW = 5;              // 滑动窗口样本数（约 5 秒）
+    var TOKEN_RATE_MIN_TOKENS = 5;          // 窗口内增量低于此值不显示，避免 0.1 tok/s 这类噪音
+    var TOKEN_RATE_ASCII_PER_TOKEN = 3.6;   // 内容感知口径（2026-09-23）：ASCII（英文/数字/代码）约 3.6 字符/token
+    var TOKEN_RATE_WIDE_PER_TOKEN = 1.3;    // 内容感知口径：非 ASCII（中/日/韩等宽字符）约 1.3 字符/token
+    var tokenRateState = { samples: [], idle: 0, shown: '', el: null, timer: null, pos: null, saved: false, enabled: false };
+    // ---- 读数可拖动（2026-09-23 追加；次日修正为「不搬动节点」）----
+    // 行为：按住小框直接拖到任意位置；双击复位回「输入框下方」默认位。
+    // 定位：读数常驻 <body> 直下 + position:fixed（视口坐标）——**全程不搬动节点**。
+    //   ⚠️ 踩过的坑：曾在 pointerdown 里把它从输入框宿主摘到 body，结果 Chrome 在改挂父节点时
+    //   会立刻释放指针捕获（实测 lostpointercapture 立即触发），后续 pointermove 全部收不到
+    //   ⇒ 拖动彻底失效（元素纹丝不动）。故改为「一开始就挂在 body」，拖动只改 left/top。
+    // 存储：localStorage 按账号隔离（键含 PROFILE_ID），切号不串位。
+    // 纪律：① getBoundingClientRect / offsetWidth 只在「首次定默认位」「按住拖动」「窗口 resize」
+    //          这类一次性 / 交互路径里读，1s 的 updateTokenRateBadge tick 里一行都不读；
+    //       ② 拖动节点仍带 data-wbs-i18n-skip；③ 坐标夹在视口内，拖出屏幕也拿得回来。
+    var TOKEN_RATE_POS_KEY = 'wbs-token-rate-pos-' + PROFILE_ID;
+    var TOKEN_RATE_DRAG_THRESHOLD = 3;
+    var TOKEN_RATE_DEFAULT_GAP = 6;      // 默认位相对输入框下方空置带的左边距
+    var tokenRateDrag = null;
+    var TOKEN_RATE_ENABLED_KEY = 'workdaddy.tokenRateReadoutEnabled';
+
+    /** 面板开关：是否显示读数。**默认关**（2026-09-23 定案）：读数是字符估算、非真实用量，
+     *  常开会让用户把估算当精确值；需要时在 面板 → 会话 → token 速度读数 手动打开，一旦手动开过就记住。 */
+    function readTokenRateEnabled() {
+      try { return localStorage.getItem(TOKEN_RATE_ENABLED_KEY) === '1'; } catch (e) { return false; }
+    }
+
+    function writeTokenRateEnabled(on) {
+      try { localStorage.setItem(TOKEN_RATE_ENABLED_KEY, on ? '1' : '0'); } catch (e) {}
+    }
+
+    /** 开关变化时立即生效：关 ⇒ 立刻隐藏并停算；开 ⇒ 恢复上一次读数、并重算。 */
+    function applyTokenRateEnabled(on) {
+      tokenRateState.enabled = !!on;
+      writeTokenRateEnabled(!!on);
+      var el = tokenRateState.el;
+      if (!on) {
+        tokenRateState.samples = [];
+        tokenRateState.idle = 0;
+        if (el && !el.hidden) el.hidden = true;
+        return;
+      }
+      // 重新打开：之前若已读到过数值，立即恢复显示（保留 is-stale 旧值提示），不必等下一次流式
+      if (el && el.isConnected && tokenRateState.shown) el.hidden = false;
+      updateTokenRateBadge();
+    }
+
+    /** 读用户拖动后保存的视口坐标；无有效值返回 null。 */
+    function readTokenRatePos() {
+      try {
+        var raw2 = localStorage.getItem(TOKEN_RATE_POS_KEY);
+        if (!raw2) return null;
+        var p = JSON.parse(raw2);
+        if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') return null;
+        if (!isFinite(p.x) || !isFinite(p.y)) return null;
+        return { x: p.x, y: p.y };
+      } catch (e) { return null; }
+    }
+
+    function saveTokenRatePos(x, y) {
+      var p = { x: Math.round(x), y: Math.round(y) };
+      tokenRateState.pos = p;
+      tokenRateState.saved = true;
+      try { localStorage.setItem(TOKEN_RATE_POS_KEY, JSON.stringify(p)); } catch (e) {}
+    }
+
+    /** 默认位 = 输入框下方空置带左侧、垂直居中。量不到返回 null（下次再试）。 */
+    function tokenRateDefaultPos(el) {
+      var host = null;
+      try { host = document.querySelector(TOKEN_RATE_HOST); } catch (e) { return null; }
+      if (!host) return null;
+      var r;
+      try { r = host.getBoundingClientRect(); } catch (e) { return null; }
+      if (!r || !r.width) return null;
+      var h = el.offsetHeight || 40;
+      return { x: r.left + TOKEN_RATE_DEFAULT_GAP, y: r.top + Math.max(0, (r.height - h) / 2) };
+    }
+
+    /** 夹进视口（留 4px 边距）。仅在交互 / 定位路径调用。 */
+    function clampTokenRatePos(el, x, y) {
+      var w = el.offsetWidth || 120;
+      var h = el.offsetHeight || 44;
+      return {
+        x: Math.min(Math.max(4, x), Math.max(4, window.innerWidth - w - 4)),
+        y: Math.min(Math.max(4, y), Math.max(4, window.innerHeight - h - 4))
+      };
+    }
+
+    function applyTokenRatePos(el, pos) {
+      el.style.left = Math.round(pos.x) + 'px';
+      el.style.top = Math.round(pos.y) + 'px';
+    }
+
+    /** 复用页面上已有的读数节点，否则新建；两者都补挂拖动。 */
+    function reuseOrBuildTokenRateEl(el) {
+      if (!el || !el.isConnected) {
+        try { el = document.querySelector('.wbs-token-rate-bar'); } catch (e) { el = null; }
+      }
+      if (!el) {
+        el = document.createElement('span');
+        el.className = 'wbs-token-rate-bar';
+        el.setAttribute('data-wbs-i18n-skip', '');
+        el.setAttribute('title', '按住可拖动 · 双击复位');
+        el.hidden = true;
+        var num = document.createElement('span');
+        num.className = 'wbs-token-rate-num';
+        var unit = document.createElement('span');
+        unit.className = 'wbs-token-rate-unit';
+        unit.textContent = 'tok/s';
+        el.appendChild(num);
+        el.appendChild(unit);
+      }
+      setupTokenRateDrag(el);
+      return el;
+    }
+
+    // ---- 拖动「全屏事件盾」（2026-09-23 追加）----
+    // 症状：小框拖到一半就卡住、或干脆拖不动。原因：拖动路径要经过 WorkBuddy 的预览 iframe /
+    //   产物面板，指针一旦进入 iframe，父文档 window 就再也收不到 pointermove（跨文档无法捕获，
+    //   setPointerCapture 也救不了）。盖一层覆盖全视口的透明 div 后，指针事件永远落在父文档内。
+    // 只在按住期间存在（pointerup/cancel/blur 立即移除），平时零开销、零视觉。
+    var tokenRateShield = null;
+
+    function showTokenRateDragShield() {
+      if (tokenRateShield && tokenRateShield.isConnected) return;
+      try {
+        var d = document.createElement('div');
+        d.className = 'wbs-token-rate-shield';
+        d.setAttribute('data-wbs-i18n-skip', '');
+        d.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483646;background:transparent;cursor:grabbing';
+        document.body.appendChild(d);
+        tokenRateShield = d;
+      } catch (e) { tokenRateShield = null; }
+    }
+
+    function hideTokenRateDragShield() {
+      var d = tokenRateShield;
+      tokenRateShield = null;
+      try { if (d && d.parentNode) d.parentNode.removeChild(d); } catch (e) {}
+    }
+
+    /** 挂拖动：按住拖到任意位置（只改 left/top，**绝不搬动节点**），双击复位。
+     *  move/up 挂在 window 的**捕获阶段**，不依赖 setPointerCapture —— 实测本环境
+     *  （WorkBuddy/CDP 注入的鼠标事件）下 setPointerCapture 会静默失效：press 后指针一离开
+     *  小框就再也收不到 pointermove。而拖动本来就必须跟手到框外，所以直接吃 window 事件最稳。 */
+    function setupTokenRateDrag(el) {
+      if (el.__wbsDragBound) return;
+      el.__wbsDragBound = true;
+
+      listen(el, 'pointerdown', function (e) {
+        if (e.button !== undefined && e.button !== 0) return;
+        var rect = el.getBoundingClientRect();   // 仅交互时读一次布局
+        tokenRateDrag = {
+          pointerId: e.pointerId,
+          startX: e.clientX, startY: e.clientY,
+          startLeft: rect.left, startTop: rect.top,
+          moved: false
+        };
+        el.classList.add('is-dragging');
+        showTokenRateDragShield();
+        try { el.setPointerCapture(e.pointerId); } catch (_) {}   // 能生效更好，不生效也不影响
+        if (e.preventDefault) e.preventDefault();
+        if (e.stopPropagation) e.stopPropagation();
+      });
+
+      function onWinMove(e) {
+        if (!tokenRateDrag || (e.pointerId !== undefined && e.pointerId !== tokenRateDrag.pointerId)) return;
+        var dx = e.clientX - tokenRateDrag.startX;
+        var dy = e.clientY - tokenRateDrag.startY;
+        if (!tokenRateDrag.moved && Math.max(Math.abs(dx), Math.abs(dy)) < TOKEN_RATE_DRAG_THRESHOLD) return;
+        tokenRateDrag.moved = true;
+        var p = clampTokenRatePos(el, tokenRateDrag.startLeft + dx, tokenRateDrag.startTop + dy);
+        tokenRateState.pos = p;
+        applyTokenRatePos(el, p);
+        if (e.preventDefault) e.preventDefault();
+      }
+
+      function finishTokenRateDrag(e) {
+        if (!tokenRateDrag || (e && e.pointerId !== undefined && e.pointerId !== tokenRateDrag.pointerId)) return;
+        var moved = tokenRateDrag.moved;
+        var pos = tokenRateState.pos;
+        tokenRateDrag = null;
+        el.classList.remove('is-dragging');
+        hideTokenRateDragShield();
+        if (moved && pos) saveTokenRatePos(pos.x, pos.y);
+      }
+
+      listen(window, 'pointermove', onWinMove, true);
+      listen(window, 'pointerup', finishTokenRateDrag, true);
+      listen(window, 'pointercancel', finishTokenRateDrag, true);
+      listen(window, 'blur', finishTokenRateDrag, true);   // 拖到一半切窗口/失焦 ⇒ 收尾，别卡在 is-dragging
+
+      // 双击复位：清存储 + 回到输入框下方默认位
+      listen(el, 'dblclick', function (e) {
+        if (e.preventDefault) e.preventDefault();
+        if (e.stopPropagation) e.stopPropagation();
+        tokenRateState.saved = false;
+        tokenRateState.pos = null;
+        try { localStorage.removeItem(TOKEN_RATE_POS_KEY); } catch (_) {}
+        var d = tokenRateDefaultPos(el);
+        if (d) {
+          tokenRateState.pos = clampTokenRatePos(el, d.x, d.y);
+          applyTokenRatePos(el, tokenRateState.pos);
+        }
+      });
+    }
+
+    // 窗口尺寸变化且用户没手动定过位 ⇒ 重新贴回输入框（否则默认位会浮在旧坐标上）
+    listen(window, 'resize', function () {
+      if (tokenRateState.saved) return;
+      tokenRateState.pos = null;
+      var el = tokenRateState.el;
+      if (el && el.isConnected && !el.hidden) {
+        var d = tokenRateDefaultPos(el);
+        if (d) {
+          tokenRateState.pos = clampTokenRatePos(el, d.x, d.y);
+          applyTokenRatePos(el, tokenRateState.pos);
+        }
+      }
+    });
+
+    // 启动即恢复上次拖动位置（saved=true 表示这是用户定的位，不再跟着输入框走）
+    tokenRateState.pos = readTokenRatePos();
+    tokenRateState.saved = !!tokenRateState.pos;
+    tokenRateState.enabled = readTokenRateEnabled();
+    if (!tokenRateState.enabled) applyTokenRateEnabled(false);
+
+    /** 取「当前助手消息」正文，按字符类别折算成 token 估算值；取不到返回 -1。
+     *  口径（2026-09-23 起）：ASCII 字符 ÷ TOKEN_RATE_ASCII_PER_TOKEN，其余（CJK 等宽）÷ TOKEN_RATE_WIDE_PER_TOKEN。
+     *  旧版「字符数 ÷ 1.8」一刀切：纯英文正文低估近半、纯中文正文高估，故改为分类折算。
+     *  仍是估算（真实用量只能从 usage 记录拿），但比一刀切贴近。只用 querySelectorAll + textContent，不触发 reflow。 */
+    function readRateEstTokens() {
+      var frames, frame = null;
+      try { frames = document.querySelectorAll(TOKEN_RATE_FRAME); } catch (e) { return -1; }
+      if (frames && frames.length) frame = frames[frames.length - 1];
+      var scope = frame || document;
+      for (var i = 0; i < TOKEN_RATE_BLOCKS.length; i++) {
+        var blocks;
+        try { blocks = scope.querySelectorAll(TOKEN_RATE_BLOCKS[i]); } catch (e) { continue; }
+        if (!blocks.length) continue;
+        var ascii = 0, wide = 0;
+        for (var j = 0; j < blocks.length; j++) {
+          var t = blocks[j].textContent;
+          if (!t) continue;
+          for (var k = 0; k < t.length; k++) { if (t.charCodeAt(k) < 128) ascii++; else wide++; }
+        }
+        if (ascii + wide > 0) return ascii / TOKEN_RATE_ASCII_PER_TOKEN + wide / TOKEN_RATE_WIDE_PER_TOKEN;
+      }
+      var tail = frame && frame.textContent ? frame.textContent : null;
+      if (!tail) return -1;
+      var a2 = 0, w2 = 0;
+      for (var m = 0; m < tail.length; m++) { if (tail.charCodeAt(m) < 128) a2++; else w2++; }
+      return a2 / TOKEN_RATE_ASCII_PER_TOKEN + w2 / TOKEN_RATE_WIDE_PER_TOKEN;
+    }
+
+    /** 取（必要时新建）读数节点。常驻 body 直下 + position:fixed；无用户位置时贴输入框下方默认位。 */
+    function ensureTokenRateEl() {
+      var el = tokenRateState.el;
+      if (!el || !el.isConnected) el = reuseOrBuildTokenRateEl(el);
+      if (el.parentNode !== document.body) { try { document.body.appendChild(el); } catch (_) {} }
+      // 默认位不在这里解算：此处元素多半还 hidden，offsetHeight=0 量不准；
+      // 统一交给首次「显示」时（setTokenRateBadge，已把 hidden 置 false）算。
+      if (tokenRateState.pos) applyTokenRatePos(el, clampTokenRatePos(el, tokenRateState.pos.x, tokenRateState.pos.y));
+      tokenRateState.el = el;
+      return el;
+    }
+
+    function setTokenRateBadge(value) {
+      if (!tokenRateState.enabled) return;
+      var el = tokenRateState.el;
+      if (el && !el.isConnected) { tokenRateState.el = null; el = null; }
+      if (!value) {
+        // 读不到 / 没有输出 ⇒ 【保留上一次读数】，只加 .is-stale 降透明度提示「这是旧值」，不再隐藏。
+        // 从未读到过（还没有第一次读数）⇒ 保持隐藏，别闪一个空框。
+        if (el && !el.hidden && !el.classList.contains('is-stale')) el.classList.add('is-stale');
+        return;
+      }
+      if (!el) el = ensureTokenRateEl();
+      if (!el) return;
+      if (el.hidden) el.hidden = false;   // 先可见，offsetHeight 才量得准 ⇒ 默认位算得准
+      if (!tokenRateState.pos) {
+        var d = tokenRateDefaultPos(el);
+        if (d) { tokenRateState.pos = d; applyTokenRatePos(el, clampTokenRatePos(el, d.x, d.y)); }
+      }
+      // 拿到新值 ⇒ 先撤掉旧值提示（即使数值恰好相同，也要恢复不透明度）
+      if (el.classList.contains('is-stale')) el.classList.remove('is-stale');
+      if (tokenRateState.shown === value) return; // 值未变 ⇒ 不碰 DOM
+      tokenRateState.shown = value;
+      var num = el.querySelector('.wbs-token-rate-num');
+      if (num) num.textContent = '≈ ' + value;
+      el.hidden = false;
+    }
+
+    function updateTokenRateBadge() {
+      if (!alive) return;
+      if (!tokenRateState.enabled) return;   // 面板开关关掉 ⇒ 直接不算
+      var tok = -1;
+      try { tok = readRateEstTokens(); } catch (e) { return; }
+      if (tok < 0) { tokenRateState.samples = []; setTokenRateBadge(''); return; }
+      var now = Date.now();
+      var s = tokenRateState.samples;
+      // 换轮（估算值回退）或中间静默 >3s ⇒ 窗口重置
+      if (s.length && (tok < s[s.length - 1].tok || (now - s[s.length - 1].at) > 3000)) s.length = 0;
+      if (s.length && tok === s[s.length - 1].tok) {
+        tokenRateState.idle += 1;
+        if (tokenRateState.idle >= 3) { tokenRateState.samples = []; setTokenRateBadge(''); }
+        return;
+      }
+      tokenRateState.idle = 0;
+      s.push({ tok: tok, at: now });
+      while (s.length > TOKEN_RATE_WINDOW) s.shift();
+      if (s.length < 2) return;
+      var first = s[0], last = s[s.length - 1];
+      var dt = (last.at - first.at) / 1000;
+      if (dt < 1) return;
+      var dTok = last.tok - first.tok;
+      if (dTok < TOKEN_RATE_MIN_TOKENS) { setTokenRateBadge(''); return; }
+      var rate = dTok / dt;
+      setTokenRateBadge(rate >= 100 ? String(Math.round(rate)) : rate.toFixed(1));
+    }
+
+    tokenRateState.timer = setBuildInterval(updateTokenRateBadge, 1000);
+    registerDisposer(function () { tokenRateState.timer = null; });
     // 初始同步防休眠状态（悬浮角标）
     syncSleepState();
     // 定期同步（30s）：daemon 重启或外部状态变化后角标保持一致
@@ -16719,8 +17574,916 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // 注入完成即探测是否有正在进行的自动复制：切号会走 CDP Page.reload，重新注入
     // 后内存里没有任何 jobId，必须靠这一步把进度条与 FAB 角标恢复回来。
     try { watchAutoCopyProgress(); } catch (e) {}
+    // md 快速查看（T30）：拦截产物卡里 .md 的点击，改用内置渲染器。默认开，走 localStorage 开关。
+    // 幂等：mdqvInstalled 是 IIFE 级标记，重注入不会叠加监听。
+    try { mdqvInstall(); } catch (e) {}
 
     return { destroy: lifecycle.destroy, alive: lifecycle.alive };
+  }
+
+  // ---- md 快速查看器（T30 落地 / T31 改右侧停靠 / T32 加高亮与自动接管，2026-09-23）------
+  // 点 md 产物后，官方走 ui-docs-viewer（16.93 MB chunk + KaTeX CDN 降级链 + 未缓存的
+  // 全量会话扫描），首开实测 **~30 s**（2026-09-23 复测：127 KB / 1421 行 md = 29 563 ms）。
+  // 这里在 window 的**捕获**阶段把点击拦下，用内置零依赖渲染器直接显示：
+  // 实测 fetch('file:///…md') 3 ms + 渲染 58 ms。
+  //
+  // T32 加了两件事：
+  //  ① 渲染保真 —— 代码块加「语言标签 + 复制 + 语法高亮」（对齐官方那套带高亮的 sc-block-code），
+  //     并放开 <br>/<kbd>/<mark>/<sub>/<sup>/<img http(s)> 白名单（见 mdqvInline）；
+  //  ② 自动接管 —— 任务跑完后官方是**程序化**打开 md（不派发 click ⇒ 捕获拦截收不到），
+  //     故用低频轮询盯 .artifact-tab--active[title$=".md"]，一出现就换成自己的面板并关掉官方 tab。
+  //
+  // 两个入口都要拦（T31 补上第二个，用户实测「对话正文里已经秒开、产物面板里还卡」）：
+  //  A) 对话正文的产物卡   .artifact-slot-panel__card[data-ext="md"]  —— data-dir 是绝对路径
+  //  B) 产物面板里的条目   .cb-overview-artifact-item[data-ext="md"] —— data-dir 是 file:/// URL
+  //  ⇒ data-dir 统一经 mdqvNormPath() 归一化。
+  //
+  // 四条不可省的约束（都是实测踩出来的，别「优化」掉）：
+  //  1) 必须挂 window 的**捕获**阶段。React 的事件委托挂在 #root（冒泡）上，捕获阶段
+  //     stopPropagation() 才能让事件到 window 就停、传不到 #root，官方 handler 不触发。
+  //  2) 「用官方查看器打开」必须配 mdqvBypass 放行标记。否则重派发的合成 click 会被
+  //     自己的捕获监听再拦一次。合成 MouseEvent 会被 React 正常处理（它不校验 isTrusted）。
+  //  3) 渲染器输出一律经 esc()/escAttr() 转义后拼接，绝不把原始 md 直接塞进 innerHTML。
+  //  4) T31：面板改成**右侧停靠**（用户要求「跟官方 md 界面一样，对话自动往左移」）。
+  //     位移不复用官方 React 状态（那是它私有的），而是给 .conversation-shell 加
+  //     margin-right —— 实测 .conversation-shell 无内联样式、父级 flex:1 1 0%，加 margin
+  //     真能压缩（1936 → 1136）且 removeProperty 能精确还原。
+  //     官方面板若已开着（入口 B 必然如此，条目就在官方面板里），它已占 360px ⇒
+  //     我们只补差 (我的宽度 - 360)，否则会压两次。
+  var MDQV_ENABLED_KEY = 'workdaddy.mdQuickViewEnabled';
+  var MDQV_WIDTH_KEY = 'workdaddy.mdQuickViewWidth';
+  var MDQV_ADOPT_KEY = 'workdaddy.mdAutoAdopt';
+  var MDQV_MAX_BYTES = 4 * 1024 * 1024;
+  var mdqvInstalled = false;
+  var mdqvBypass = false;
+  var mdqvDock = null;
+  var mdqvEscHandler = null;
+  // 停靠面板的布局状态
+  var mdqvWidth = 0;           // 面板宽度（用户偏好；拖动/默认值，落 localStorage）
+  var mdqvWantShift = 0;
+  var mdqvReapplyStreak = 0;   // 自激环检测：连续高频重排次数
+  var mdqvReapplyLast = 0;     // 上次重排时刻（ms）
+  var mdqvTrigger = null;      // 原始触发元素，逃生口重派发用
+  var mdqvShellEl = null;
+  var mdqvHolderEl = null;
+  var mdqvShellPrevMR = null;
+  var mdqvShellMo = null;
+  var mdqvApplying = false;
+  var mdqvResizeHandler = null;
+  var mdqvAdoptTimer = null;      // T32：盯「官方自动打开 md」的低频轮询
+  var mdqvAdoptCool = 0;          // 冷却：刚接管完别立刻又被自己触发的状态变化带回
+  // 去重不用数组：直接在 tab 元素上打 __wbsAdoptSkip（随元素移除自动回收）
+
+  function mdqvT(s) { return wbsTranslateString(String(s == null ? '' : s), WBS_LANGUAGE); }
+
+  function mdqvReadEnabled() {
+    try { return localStorage.getItem(MDQV_ENABLED_KEY) !== '0'; } catch (e) { return true; }
+  }
+  function mdqvWriteEnabled(on) {
+    try { localStorage.setItem(MDQV_ENABLED_KEY, on ? '1' : '0'); } catch (e) {}
+  }
+  function mdqvReadAdopt() {
+    try { return localStorage.getItem(MDQV_ADOPT_KEY) !== '0'; } catch (e) { return true; }
+  }
+  function mdqvWriteAdopt(on) {
+    try { localStorage.setItem(MDQV_ADOPT_KEY, on ? '1' : '0'); } catch (e) {}
+  }
+
+  /** 用产物文件名在页面里反查绝对路径（正文产物卡 / 产物面板条目都带 data-dir）。 */
+  function mdqvFindPathByName(name) {
+    var want = String(name || '').toLowerCase();
+    if (!want) return null;
+    var els = document.querySelectorAll('[data-dir]');
+    for (var i = 0; i < els.length; i++) {
+      var d = mdqvNormPath(els[i].getAttribute('data-dir'));
+      if (!d) continue;
+      if (d.split(/[\\/]/).pop().toLowerCase() === want) return d;
+    }
+    return null;
+  }
+
+  /** 官方「任务跑完自动打开 md」是**程序化**调用 —— 不派发 DOM click，捕获拦截收不到
+   *  （2026-09-23 实测确认），所以只能事后接管：低频轮询官方产物标签页，一旦出现 md 的
+   *  active tab，就换成我方停靠面板并把官方 tab 关掉（省掉它那 ~30 s 的 chunk 解析）。
+   *
+   *  ⚠️ 两条必须守住的边界（否则会「自己弹面板」）：
+   *   ① **基线豁免** —— 启动时页面里已经开着的 md tab 是用户自己开的，标 __wbsAdoptSkip 永不接管；
+   *   ② **每个 tab 只处理一次** —— 标记打在元素上（随元素移除自动回收），同一个 tab 绝不被接管两次。
+   *   ③ **冷却期豁免** —— 用户点过「用官方查看器打开」后 10 s 内出现的 tab 一律豁免（见逃生口）。
+   *  成本：一次 querySelector 实测 0.02 ms 级，600 ms 一次 ⇒ 可忽略。 */
+  function mdqvAdoptTick() {
+    if (window.__wbsGeneration !== WBS_GENERATION) return;      // 旧副本停摆
+    if (!mdqvReadEnabled() || !mdqvReadAdopt()) return;
+    var tab = null;
+    try {
+      tab = document.querySelector('.artifact-tab--active[title$=".md"], .artifact-tab--active[title$=".markdown"]');
+    } catch (e) { return; }
+    if (!tab) return;
+    if (tab.__wbsAdoptSkip) return;                             // 已处理过（接管或豁免）
+    tab.__wbsAdoptSkip = 1;                                     // 先标记：同一 tab 只处理一次
+    if (Date.now() < mdqvAdoptCool) return;                     // 冷却期内 ⇒ 当作「用户要官方」豁免
+    if (mdqvDock) return;                                       // 我方面板已开，别抢
+    var path = mdqvFindPathByName(tab.getAttribute('title'));
+    if (!path) return;                                          // 查不到落盘路径 ⇒ 不接管，让官方正常显示
+    mdqvAdoptCool = Date.now() + 1500;
+    try { mdqvOpen(path, tab); } catch (e2) { return; }
+    var cl = tab.querySelector('.artifact-tab__close');
+    if (cl) { try { cl.click(); } catch (e3) {} }
+  }
+
+  function mdqvAdoptStart() {
+    if (mdqvAdoptTimer) return;
+    try { if (window.__wbsMdAdoptTimer) clearInterval(window.__wbsMdAdoptTimer); } catch (e) {}
+    try {
+      // 基线豁免：注入那一刻已经开着的 md tab，视为用户自己开的
+      var cur = document.querySelector('.artifact-tab--active[title$=".md"], .artifact-tab--active[title$=".markdown"]');
+      if (cur) cur.__wbsAdoptSkip = 1;
+    } catch (e) {}
+    mdqvAdoptTimer = setInterval(mdqvAdoptTick, 600);
+    try { window.__wbsMdAdoptTimer = mdqvAdoptTimer; } catch (e) {}
+  }
+
+  // data-dir 是未编码的绝对路径（含中文与空格）⇒ 逐段 encodeURIComponent 后拼 file:// URL。
+  // 不编码会因空格/中文导致 fetch 失败；整体 encodeURI 又会把已有的 % 二次编码。
+  function mdqvFileUrl(p) {
+    var s = String(p || '').replace(/\\/g, '/');
+    if (!s) return '';
+    var enc = s.split('/').map(function (seg, idx) {
+      return idx === 0 ? seg : encodeURIComponent(seg);
+    }).join('/');
+    return 'file:///' + enc.replace(/^\/+/, '');
+  }
+
+  /** T31：两个入口的 data-dir 形态不同 —— 对话产物卡是绝对路径（含中文/空格，未编码），
+   *  产物面板条目是 file:/// 开头的 URL（可能带 %XX）。统一归一化成 mdqvFileUrl() 能吃的
+   *  「未编码绝对路径」，否则会拼出 file:///file:///… 或中文二次编码。 */
+  function mdqvNormPath(dir) {
+    var p = String(dir || '').trim();
+    if (!p) return '';
+    var m = /^file:\/\/\/*(.*)$/i.exec(p);
+    if (m) p = m[1];
+    if (/%[0-9a-f]{2}/i.test(p)) { try { p = decodeURIComponent(p); } catch (e) {} }
+    if (/^\/[A-Za-z]:[\\/]/.test(p)) p = p.slice(1);   // "/C:/x/y.md" → "C:/x/y.md"
+    return p;
+  }
+
+  /** 路径太长会把停靠面板的头部撑成三四行（实测 658px 宽时高 117px）⇒ 中段省略，
+   *  完整路径仍放在 title 里可悬停查看。 */
+  function mdqvShortPath(p, max) {
+    var s = String(p || '');
+    var n = max || 58;
+    if (s.length <= n) return s;
+    var head = Math.ceil((n - 1) / 2), tail = Math.floor((n - 1) / 2);
+    return s.slice(0, head) + '…' + s.slice(s.length - tail);
+  }
+
+  // ---------- T31 停靠布局 ----------
+
+  /** 面板要贴住的区域：整个应用的可见区（#root），拿不到就退回 window。 */
+  function mdqvRootRect() {
+    var r = document.querySelector('#root');
+    var b = (r && r.getBoundingClientRect) ? r.getBoundingClientRect() : null;
+    if (b && b.height > 120) return { top: Math.round(b.top), height: Math.round(b.height) };
+    return { top: 30, height: Math.max(320, window.innerHeight - 30) };
+  }
+
+  /** 默认宽度：对齐官方文档视图的观感（约内容区 1/3），并夹到可用范围。 */
+  function mdqvDefaultWidth() {
+    // 按视口比例给默认宽（对应官方文档视图的观感）。刻意**不**用「对话区宽度 × 比例」：
+    // 接管「官方自动打开」时官方面板还开着、对话区被压窄，那样算出来的默认宽会偏小。
+    var w = Math.round(window.innerWidth * 0.26);
+    var min = 420, max = Math.max(min, Math.round(window.innerWidth * 0.62));
+    return Math.min(Math.max(w, min), max);
+  }
+
+  function mdqvReadWidth() {
+    try {
+      var v = parseInt(localStorage.getItem(MDQV_WIDTH_KEY) || '', 10);
+      if (isFinite(v) && v >= 320) return v;
+    } catch (e) {}
+    return 0;
+  }
+  function mdqvWriteWidth(w) {
+    try { localStorage.setItem(MDQV_WIDTH_KEY, String(Math.round(w))); } catch (e) {}
+  }
+
+  /* ⚠️ 2026-09-23 事故记录（勿重蹈）：曾实现「官方面板展开时，用它的宽度把我的面板放大到
+     完全覆盖它」（`cover` 参数 + `mdqvOfficialOpen()`）。实测在**官方面板同时打开**的场景下
+     会把渲染进程打满 CPU 卡死 —— 主线程此后不再响应任何 CDP `Runtime.evaluate`，`Page.reload`
+     也进不去，daemon.log 里 20:34:52 那次自动化任务的 CDP 调用同样没有返回（`finish` 行缺失）。
+     推断成因：我的面板宽度取自 `.detail-panel-container` 的 rect，而我又写 `.conversation-shell`
+     的 margin-right —— 两者互为对方的输入，形成「宽度 ⇒ 让位量 ⇒ 宽度」的自激环。
+     ⇒ **结论：不做覆盖。** 本面板恒 `right:0` + 用户宽度；与官方面板并存时允许重叠（罕见场景，
+     且接管路径本来就会把官方 md tab 关掉）。若将来非要重做覆盖，必须**一次性测量并缓存**结果，
+     绝不能在 MutationObserver 回调里重新测量。 */
+  function mdqvPlace(w) {
+    if (!mdqvDock) return;
+    var rr = mdqvRootRect();
+    var ww = Math.round(w);
+    mdqvDock.style.top = rr.top + 'px';
+    mdqvDock.style.height = rr.height + 'px';
+    mdqvDock.style.right = '0px';
+    mdqvDock.style.width = ww + 'px';
+    mdqvWidth = ww;
+  }
+
+  function mdqvDetachShellGuard() {
+    if (mdqvShellMo) { try { mdqvShellMo.disconnect(); } catch (e) {} mdqvShellMo = null; }
+    mdqvHolderEl = null;
+  }
+
+  /** 重算并写回让位量。观察者与窗口 resize 都走这里。 */
+  function mdqvReapply() {
+    if (!mdqvDock || mdqvApplying || !mdqvWidth) return;
+    if (!mdqvShellEl || mdqvShellEl !== document.querySelector('.conversation-shell')) return;
+    // ⚠️ 自激环自救闸（2026-09-23 加，防渲染进程卡死）：
+    // 本函数由 MutationObserver(style) 触发，而它写回 margin-right 时**又会**触发观察者。
+    // 正常情况写一两次就收敛（值不再变 ⇒ 不再写 ⇒ 不再回调）。但一旦出现「写 margin ⇒ 布局变 ⇒
+    // 让位量再变」的自激环，观察者会以**微任务**速度无限回调，主线程永不 yield ⇒ 整个渲染进程
+    // 卡死（实测：CPU 满、CDP evaluate 与 Page.reload 全部无响应，只能重启页面）。
+    // ⇒ 连续高频回调超阈值就摘掉观察者自救：宁可布局停止跟随，也绝不能卡死进程。
+    var now = Date.now();
+    if (now - mdqvReapplyLast <= 3) mdqvReapplyStreak++; else mdqvReapplyStreak = 0;
+    mdqvReapplyLast = now;
+    if (mdqvReapplyStreak > 30) {
+      mdqvReapplyStreak = 0;
+      try { if (mdqvShellMo) mdqvShellMo.disconnect(); } catch (e) {}
+      mdqvShellMo = null;
+      return;
+    }
+    mdqvApplyShift(mdqvWidth);
+  }
+
+  /** React 重渲染可能把我们的内联 style 冲掉；官方面板开/关又会让**父容器宽度**在
+   *  1936 ⇄ 2296 之间跳（连带把对话区右边缘推过我的面板左边缘）。两个节点都守。 */
+  function mdqvAttachShellGuard() {
+    if (mdqvShellMo || !mdqvShellEl || !window.MutationObserver) return;
+    var holder = mdqvShellEl.parentElement;
+    mdqvHolderEl = holder || null;
+    mdqvShellMo = new MutationObserver(function () { mdqvReapply(); });
+    try {
+      mdqvShellMo.observe(mdqvShellEl, { attributes: true, attributeFilter: ['style'] });
+      if (holder && holder !== mdqvShellEl) {
+        mdqvShellMo.observe(holder, { attributes: true, attributeFilter: ['style'] });
+      }
+    } catch (e) {}
+  }
+
+  /** 让位量 = 对话区父容器的右边缘 到 停靠面板左边缘 的距离。
+   *  刻意不写成「我的宽度 - 官方面板宽度」：那样在官方面板中途收起时会算少，
+   *  对话区会滑到面板底下。用父容器当前宽度反推，两种状态都自洽。 */
+  function mdqvApplyShift(width) {
+    var shell = document.querySelector('.conversation-shell');
+    if (!shell) return;
+    if (mdqvShellEl !== shell) {
+      mdqvDetachShellGuard();
+      mdqvShellEl = shell;
+      mdqvShellPrevMR = shell.style.marginRight || '';
+      mdqvAttachShellGuard();
+    }
+    var holder = mdqvShellEl.parentElement || mdqvShellEl;
+    var hb = holder.getBoundingClientRect();
+    // 用面板**实际**左边缘（不是「视口宽 − 宽度」）：mdqvPlace 可能为了覆盖官方面板而把
+    // 面板右移并加宽，只有读真实几何才算得准。
+    var layoutW = document.documentElement ? document.documentElement.clientWidth : window.innerWidth;
+    var dockLeft = mdqvDock ? Math.round(mdqvDock.getBoundingClientRect().left)
+                            : Math.round(layoutW - Math.round(width));
+    var shift = Math.round(hb.left + hb.width - dockLeft);
+    if (shift < 0) shift = 0;
+    if (shift > hb.width) shift = Math.round(hb.width);
+    mdqvWantShift = shift;
+    var want = shift > 0 ? shift + 'px' : '';
+    if ((mdqvShellEl.style.marginRight || '') !== want) {
+      mdqvApplying = true;
+      if (want) mdqvShellEl.style.marginRight = want;
+      else mdqvShellEl.style.removeProperty('margin-right');
+      mdqvApplying = false;
+    }
+  }
+
+  function mdqvRestoreShift() {
+    mdqvDetachShellGuard();
+    if (mdqvShellEl) {
+      mdqvApplying = true;
+      // ⚠️ 始终 removeProperty，而不是「恢复 mdqvShellPrevMR」——2026-09-23 实测踩到自锁：
+      // 若上一次因为任何原因没清干净（比如旧副本/旧逻辑留下的 298px），下一次 applyShift 会把
+      // 那个残留值当成「原值」记下来，关闭时又原样写回 ⇒ 残留永久化。本应用里 .conversation-shell
+      // 本来就没有内联 margin-right（实测初始为空），所以直接清掉才是幂等且安全的选择。
+      mdqvShellEl.style.removeProperty('margin-right');
+      mdqvApplying = false;
+    }
+    mdqvShellEl = null;
+    mdqvShellPrevMR = null;
+    mdqvWantShift = 0;
+  }
+
+  /* ---- 代码块语法高亮（T32，零依赖）----
+     设计取舍：① 只做「够用」的高亮（关键字 / 字符串 / 注释 / 数字 / 内置对象 / 函数名 / 类名）；
+     ② **逐 token 输出、每段都过 esc()** —— 绝不把源码原文直接拼进 innerHTML；
+     ③ 语言按大类分组，未知语言退化成「只认字符串 / 数字 / 注释」。
+     为什么不引 highlight.js：本仓零前端依赖是红线（动了要改 mac 白名单 + 许可 + CDN 风险）。 */
+  var WBS_HL_KW = {
+    web: 'var|let|const|function|return|if|else|for|while|do|break|continue|new|typeof|instanceof|class|extends|super|this|try|catch|finally|throw|switch|case|default|import|export|from|as|async|await|yield|delete|in|of|void|static|get|set|null|undefined|true|false|NaN|Infinity|public|private|protected|interface|type|enum|implements|abstract|readonly|namespace|declare|satisfies',
+    py: 'def|class|return|if|elif|else|for|while|break|continue|import|from|as|pass|raise|try|except|finally|with|lambda|yield|global|nonlocal|assert|del|in|is|not|and|or|None|True|False|async|await|match|case|self',
+    sh: 'if|then|else|elif|fi|for|while|do|done|case|esac|function|return|local|export|readonly|declare|set|unset|trap|exit|shift|source|test|echo|cd',
+    sql: 'select|from|where|insert|into|values|update|set|delete|create|table|index|drop|alter|join|left|right|inner|outer|on|group|by|order|having|limit|offset|union|all|distinct|as|and|or|not|null|is|in|exists|case|when|then|else|end|primary|key|foreign|references|default|unique|constraint|begin|commit|rollback|sum|count|avg|min|max'
+  };
+  var WBS_HL_BI = {
+    web: 'console|document|window|Math|JSON|Object|Array|String|Number|Boolean|Promise|Set|Map|Date|RegExp|Error|Symbol|Proxy|Reflect|globalThis|process|require|module|exports|fetch|setTimeout|setInterval|setImmediate|queueMicrotask|localStorage|sessionStorage|Uint8Array|Buffer|URL|Blob|FormData|AbortController',
+    py: 'print|len|range|str|int|float|list|dict|set|tuple|bool|type|isinstance|enumerate|zip|open|super|format|sorted|reversed|Exception|ValueError|KeyError|TypeError|IndexError|RuntimeError',
+    sh: 'grep|sed|awk|cat|ls|cp|mv|rm|mkdir|touch|find|xargs|head|tail|sort|uniq|wc|tee|curl|wget|npm|npx|node|python|pip|git|chmod|chown|kill|ps|env|which|printf|read'
+  };
+  function wbsHlClass(lang) {
+    var l = String(lang || '').toLowerCase();
+    if (/^(py|python)$/.test(l)) return 'py';
+    if (/^(sh|bash|zsh|shell|ps1|powershell|bat|cmd|console|dockerfile|docker)$/.test(l)) return 'sh';
+    if (/^(sql|mysql|pgsql|sqlite|plsql)$/.test(l)) return 'sql';
+    if (/^(js|javascript|jsx|ts|typescript|tsx|json|json5|jsonc|css|scss|sass|less|html|htm|xml|svg|vue|svelte|java|c|cpp|cc|h|hpp|cs|csharp|go|golang|rust|rs|kt|kotlin|swift|php|rb|ruby|dart|yaml|yml|toml|ini|conf|graphql|proto)$/.test(l)) return 'web';
+    return 'web';
+  }
+  /** 高亮入口：返回**已转义**的 HTML 片段。 */
+  function wbsHighlight(code, lang) {
+    var src = String(code == null ? '' : code);
+    var L = String(lang || '').toLowerCase();
+    var g = wbsHlClass(L);
+    var hash = /^(py|python|sh|bash|zsh|shell|ps1|powershell|yaml|yml|toml|ini|conf|ruby|rb|perl|r|dockerfile|docker)$/.test(L);
+    var kw = new RegExp('^(?:' + (WBS_HL_KW[g] || WBS_HL_KW.web) + ')$');
+    var bi = WBS_HL_BI[g] ? new RegExp('^(?:' + WBS_HL_BI[g] + ')$') : null;
+    var re = hash
+      ? /(#[^\n]*)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|\b(0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?)\b|(\$[A-Za-z_]\w*)|\b([A-Za-z_]\w*)\b/g
+      : /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|\b(0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?)\b|(\$[A-Za-z_]\w*)|\b([A-Za-z_$][\w$]*)\b/g;
+    var out = '', last = 0, m;
+    while ((m = re.exec(src))) {
+      out += esc(src.slice(last, m.index));
+      var tok = m[0];
+      if (m[1] !== undefined) out += '<span class="wbs-hl-cm">' + esc(tok) + '</span>';
+      else if (m[2] !== undefined) out += '<span class="wbs-hl-st">' + esc(tok) + '</span>';
+      else if (m[3] !== undefined) out += '<span class="wbs-hl-nu">' + esc(tok) + '</span>';
+      else if (m[4] !== undefined) out += '<span class="wbs-hl-va">' + esc(tok) + '</span>';
+      else {
+        var after = src.charAt(m.index + tok.length);
+        if (kw.test(tok)) out += '<span class="wbs-hl-kw">' + esc(tok) + '</span>';
+        else if (bi && bi.test(tok)) out += '<span class="wbs-hl-bi">' + esc(tok) + '</span>';
+        else if (after === '(') out += '<span class="wbs-hl-fn">' + esc(tok) + '</span>';
+        else if (/^[A-Z]/.test(tok)) out += '<span class="wbs-hl-cl">' + esc(tok) + '</span>';
+        else out += esc(tok);
+      }
+      last = m.index + tok.length;
+    }
+    return out + esc(src.slice(last));
+  }
+
+  /** 内联 <img> 白名单：只放行 http(s) 的 src（md 里写 <img> 多半是 shields 之类的 badge），
+   *  其余属性一律丢弃 —— 防止 md 里塞 onerror 之类的注入面。 */
+  function wbsSafeImg(tag) {
+    var s = /\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(tag);
+    var u = s ? (s[1] || s[2] || s[3] || '') : '';
+    if (!/^https?:\/\//i.test(u)) return '';
+    var a = /\salt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(tag);
+    var alt = a ? (a[1] || a[2] || a[3] || '') : '';
+    return '<img src="' + escAttr(u) + '" alt="' + escAttr(alt) + '" loading="lazy">';
+  }
+
+  /** 行内语法。先在原文上切 token，再对纯文本片段转义 —— 避免「先整体转义再把
+   *  &amp; 当 URL 二次转义」这类双重转义（URL 进属性位一律走 escAttr）。 */
+  function mdqvInline(raw) {
+    var src = String(raw == null ? '' : raw);
+    var re = /(`[^`]+`)|(!?\[[^\]\n]*\]\([^)\s]+\))|(\*\*[^*\n]+\*\*)|(~~[^~\n]+~~)|(\*[^*\n]+\*)|(<br\s*\/?>)|(<(kbd|sub|sup|mark|u|small)>[^<\n]*<\/\3>)|(<img\s[^>]*\/?>)/gi;
+    var out = '', last = 0, m;
+    while ((m = re.exec(src))) {
+      out += esc(src.slice(last, m.index));
+      var tok = m[0];
+      if (tok.charAt(0) === '`') {
+        out += '<code>' + esc(tok.slice(1, -1)) + '</code>';
+      } else if (tok.charAt(0) === '!' || tok.charAt(0) === '[') {
+        var parts = /^(!?)\[([^\]]*)\]\(([^)\s]+)\)$/.exec(tok);
+        var isImg = parts[1] === '!', label = parts[2], url = parts[3];
+        if (/^https?:\/\//i.test(url)) {
+          out += isImg
+            ? '<img src="' + escAttr(url) + '" alt="' + escAttr(label) + '" loading="lazy">'
+            : '<a href="' + escAttr(url) + '" target="_blank" rel="noopener noreferrer">' + esc(label) + '</a>';
+        } else {
+          // 本地路径的图片/链接不加载（读不到就留白更糟），只把目标路径以弱色附在后面
+          out += esc(label) + '<span class="wbs-mdp-local"> ' + esc(url) + '</span>';
+        }
+      } else if (tok.slice(0, 2) === '**') {
+        out += '<strong>' + esc(tok.slice(2, -2)) + '</strong>';
+      } else if (tok.slice(0, 2) === '~~') {
+        out += '<del>' + esc(tok.slice(2, -2)) + '</del>';
+      } else if (m[6] !== undefined) {                 // <br> —— md 表格里常用它换行
+        out += '<br>';
+      } else if (m[8] !== undefined) {                 // <img ...> 白名单
+        out += wbsSafeImg(tok);
+      } else if (m[7] !== undefined) {                 // <kbd> / <sub> / <sup> / <mark> / <u> / <small>
+        var hm = /^<(kbd|sub|sup|mark|u|small)>([\s\S]*)<\/\1>$/i.exec(tok);
+        out += hm ? ('<' + hm[1].toLowerCase() + '>' + esc(hm[2]) + '</' + hm[1].toLowerCase() + '>') : esc(tok);
+      } else {
+        out += '<em>' + esc(tok.slice(1, -1)) + '</em>';
+      }
+      last = m.index + tok.length;
+    }
+    return out + esc(src.slice(last));
+  }
+
+  /** 块级渲染。覆盖：标题 / 段落 / 引用 / 有序无序列表 / 任务列表 / 围栏代码 / 表格 /
+   * 分隔线 / 行内语法。**刻意不做**数学与 mermaid —— 遇到就给一行提示，不静默丢内容。 */
+  function mdqvRender(md) {
+    var lines = String(md == null ? '' : md).replace(/\r\n?/g, '\n').split('\n');
+    var n = lines.length, out = [], para = [], quote = [], list = null, fence = null, i;
+
+    function flushPara() {
+      if (!para.length) return;
+      out.push('<p>' + para.map(mdqvInline).join('<br>') + '</p>');
+      para = [];
+    }
+    function flushQuote() {
+      if (!quote.length) return;
+      out.push('<blockquote>' + quote.map(mdqvInline).join('<br>') + '</blockquote>');
+      quote = [];
+    }
+    function flushList() {
+      if (!list) return;
+      out.push('<' + list.tag + '>' + list.items.join('') + '</' + list.tag + '>');
+      list = null;
+    }
+    function flushAll() { flushPara(); flushQuote(); flushList(); }
+    function warn(text) { out.push('<div class="wbs-mdp-warn">' + esc(mdqvT(text)) + '</div>'); }
+    function closeFence() {
+      if (!fence) return;
+      if (fence.isMermaid) warn('此段 mermaid 图请用官方查看器打开');
+      // T32：代码块加「语言标签 + 复制按钮」的顶栏，正文走高亮而不是纯灰底
+      var lang = fence.lang || '';
+      out.push('<div class="wbs-mdp-code">'
+        + '<div class="wbs-mdp-code-bar">'
+        + '<span class="wbs-mdp-code-lang" data-wbs-i18n-skip="1">' + esc(lang ? lang.toUpperCase() : mdqvT('代码')) + '</span>'
+        + '<button class="wbs-mdp-code-copy" type="button" data-wbs-i18n-skip="1">' + esc(mdqvT('复制')) + '</button>'
+        + '</div>'
+        + '<pre class="wbs-mdp-pre"><code>' + wbsHighlight(fence.buf.join('\n'), lang) + '</code></pre>'
+        + '</div>');
+      fence = null;
+    }
+    function cellsOf(line) {
+      var t = String(line).trim();
+      if (t.charAt(0) === '|') t = t.slice(1);
+      if (t.charAt(t.length - 1) === '|') t = t.slice(0, -1);
+      return t.split('|').map(function (c) { return c.trim(); });
+    }
+    function alignsOf(sep) {
+      return cellsOf(sep).map(function (c) {
+        if (/^:-+:$/.test(c)) return 'center';
+        if (/^-+:$/.test(c)) return 'right';
+        return '';
+      });
+    }
+
+    for (i = 0; i < n; i++) {
+      var line = lines[i];
+
+      // 围栏内：只找闭合行，其余原样收进缓冲
+      if (fence) {
+        if (/^\s*(?:```|~~~)\s*$/.test(line)) { closeFence(); continue; }
+        fence.buf.push(line);
+        continue;
+      }
+
+      var open = /^\s*(?:```|~~~)\s*([A-Za-z0-9_+-]*)\s*$/.exec(line);
+      if (open) {
+        flushAll();
+        fence = { buf: [], lang: (open[1] || '').toLowerCase(), isMermaid: (open[1] || '').toLowerCase() === 'mermaid' };
+        continue;
+      }
+
+      // $$ 数学块：不渲染，给提示 + 原文（原文比空白有用）
+      if (/^\s*\$\$\s*$/.test(line)) {
+        flushAll();
+        var mathBuf = [];
+        i++;
+        while (i < n && !/^\s*\$\$\s*$/.test(lines[i])) { mathBuf.push(lines[i]); i++; }
+        warn('此段数学公式请用官方查看器打开');
+        out.push('<pre class="wbs-mdp-pre"><code>' + esc(mathBuf.join('\n')) + '</code></pre>');
+        continue;
+      }
+
+      // 表格：本行以 | 开头、且下一行是分隔行
+      if (/^\s*\|/.test(line) && i + 1 < n && /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1])) {
+        flushAll();
+        var head = cellsOf(line);
+        var aligns = alignsOf(lines[i + 1]);
+        i += 2;
+        var rows = [];
+        while (i < n && /^\s*\|/.test(lines[i])) { rows.push(cellsOf(lines[i])); i++; }
+        i--;
+        var tb = '<div class="wbs-mdp-tablewrap"><table><thead><tr>';
+        for (var c1 = 0; c1 < head.length; c1++) {
+          tb += '<th' + (aligns[c1] ? ' style="text-align:' + aligns[c1] + '"' : '') + '>' + mdqvInline(head[c1]) + '</th>';
+        }
+        tb += '</tr></thead><tbody>';
+        for (var r1 = 0; r1 < rows.length; r1++) {
+          tb += '<tr>';
+          for (var c2 = 0; c2 < head.length; c2++) {
+            tb += '<td' + (aligns[c2] ? ' style="text-align:' + aligns[c2] + '"' : '') + '>' + mdqvInline(rows[r1][c2] || '') + '</td>';
+          }
+          tb += '</tr>';
+        }
+        tb += '</tbody></table></div>';
+        out.push(tb);
+        continue;
+      }
+
+      var h = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+      if (h) {
+        flushAll();
+        out.push('<h' + h[1].length + '>' + mdqvInline(h[2]) + '</h' + h[1].length + '>');
+        continue;
+      }
+
+      if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) { flushAll(); out.push('<hr>'); continue; }
+
+      var q = /^\s*>\s?(.*)$/.exec(line);
+      if (q) { flushPara(); flushList(); quote.push(q[1]); continue; }
+
+      var li = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/.exec(line);
+      if (li) {
+        flushPara(); flushQuote();
+        var tag = /\d/.test(li[2].charAt(0)) ? 'ol' : 'ul';
+        if (!list || list.tag !== tag) { flushList(); list = { tag: tag, items: [] }; }
+        var task = /^\[([ xX])\]\s*(.*)$/.exec(li[3]);
+        list.items.push(task
+          ? '<li class="wbs-mdp-task"><input type="checkbox" disabled' + (task[1] === ' ' ? '' : ' checked') + '>' + mdqvInline(task[2]) + '</li>'
+          : '<li>' + mdqvInline(li[3]) + '</li>');
+        continue;
+      }
+
+      if (!line.trim()) { flushAll(); continue; }
+
+      // 其它非空行：结束列表/引用，进段落
+      flushList(); flushQuote();
+      para.push(line);
+    }
+    if (fence) closeFence();
+    flushAll();
+    return out.join('\n') || '<div class="wbs-mdp-empty">' + esc(mdqvT('（空文件）')) + '</div>';
+  }
+
+  /** 复制文本（面板内代码块的「复制」用；不依赖 mdqvOpen 内的 flash）。 */
+  function mdqvCopyText(text, btn, okMsg, failMsg) {
+    var done = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text); done = true; }
+    } catch (e) {}
+    if (!done) {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('data-wbs-i18n-skip', '1');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        done = document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch (e2) { done = false; }
+    }
+    if (btn) {
+      var old = btn.textContent;
+      btn.textContent = done ? okMsg : failMsg;
+      btn.classList.add('is-done');
+      setTimeout(function () { btn.textContent = old; btn.classList.remove('is-done'); }, 1400);
+    }
+    return done;
+  }
+
+  /** 给代码块顶栏的「复制」按钮接线（面板内走真实监听器；导出的离线页走内联脚本）。 */
+  function mdqvBindCodeCopy(root) {
+    if (!root || !root.querySelectorAll) return;
+    Array.prototype.forEach.call(root.querySelectorAll('.wbs-mdp-code-copy'), function (b) {
+      if (b.__wbsCopyBound) return;
+      b.__wbsCopyBound = true;
+      b.addEventListener('click', function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        var wrap = b.parentNode ? b.parentNode.parentNode : null;
+        var codeEl = wrap && wrap.querySelector ? wrap.querySelector('code') : null;
+        mdqvCopyText(codeEl ? codeEl.textContent : '', b, mdqvT('已复制'), mdqvT('复制失败'));
+      });
+    });
+  }
+
+  function mdqvClose() {
+    if (mdqvDock && mdqvDock.parentNode) mdqvDock.parentNode.removeChild(mdqvDock);
+    mdqvDock = null;
+    mdqvTrigger = null;
+    if (mdqvEscHandler) {
+      document.removeEventListener('keydown', mdqvEscHandler, true);
+      mdqvEscHandler = null;
+    }
+    if (mdqvResizeHandler) {
+      window.removeEventListener('resize', mdqvResizeHandler);
+      mdqvResizeHandler = null;
+    }
+    mdqvRestoreShift();
+  }
+
+  function mdqvOpen(path, card) {
+    mdqvClose();
+    var name = String(path || '').split('/').pop();
+
+    var dock = el('div', 'wbs-mdp-dock');
+    dock.id = 'wbs-mdp-modal';
+    dock.setAttribute('role', 'dialog');
+    dock.setAttribute('aria-modal', 'true');
+    dock.setAttribute('aria-label', mdqvT('md 快速查看'));
+
+    // 左边缘拖动条：宽度可调（官方那个 sash 的替代品）
+    var grip = el('div', 'wbs-mdp-grip');
+    grip.setAttribute('title', mdqvT('拖动调整宽度'));
+
+    var head = el('div', 'wbs-mdp-head');
+    var titles = el('div', 'wbs-mdp-titles');
+    var fileEl = el('div', 'wbs-mdp-file', name);
+    fileEl.setAttribute('title', path);               // 完整路径走悬停，不占版面
+    fileEl.setAttribute('data-wbs-i18n-skip', '1');   // 文件名是数据，不进词典
+    var metaEl = el('div', 'wbs-mdp-meta', mdqvT('正在读取…'));
+    metaEl.setAttribute('data-wbs-i18n-skip', '1');
+    titles.appendChild(fileEl);
+    titles.appendChild(metaEl);
+
+    var acts = el('div', 'wbs-mdp-acts');
+    var btnCopy = el('button', 'wbs-mdp-btn', mdqvT('复制正文'));
+    var btnExport = el('button', 'wbs-mdp-btn', mdqvT('导出 HTML'));
+    var btnOfficial = el('button', 'wbs-mdp-btn', mdqvT('用官方查看器打开'));
+    var btnClose = el('button', 'wbs-mdp-btn is-primary', mdqvT('关闭'));
+    [btnCopy, btnExport, btnOfficial, btnClose].forEach(function (b) {
+      b.type = 'button';
+      acts.appendChild(b);
+    });
+    head.appendChild(titles);
+    head.appendChild(acts);
+
+    var body = el('div', 'wbs-mdp-body');
+    var doc = el('div', 'wbs-mdp-doc');
+    var note = el('div', 'wbs-mdp-empty', mdqvT('正在读取…'));
+    body.appendChild(doc);
+    body.appendChild(note);
+    dock.appendChild(grip);
+    dock.appendChild(head);
+    dock.appendChild(body);
+    document.body.appendChild(dock);
+
+    mdqvDock = dock;
+    mdqvTrigger = card || null;
+
+    // 先定位 + 让位，再去读文件 —— 布局不等待 IO
+    mdqvWidth = mdqvReadWidth() || mdqvDefaultWidth();
+    mdqvPlace(mdqvWidth);
+    mdqvApplyShift(mdqvWidth);
+
+    // 窗口尺寸变化：夹回可用范围后重排（用户自定义宽度优先，只做上限保护）
+    mdqvResizeHandler = function () {
+      var max = Math.max(320, Math.round(window.innerWidth * 0.8));
+      if (mdqvWidth > max) { mdqvWidth = max; mdqvWriteWidth(mdqvWidth); }
+      mdqvPlace(mdqvWidth);
+      mdqvApplyShift(mdqvWidth);
+    };
+    window.addEventListener('resize', mdqvResizeHandler);
+
+    // 拖动调宽。本环境 setPointerCapture 不生效（gotpointercapture 从不触发）⇒
+    // move/up 一律挂 window 的**捕获**阶段，指针拖出细条也照样跟手；cancel 兜底收尾。
+    var dragging = false, startX = 0, startW = 0;
+    var onGripMove = function (ev) {
+      if (!dragging) return;
+      // 防「按下态泄漏」：指针已抬起（buttons 不含主键）却还收到 move ⇒ 立即收尾。
+      // 实测踩到过：漏掉一次 pointerup 后，后续任何 pointermove 都会继续改宽度。
+      if (typeof ev.buttons === 'number' && (ev.buttons & 1) === 0) { onGripUp(); return; }
+      mdqvWidth = Math.min(Math.max(Math.round(startW + (startX - ev.clientX)), 320),
+                           Math.max(320, Math.round(window.innerWidth * 0.8)));
+      mdqvPlace(mdqvWidth);
+      mdqvApplyShift(mdqvWidth);
+      if (ev.cancelable) ev.preventDefault();
+    };
+    var onGripUp = function () {
+      if (!dragging) return;
+      dragging = false;
+      grip.classList.remove('is-dragging');
+      window.removeEventListener('pointermove', onGripMove, true);
+      window.removeEventListener('pointerup', onGripUp, true);
+      window.removeEventListener('pointercancel', onGripUp, true);
+      window.removeEventListener('blur', onGripUp);
+      mdqvWriteWidth(mdqvWidth);
+    };
+    grip.addEventListener('pointerdown', function (ev) {
+      if (ev.button !== undefined && ev.button !== 0) return;
+      dragging = true; startX = ev.clientX; startW = mdqvWidth;
+      grip.classList.add('is-dragging');
+      window.addEventListener('pointermove', onGripMove, true);
+      window.addEventListener('pointerup', onGripUp, true);
+      window.addEventListener('pointercancel', onGripUp, true);
+      window.addEventListener('blur', onGripUp);   // 拖到一半切窗口不会卡在 is-dragging
+      ev.preventDefault();
+      ev.stopPropagation();
+    }, true);
+    grip.addEventListener('dblclick', function () {   // 双击复位默认宽度
+      mdqvWidth = mdqvDefaultWidth();
+      mdqvWriteWidth(mdqvWidth);
+      mdqvPlace(mdqvWidth);
+      mdqvApplyShift(mdqvWidth);
+    });
+
+    var source = '';
+    var t0 = Date.now();
+    var flash = function (btn, text) {
+      var old = btn.textContent;
+      btn.textContent = text;
+      setTimeout(function () { if (btn.textContent === text) btn.textContent = old; }, 1800);
+    };
+
+    btnClose.addEventListener('click', mdqvClose);
+    mdqvEscHandler = function (ev) { if (ev && ev.key === 'Escape') mdqvClose(); };
+    document.addEventListener('keydown', mdqvEscHandler, true);
+
+    // 逃生口：放行标记 + 把点击重新派发回官方那条链路
+    // 注意顺序：mdqvClose() 会清 mdqvTrigger，所以先把触发元素取出来。
+    // 两个入口的可点元素不同（产物卡是 .card-main，产物面板条目就是它自己）。
+    btnOfficial.addEventListener('click', function () {
+      var trigger = mdqvTrigger || card;
+      mdqvClose();
+      // T32：用户明确要走官方 ⇒ 10 s 内出现的 md tab 一律豁免接管（见 mdqvAdoptTick 的冷却判据）
+      mdqvAdoptCool = Date.now() + 10000;
+      mdqvBypass = true;
+      try {
+        var main = trigger && trigger.querySelector ? trigger.querySelector('.artifact-slot-panel__card-main') : null;
+        var target = main || trigger;
+        if (target && target.dispatchEvent) {
+          target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        }
+      } catch (e) {}
+      setTimeout(function () { mdqvBypass = false; }, 0);
+    });
+
+    btnCopy.addEventListener('click', function () {
+      if (!source) return;
+      var done = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(source);
+          done = true;
+        }
+      } catch (e) {}
+      if (!done) {
+        try {
+          var ta = document.createElement('textarea');
+          ta.value = source;
+          ta.setAttribute('data-wbs-i18n-skip', '1');
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          done = document.execCommand('copy');
+          document.body.removeChild(ta);
+        } catch (e2) { done = false; }
+      }
+      flash(btnCopy, done ? mdqvT('已复制 md 正文') : mdqvT('复制失败，请手动选中'));
+    });
+
+    btnExport.addEventListener('click', function () {
+      if (!source) return;
+      btnExport.disabled = true;
+      api('/api/md-export-html', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: path, html: mdqvStandalone(String(name || '').replace(/\.md$/i, ''), mdqvRender(source)), name: name }),
+      }).then(function (d) {
+        btnExport.disabled = false;
+        flash(btnExport, mdqvT('已导出 HTML'));
+        metaEl.textContent = mdqvShortPath((d && d.htmlPath) || path, 58);
+        metaEl.setAttribute('title', (d && d.htmlPath) || path);
+      }).catch(function (e3) {
+        btnExport.disabled = false;
+        flash(btnExport, mdqvT('导出失败'));
+        metaEl.textContent = mdqvT('导出失败') + ': ' + (e3 && e3.message ? e3.message : e3);
+      });
+    });
+
+    fetch(mdqvFileUrl(path)).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    }).then(function (text) {
+      source = text;
+      var bytes = text.length;
+      try { bytes = new Blob([text]).size; } catch (e) {}
+      var kb = Math.max(1, Math.round(bytes / 1024));
+      if (bytes > MDQV_MAX_BYTES) {
+        note.textContent = mdqvT('文件太大，未渲染') + '（' + (Math.round(bytes / 104857.6) / 10) + ' MB）';
+        btnExport.disabled = true;
+        metaEl.textContent = mdqvShortPath(path, 58) + '  ·  ' + kb + ' KB';
+        return;
+      }
+      doc.innerHTML = mdqvRender(text);
+      mdqvBindCodeCopy(doc);
+      if (note.parentNode) note.parentNode.removeChild(note);
+      metaEl.textContent = mdqvShortPath(path, 58) + '  ·  ' + kb + ' KB  ·  ' + text.split('\n').length + ' ' + mdqvT('行')
+        + '  ·  ' + mdqvT('渲染耗时') + ' ' + (Date.now() - t0) + ' ms';
+    }).catch(function (e4) {
+      btnExport.disabled = true;
+      note.textContent = mdqvT('读取失败') + ': ' + (e4 && e4.message ? e4.message : mdqvT('读不到文件'));
+      metaEl.textContent = mdqvShortPath(path, 58);
+    });
+  }
+
+  /** 导出的 HTML 要能脱离 WorkBuddy 单独打开（发给别人 / 打印成 PDF）⇒ 自带一份精简样式，
+   *  跟随系统深色偏好。样式刻意不复用注入页那份（那份依赖 --wb-* 变量，外部没有）。 */
+  function mdqvStandalone(title, bodyHtml) {
+    return '<!doctype html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n'
+      + '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+      + '<title>' + esc(title) + '</title>\n<style>\n'
+      + 'body{margin:0;padding:36px 20px 72px;background:#fff;color:#1f1f1f;'
+      + 'font:15px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji","PingFang SC","Microsoft YaHei",sans-serif}\n'
+      + '#wbs-mdp-doc{max-width:860px;margin:0 auto;word-wrap:break-word;overflow-wrap:anywhere}\n'
+      + '#wbs-mdp-doc>*:first-child{margin-top:0}\n'
+      + 'h1,h2,h3,h4,h5,h6{font-weight:700;line-height:1.4;margin:1.5em 0 .6em}\n'
+      + 'h1{font-size:1.7em;border-bottom:1px solid #e8e8e8;padding-bottom:.32em}\n'
+      + 'h2{font-size:1.35em;border-bottom:1px solid #eee;padding-bottom:.28em}\n'
+      + 'h3{font-size:1.15em}h4{font-size:1em}h5,h6{font-size:.94em;color:#666}\n'
+      + 'p{margin:.75em 0}ul,ol{margin:.6em 0;padding-left:1.7em}li{margin:.28em 0}\n'
+      + 'li.wbs-mdp-task{list-style:none;margin-left:-1.35em}li.wbs-mdp-task input{margin-right:.45em}\n'
+      + 'blockquote{margin:.85em 0;padding:.3em 0 .3em 1em;border-left:3px solid #ddd;color:#555}\n'
+      + 'code{padding:.14em .38em;border-radius:4px;background:#f2f3f5;'
+      + 'font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em}\n'
+      + '.wbs-mdp-pre{margin:.9em 0;padding:12px 14px;border-radius:9px;background:#f6f7f9;'
+      + 'border:1px solid #e8e8e8;overflow-x:auto}\n'
+      + '.wbs-mdp-pre code{padding:0;background:none;font-size:12.5px;white-space:pre}\n'
+      + '.wbs-mdp-code{margin:.9em 0;border:1px solid #e8e8e8;border-radius:9px;background:#f6f7f9;overflow:hidden}'
+      + '.wbs-mdp-code-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 10px 5px 12px;border-bottom:1px solid #ececec;background:#eef0f3}'
+      + '.wbs-mdp-code-lang{font-size:10.5px;font-weight:700;letter-spacing:.06em;color:#999;text-transform:uppercase}'
+      + '.wbs-mdp-code-copy{padding:2px 8px;border:1px solid transparent;border-radius:6px;background:transparent;color:#5f626a;font:inherit;font-size:11px;line-height:1.6;cursor:pointer}'
+      + '.wbs-mdp-code-copy:hover{background:#fff;color:#1f1f1f;border-color:#e0e0e0}'
+      + '.wbs-mdp-code .wbs-mdp-pre{margin:0;border:0;border-radius:0;background:transparent}'
+      + '.wbs-hl-kw{color:#cf222e}.wbs-hl-st{color:#0a3069}.wbs-hl-cm{color:#6e7781;font-style:italic}'
+      + '.wbs-hl-nu{color:#0550ae}.wbs-hl-bi{color:#953800}.wbs-hl-fn{color:#8250df}'
+      + '.wbs-hl-cl{color:#1f6feb}.wbs-hl-va{color:#953800}'
+      + 'ul>li::marker,ol>li::marker{color:#9aa0a6;font-weight:600}'
+      + 'blockquote{background:#fafafa;border-radius:0 6px 6px 0}'
+      + 'kbd{padding:.1em .4em;border:1px solid #dcdcdc;border-bottom-width:2px;border-radius:4px;background:#fff;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em}'
+      + 'mark{background:#fff3b0;color:inherit;padding:0 .15em;border-radius:2px}\n'
+      + '.wbs-mdp-tablewrap{margin:.9em 0;overflow-x:auto}\n'
+      + 'table{border-collapse:collapse;width:100%;font-size:13px}\n'
+      + 'th,td{padding:6px 10px;border:1px solid #e2e2e2;text-align:left;vertical-align:top}\n'
+      + 'th{background:#f6f7f9;font-weight:600;white-space:nowrap}\n'
+      + 'hr{margin:1.5em 0;border:0;border-top:1px solid #e8e8e8}\n'
+      + 'a{color:#2f6fdb;text-decoration:none}a:hover{text-decoration:underline}\n'
+      + 'img{max-width:100%;height:auto;border-radius:6px}\n'
+      + '.wbs-mdp-local{color:#999;font-size:.92em}\n'
+      + '.wbs-mdp-warn{margin:.75em 0;padding:8px 12px;border-radius:8px;border:1px dashed #dcdcdc;'
+      + 'background:#fdf9ef;font-size:12.5px;color:#666}\n'
+      + '@media (prefers-color-scheme:dark){body{background:#1b1c1f;color:#e8e8ea}'
+      + 'code{background:#2a2c31}h1,h2{border-color:#333}h5,h6,blockquote{color:#a8a8ad}'
+      + '.wbs-mdp-pre{background:#232529;border-color:#333}th{background:#232529}'
+      + 'th,td{border-color:#333}a{color:#7aa7f0}hr{border-color:#333}'
+      + '.wbs-mdp-warn{background:#2a2718;border-color:#3d3a2a}\n'
+      + '.wbs-hl-kw{color:#ff7b72}.wbs-hl-st{color:#a5d6ff}.wbs-hl-cm{color:#8b949e}'
+      + '.wbs-hl-nu{color:#79c0ff}.wbs-hl-bi{color:#ffa657}.wbs-hl-fn{color:#d2a8ff}'
+      + '.wbs-hl-cl{color:#79c0ff}.wbs-hl-va{color:#ffa657}'
+      + '.wbs-mdp-code{background:#1f2125;border-color:#333}'
+      + '.wbs-mdp-code-bar{background:#232529;border-color:#2c2e33}'
+      + 'mark{background:#5c4b00;color:#ffe98a}}\n'
+      + '</style>\n</head>\n<body>\n<div id="wbs-mdp-doc">\n' + bodyHtml + '\n</div>\n'
+      + '<script>(function(){var bs=document.querySelectorAll(".wbs-mdp-code-copy");function cp(t,b){var d=false;try{if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t);d=true;}}catch(e){}if(!d){try{var a=document.createElement("textarea");a.value=t;a.style.position="fixed";a.style.left="-9999px";document.body.appendChild(a);a.select();document.execCommand("copy");document.body.removeChild(a);}catch(e2){}}var o=b.textContent;b.textContent=d?"已复制":"复制失败";setTimeout(function(){b.textContent=o;},1400);}for(var i=0;i<bs.length;i++){(function(b){b.addEventListener("click",function(){var w=b.parentNode&&b.parentNode.parentNode;var c=w&&w.querySelector?w.querySelector("code"):null;cp(c?c.textContent:"",b);});})(bs[i]);}})();</script>\n'
+      + '</body>\n</html>\n';
+  }
+
+  function mdqvInstall() {
+    if (mdqvInstalled) return;
+    mdqvInstalled = true;
+    mdqvAdoptStart();                       // T32：官方自动打开 md 时接管
+    document.addEventListener('click', function (ev) {
+      // 代际守卫（2026-09-23 实测踩到）：inject.js 头部的「兜底清理」会移除历史版本的 DOM 节点、
+      // 清掉 #wbs-style 与 window.__wbsWidget，**但不会摘掉旧副本挂在 document 上的监听器**。
+      // 于是每 POST 一次 /api/inject 就多留一个捕获监听，多份副本各自持有 mdqvDock / mdqvBypass /
+      // mdqvClose 等闭包状态互相抢事件 —— 实测症状是「按钮上查得到监听器、点击却不触发」这类鬼问题。
+      // ⇒ 每次注入领一个代标记，旧副本的监听器发现自己不是当前代就自动让位。
+      if (window.__wbsGeneration !== WBS_GENERATION) return;
+      if (mdqvBypass) return;
+      if (!ev || ev.defaultPrevented) return;
+      if (ev.button !== undefined && ev.button !== 0) return;          // 只认主键
+      if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return; // 组合键保持官方行为
+      if (!mdqvReadEnabled()) return;
+      var t = ev.target;
+      if (!t || !t.closest) return;
+      // 两个入口都要拦：① 对话正文的产物卡；② 产物面板（概览/产物）里的条目。
+      // 最后一条是通用兜底（同时带 data-ext 与 data-dir 的产物条目），防官方以后换类名。
+      var card = t.closest('.artifact-slot-panel__card[data-ext]')
+              || t.closest('.cb-overview-artifact-item[data-ext]')
+              || t.closest('[data-ext][data-dir]');
+      if (!card) return;
+      var ext = String(card.getAttribute('data-ext') || '').toLowerCase().replace(/^\./, '');
+      if (ext !== 'md' && ext !== 'markdown') return;
+      var dir = mdqvNormPath(card.getAttribute('data-dir'));
+      if (!dir) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+      mdqvOpen(dir, card);
+    }, true);
   }
 
   function registerBuild(instance) {
@@ -16829,6 +18592,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-fab{--wbs-robot-shell:#111;--wbs-robot-eye:#fff;--wbs-robot-blur:none;--wbs-robot-rim:rgba(255,255,255,.55);position:fixed;right:22px;bottom:22px;z-index:2147483647;transform:scale(0.5);transform-origin:bottom right;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;will-change:transform;transition:transform .22s cubic-bezier(.22,1,.36,1)}',
     '.wbs-fab-health-dot{position:absolute;top:-5px;left:-5px;width:14px;height:14px;border-radius:50%;background:#8b8f98;border:2px solid #141416;box-shadow:0 1px 3px rgba(0,0,0,.5);z-index:3}',
     '.wbs-fab-health-dot.running{background:#4da3ff}.wbs-fab-health-dot.blocked{background:#ffb03a}.wbs-fab-health-dot.error{background:#ef6262}.wbs-fab-health-dot.suspected{background:#f08a3c}.wbs-fab-health-dot.stopped{background:#9ca3af}',
+    /* token 速度读数：常驻 body + position:fixed，可拖到任意位置；双击复位回输入框下方。 */
+    '.wbs-token-rate-bar{position:fixed;left:0;top:0;display:inline-flex;align-items:baseline;padding:1px 11px 2px;border-radius:9px;background:rgba(255,255,255,.94);border:1px solid rgba(0,0,0,.12);color:#1b1b1f;box-shadow:0 2px 10px rgba(0,0,0,.12);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;line-height:1;white-space:nowrap;pointer-events:auto;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;z-index:2147483000}',
+    '.wbs-token-rate-bar.is-dragging{cursor:grabbing;background:rgba(0,0,0,.06);border-color:rgba(0,0,0,.22)}',
+    '.wbs-token-rate-bar[hidden]{display:none}',
+    '.wbs-token-rate-num{font-size:30px;font-weight:700;letter-spacing:-.01em}',
+    '.wbs-token-rate-unit{font-size:14px;font-weight:600;opacity:.6;margin-left:3px}',
+    '.wbs-token-rate-bar{transition:opacity .22s}',
+    /* 旧值提示：读不到 / 没输出时保留上一次读数，降透明度表示「不是实时值」 */
+    '.wbs-token-rate-bar.is-stale{opacity:.42}',
+    'html.cb-dark .wbs-token-rate-bar,html[data-theme="dark"] .wbs-token-rate-bar{background:rgba(30,30,34,.94);border-color:rgba(255,255,255,.16);color:#f2f2f5}',
+    'html.cb-dark .wbs-token-rate-bar,html[data-theme="dark"] .wbs-token-rate-bar{background:rgba(255,255,255,.10);border-color:rgba(255,255,255,.18);color:#f2f2f5}',
+    'html.cb-dark .wbs-token-rate-bar.is-floating,html[data-theme="dark"] .wbs-token-rate-bar.is-floating{background:rgba(30,30,34,.94);border-color:rgba(255,255,255,.16)}',
     '.wbs-health-status{display:none;align-items:center;min-height:18px;padding:2px 7px;border-radius:999px;font-size:10px;line-height:14px;white-space:nowrap;color:var(--wb-color-text-secondary,#666);background:var(--wb-bg-tertiary,#f2f2f2)}',
     '.wbs-health-status.running,.wbs-health-status.blocked,.wbs-health-status.error,.wbs-health-status.suspected,.wbs-health-status.stopped{display:inline-flex}',
     '.wbs-health-status.running{color:#2369a8;background:rgba(77,163,255,.14)}.wbs-health-status.blocked{color:#9a5b00;background:rgba(255,176,58,.18)}.wbs-health-status.error{color:#a52828;background:rgba(239,98,98,.16)}.wbs-health-status.suspected{color:#9a4d0a;background:rgba(240,138,60,.17)}.wbs-health-status.stopped{color:var(--wb-color-text-secondary,#666)}',
@@ -17239,6 +19014,28 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-sess-filter-row{display:flex;align-items:center;gap:8px;flex:0 0 auto}',
     '.wbs-sess-filter-row:last-child{flex:1 1 auto;min-width:0}',
     '#wbs-sess-account-select{max-width:112px}',
+    /* 会话页：单会话成本卡（T21，2026-09-23） */
+    '#wbs-cost-card{flex:0 0 auto;min-height:auto;margin-bottom:8px;padding:10px 12px 9px}',
+    '.wbs-cost-head{display:flex;align-items:center;gap:8px;margin-bottom:2px}',
+    '.wbs-cost-title{font-size:12px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-cost-badge{font-size:10px;font-weight:600;padding:1px 6px;border-radius:999px;background:color-mix(in srgb,var(--wb-button-primary-bg,#1f1f1f) 10%,transparent);color:var(--wb-color-text-secondary,#444);white-space:nowrap}',
+    '.wbs-cost-badge.is-pending{background:rgba(230,160,30,.14);color:#9a6400}',
+    '.wbs-cost-badge.is-off{background:rgba(150,150,150,.16);color:var(--wb-icon-secondary,#666)}',
+    '.wbs-cost-refresh{margin-left:auto;width:22px;height:22px;line-height:1;border:1px solid var(--wb-border-subtle,#ececec);border-radius:8px;background:transparent;color:var(--wb-icon-secondary,#666);font-size:13px;cursor:pointer}',
+    '.wbs-cost-refresh:hover{background:var(--wb-bg-hover,#f5f5f5)}',
+    '.wbs-cost-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}',
+    '.wbs-cost-cell{display:flex;flex-direction:column;gap:1px;padding:7px 9px;border-radius:10px;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 40%,transparent);border:1px solid var(--wb-border-subtle,#f2f2f2)}',
+    '.wbs-cost-k{font-size:10px;color:var(--wb-icon-tertiary,#999);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.wbs-cost-v{font-size:16px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f);line-height:1.2}',
+    '.wbs-cost-main .wbs-cost-v{font-size:20px}',
+    '.wbs-cost-sub{font-size:10px;color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-cost-hitrow{display:flex;align-items:center;gap:8px;margin-top:7px;padding-top:7px;border-top:1px solid var(--wb-border-subtle,#f2f2f2)}',
+    '.wbs-cost-hit{font-size:14px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-cost-note{font-size:10px;line-height:1.5;color:var(--wb-icon-tertiary,#999);margin-top:5px}',
+    '.wbs-cost-note b{font-weight:700;color:var(--wb-color-text-secondary,#444)}',
+    '.wbs-cost-foot{font-size:10px;color:var(--wb-icon-tertiary,#999);margin-top:4px}',
+    '.wbs-cost-warn{font-size:10px;color:#9a6400;margin-top:4px}',
+    '.wbs-cost-empty{font-size:11px;color:var(--wb-icon-tertiary,#999);padding:6px 0}',
     /* 会话页/模型页：卡片与列表贴底，减少底部留白 */
     '.wbs-pane[data-pane="sessions"]{padding-bottom:1px}',
     '.wbs-pane[data-pane="sessions"] > .wbs-pcard{margin-bottom:0;padding-bottom:4px}',
@@ -17845,6 +19642,19 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '@keyframes wbs-credit-robot-alert{0%,100%{transform:translateY(0)}45%{transform:translateY(-5px)}75%{transform:translateY(1px)}}',
     '.wbs-usage-modal-mask{position:fixed!important;inset:0!important;z-index:2147483647!important;box-sizing:border-box;padding:24px;border-radius:0!important;background:rgba(15,18,24,.36);backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px)}',
     '.wbs-token-stats-modal{width:min(980px,calc(100vw - 48px));max-width:calc(100vw - 48px);height:min(84vh,800px);max-height:calc(100vh - 48px);display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--wb-border-default,rgba(20,24,32,.14));border-radius:16px;padding:0;box-shadow:0 24px 80px rgba(15,18,24,.22)}',
+    '.wbs-usage-board-modal{width:min(1560px,calc(100vw - 48px));max-width:calc(100vw - 48px);height:min(92vh,1120px);max-height:calc(100vh - 48px);display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--wb-border-default,rgba(20,24,32,.14));border-radius:16px;padding:0;box-shadow:0 24px 80px rgba(15,18,24,.22)}',
+    '.wbs-usage-board-head{padding-bottom:15px}',
+    '.wbs-usage-board-acts{display:flex;gap:8px;flex-shrink:0}',
+    '.wbs-usage-board-tag{display:inline-block;margin-left:8px;padding:1px 7px;border:1px solid var(--wb-border-subtle,#eee);border-radius:999px;background:var(--wb-bg-tertiary,#f5f6f8);color:var(--wb-icon-secondary,#667085);font-size:10px;font-weight:500;line-height:1.7;vertical-align:2px}',
+    '.wbs-usage-board-time{margin-left:8px;color:var(--wb-icon-tertiary,#8a8f98);font-size:10.5px;font-weight:400}',
+    '.wbs-usage-board-refresh{flex-shrink:0;height:30px;padding:0 14px;border:1px solid var(--wb-border-default,#e2e4e8);border-radius:7px;background:var(--wb-bg-tertiary,#f5f6f8);color:var(--wb-color-text-primary,#1f1f1f);font:inherit;font-size:11px;cursor:pointer}',
+    '.wbs-usage-board-refresh:disabled{opacity:.55;cursor:wait}',
+    '.wbs-usage-board-refresh:focus-visible{outline:2px solid var(--wbs-primary);outline-offset:2px}',
+    '.wbs-usage-board-body{position:relative;display:flex;flex:1;min-height:0;background:var(--wb-bg-secondary,#fafafa)}',
+    '.wbs-usage-board-frame{display:block;flex:1;width:100%;min-height:0;border:0;background:#fff}',
+    '.wbs-usage-board-overlay{position:absolute;inset:0;z-index:3;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;background:color-mix(in srgb,var(--wb-bg-popover,#fff) 90%,transparent);color:var(--wb-icon-secondary,#667085);font-size:12px;line-height:1.6;text-align:center;white-space:pre-line;overflow-wrap:anywhere}',
+    '.wbs-usage-board-overlay[hidden]{display:none!important}',
+    'html.cb-dark .wbs-usage-board-frame,html[data-theme="dark"] .wbs-usage-board-frame,body[data-vscode-theme-name*="dark" i] .wbs-usage-board-frame{background:#0f1115}',
     '.wbs-usage-header{position:sticky;top:0;z-index:4;flex-shrink:0;padding:20px 22px 0;border-bottom:1px solid var(--wb-border-subtle,#eee);background:color-mix(in srgb,var(--wb-bg-popover,#fff) 94%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}.wbs-usage-scroll{min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;flex:1;padding:8px 22px 22px}.wbs-usage-dashboard{scrollbar-width:none}.wbs-usage-dashboard::-webkit-scrollbar{display:none}.wbs-token-stats-modal>.wbs-modal-actions{flex-shrink:0;padding:13px 22px;border-top:1px solid var(--wb-border-subtle,#eee);background:var(--wb-bg-popover,#fff)}.wbs-token-stats-modal .wbs-token-model-scroll{max-height:280px;overflow-y:auto}.wbs-token-stats-modal .wbs-token-model-scroll:after{display:none}.wbs-credit-query-content{position:relative;min-height:430px}',
     '.wbs-token-stats-head{display:flex;align-items:center;justify-content:space-between;gap:10px}',
     '.wbs-token-source-note{margin:0 0 12px;font-size:11px;line-height:1.6;color:var(--wb-icon-secondary,#667085);overflow-wrap:anywhere}',
@@ -17861,6 +19671,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-token-stats-section{margin-top:20px;border-top:1px solid var(--wb-border-subtle,#eee);padding-top:14px}.wbs-token-stats-section-title{font-size:12.5px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f);margin-bottom:11px}',
     '.wbs-token-stats-chart{display:block;height:176px;overflow-x:auto;overflow-y:hidden;padding:5px 12px;border:1px solid var(--wb-border-subtle,#eee);border-radius:10px;background:var(--wb-bg-secondary,#fafafa);scrollbar-width:none}.wbs-token-stats-chart::-webkit-scrollbar{display:none}.wbs-usage-trend-canvas{display:block;height:166px}.wbs-usage-trend-canvas:focus-visible{outline:2px solid var(--wbs-primary);outline-offset:-3px;border-radius:5px}.wbs-usage-trend-tooltip{width:max-content;min-width:104px;max-width:min(320px,calc(100vw - 20px));display:flex;flex-direction:column;gap:6px;padding:8px 11px;font-size:11px;line-height:1.35;pointer-events:none;white-space:nowrap}.wbs-usage-trend-tooltip[hidden]{display:none}.wbs-usage-trend-tooltip span{color:var(--wb-color-text-secondary,#5f6368)}.wbs-usage-trend-tooltip [data-trend-values]{display:flex;flex-direction:column;gap:3px}.wbs-usage-trend-tooltip [data-trend-values]>div{display:flex;justify-content:space-between;gap:18px}.wbs-usage-trend-tooltip [data-trend-values] span{max-width:180px;overflow:hidden;text-overflow:ellipsis}.wbs-usage-trend-tooltip strong{font-size:13px;font-variant-numeric:tabular-nums}',
     '.wbs-token-model-scroll{position:relative;max-height:250px;overflow-y:auto;scrollbar-width:thin}.wbs-token-model-scroll:after{content:"";position:sticky;display:block;bottom:0;height:28px;margin-top:-28px;background:linear-gradient(to bottom,transparent,color-mix(in srgb,var(--wb-bg-popover,#fff) 92%,transparent));pointer-events:none;opacity:1;transition:opacity .16s}.wbs-token-model-scroll.at-end:after,.wbs-token-model-scroll.no-overflow:after{opacity:0}.wbs-token-stats-table{display:flex;flex-direction:column}.wbs-token-stats-table>div{display:grid;grid-template-columns:minmax(0,1fr) 88px 58px;gap:8px;align-items:center;min-height:30px;border-bottom:1px solid var(--wb-border-subtle,#eee);font-size:11px;color:var(--wb-color-text-secondary,#667085)}.wbs-token-stats-table>div:last-child{border-bottom:0}.wbs-token-stats-table span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wbs-token-stats-table b{color:var(--wb-color-text-primary,#1f1f1f);font-variant-numeric:tabular-nums;text-align:right}.wbs-token-stats-table em{font-style:normal;color:var(--wb-icon-tertiary,#8a8f98);text-align:right}',
+    // T20：思考效率与模型性价比表（模型 × 输出 × tok/s × credit/1k × 每次）
+    '.wbs-perf-table{display:flex;flex-direction:column;border:1px solid var(--wb-border-subtle,#eee);border-radius:10px;overflow:hidden}.wbs-perf-row{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,.9fr) minmax(0,.75fr) minmax(0,.9fr) minmax(0,.75fr);gap:8px;align-items:center;min-height:30px;padding:0 10px;border-bottom:1px solid var(--wb-border-subtle,#eee);font-size:11px;color:var(--wb-color-text-secondary,#667085)}.wbs-perf-row:last-child{border-bottom:0}.wbs-perf-row:nth-child(even){background:var(--wb-bg-secondary,#fafafa)}.wbs-perf-head{font-weight:700;color:var(--wb-color-text-primary,#1f1f1f)}.wbs-perf-head>span+span{text-align:right}.wbs-perf-row>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wbs-perf-row>b{color:var(--wb-color-text-primary,#1f1f1f);font-variant-numeric:tabular-nums;text-align:right;font-weight:600}.wbs-perf-row>em{font-style:normal;color:var(--wb-icon-tertiary,#8a8f98);text-align:right}.wbs-perf-note{margin-top:8px;font-size:11px;line-height:1.55;color:var(--wb-icon-tertiary,#8a8f98)}',
+    // 「模型效率」是**矮**弹窗（一张 5 列表 + 三行脚注），复用 token-stats 的固定 84vh 与
+    // body min-height:410px 会留一大片空白 ⇒ 单独放开高度，让它按内容长高。
+    '.wbs-perf-modal{height:auto;max-height:min(84vh,800px)}.wbs-perf-modal .wbs-token-stats-body{min-height:0}',
     '.wbs-token-stats-loading{min-height:410px;display:flex;align-items:center;justify-content:center;color:var(--wb-icon-secondary,#667085);font-size:12px}.wbs-token-stats-content{position:relative;min-height:410px}.wbs-token-stats-body{min-height:410px}.wbs-token-stats-overlay{position:absolute;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;border-radius:9px;background:color-mix(in srgb,var(--wb-bg-popover,#fff) 38%,transparent);color:var(--wb-icon-secondary,#667085);backdrop-filter:blur(1.5px);-webkit-backdrop-filter:blur(1.5px)}.wbs-token-stats-overlay[hidden],.wbs-token-stats-overlay span[hidden]{display:none!important}.wbs-token-stats-spinner{display:flex;flex-direction:column;align-items:center;gap:10px;color:var(--wb-icon-secondary,#667085);font-size:11px}.wbs-token-stats-spinner svg{width:24px;height:24px;animation:wbs-token-spin .8s linear infinite;color:var(--wb-icon-secondary,#667085)}.wbs-token-stats-spinner circle{fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-dasharray:36 22}@keyframes wbs-token-spin{to{transform:rotate(360deg)}}.wbs-token-stats-empty{font-size:12px;line-height:1.6;color:var(--wb-icon-tertiary,#8a8f98)}.wbs-token-empty-trend{margin:auto;text-align:center}.wbs-token-empty-model{display:flex!important;align-items:center;justify-content:center;min-height:150px;text-align:center}.wbs-token-model-scroll.no-overflow:has(.wbs-token-empty-model){max-height:none}',
     'html.cb-dark #wbs-token-stats-modal,html[data-theme="dark"] #wbs-token-stats-modal,body[data-vscode-theme-name*="dark" i] #wbs-token-stats-modal{color-scheme:dark;background:rgba(0,0,0,.56)}#wbs-token-stats-modal .wbs-token-stats-modal{box-sizing:border-box}.wbs-token-stats-modal{position:relative}.wbs-credit-stats-toolbar{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;font-size:11px;color:var(--wb-icon-secondary,#667085)}.wbs-token-stats-grid.wbs-credit-stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.wbs-credit-chart{height:176px}.wbs-credit-sync{height:auto;min-height:28px;white-space:normal}.wbs-credit-sync-overlay{position:absolute;inset:0;z-index:5;display:flex;align-items:center;justify-content:center;padding:16px;background:color-mix(in srgb,var(--wb-bg-popover,#fff) 84%,transparent);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);border-radius:inherit;pointer-events:auto}.wbs-credit-sync-overlay[hidden],[data-credit-result][hidden],[data-usage-pane][hidden]{display:none!important}.wbs-credit-sync-progress{display:flex;flex-direction:column;align-items:stretch;gap:12px;width:min(100%,340px);font-size:12px;line-height:1.6;overflow-wrap:anywhere;color:var(--wb-color-text-primary,#1f1f1f)}.wbs-credit-sync-progress>span{color:var(--wb-icon-secondary,#667085)}.wbs-credit-sync-progress progress{width:100%;height:8px;accent-color:var(--wb-button-primary-bg,#1f1f1f)}.wbs-credit-sync-progress button{align-self:center}.wbs-usage-tabs button:focus-visible,.wbs-credit-sync:focus-visible{outline:2px solid var(--wb-color-text-primary,#1f1f1f);outline-offset:2px}',
     '@media(max-width:700px){.wbs-usage-modal-mask{padding:12px}.wbs-usage-columns{grid-template-columns:1fr}.wbs-token-stats-modal{width:calc(100vw - 24px);max-width:calc(100vw - 24px);height:calc(100vh - 24px);max-height:calc(100vh - 24px)}.wbs-token-stats-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}',
@@ -17976,6 +19791,85 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // 否则（段窄 + 行程长）会有一半时间只剩空轨道，看起来像卡在 0%。
     '.wbs-space-indet .wbs-sess-progress-fill{width:55%!important;animation:wbs-space-slide 1.5s ease-in-out infinite}',
     '@keyframes wbs-space-slide{0%{transform:translateX(-100%)}100%{transform:translateX(180%)}}',
+    /* ---- md 快速查看器（T30 落地 / T31 改右侧停靠，2026-09-23）----
+       落在 body 直下 + position:fixed。走 .wbs-modal-mask 的居中弹层已是历史形态：
+       用户要「跟官方 md 界面一样，对话自动往左移」，所以改右侧停靠，
+       位移靠给 .conversation-shell 加 margin-right（见 mdqvApplyShift），
+       不参与官方 React 的布局状态，也就不需要碰官方 DOM 结构。 */
+    '.wbs-mdp-dock{position:fixed;right:0;z-index:2147483000;display:flex;flex-direction:column;box-sizing:border-box;min-width:320px;background:var(--wb-bg-popover,#fff);color:var(--wb-color-text-primary,#1f1f1f);border-left:1px solid var(--wb-border-subtle,rgba(20,24,32,.12));box-shadow:-12px 0 32px rgba(20,24,32,.07);overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji","PingFang SC","Microsoft YaHei",sans-serif}',
+    '.wbs-mdp-grip{position:absolute;left:0;top:0;bottom:0;width:8px;cursor:col-resize;touch-action:none;z-index:3}',
+    '.wbs-mdp-grip::after{content:"";position:absolute;left:2px;top:50%;transform:translateY(-50%);width:3px;height:40px;border-radius:3px;background:var(--wb-border-strong,#c9ccd2);opacity:0;transition:opacity .15s}',
+    '.wbs-mdp-grip:hover::after,.wbs-mdp-grip.is-dragging::after{opacity:.85}',
+    '.wbs-mdp-head{display:flex;align-items:flex-start;gap:12px;padding:14px 16px 12px;border-bottom:1px solid var(--wb-border-subtle,rgba(20,24,32,.12));flex:0 0 auto;flex-wrap:wrap}',
+    '.wbs-mdp-titles{min-width:0;flex:1 1 200px}',
+    '.wbs-mdp-file{font-size:14px;font-weight:700;line-height:1.35;color:var(--wb-color-text-primary,#1f1f1f);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.wbs-mdp-meta{margin-top:3px;font-size:11px;line-height:1.5;color:var(--wb-icon-tertiary,#999);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.wbs-mdp-acts{display:flex;align-items:center;gap:6px;flex:0 0 auto;flex-wrap:wrap;justify-content:flex-end}',
+    '.wbs-mdp-btn{flex:0 0 auto;padding:6px 11px;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:8px;background:var(--wb-bg-popover,#fff);color:var(--wb-color-text-primary,#1f1f1f);font:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;transition:background .15s,border-color .15s}',
+    '.wbs-mdp-btn:hover{border-color:var(--wb-border-strong,#bbb);background:var(--wb-bg-hover,#f5f5f5)}',
+    '.wbs-mdp-btn:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:1px}',
+    '.wbs-mdp-btn.is-primary{border-color:transparent;background:var(--wb-accent-blue,#4f86ff);color:#fff}',
+    '.wbs-mdp-body{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:16px 20px 24px;margin-bottom:0;display:block;max-height:none;gap:0}',
+    '.wbs-mdp-doc{font-size:13.5px;line-height:1.72;color:var(--wb-color-text-primary,#1f1f1f);word-wrap:break-word;overflow-wrap:anywhere}',
+    '.wbs-mdp-doc>*:first-child{margin-top:0}',
+    '.wbs-mdp-doc h1,.wbs-mdp-doc h2,.wbs-mdp-doc h3,.wbs-mdp-doc h4,.wbs-mdp-doc h5,.wbs-mdp-doc h6{margin:1.5em 0 .6em;font-weight:700;line-height:1.4}',
+    '.wbs-mdp-doc h1{font-size:1.5em;padding-bottom:.32em;border-bottom:1px solid var(--wb-border-subtle,rgba(20,24,32,.12))}',
+    '.wbs-mdp-doc h2{font-size:1.28em;padding-bottom:.28em;border-bottom:1px solid var(--wb-border-subtle,rgba(20,24,32,.12))}',
+    '.wbs-mdp-doc h3{font-size:1.12em}.wbs-mdp-doc h4{font-size:1em}.wbs-mdp-doc h5,.wbs-mdp-doc h6{font-size:.94em;color:var(--wb-color-text-secondary,#5f626a)}',
+    '.wbs-mdp-doc p{margin:.72em 0}',
+    '.wbs-mdp-doc ul,.wbs-mdp-doc ol{margin:.6em 0;padding-left:1.7em}',
+    '.wbs-mdp-doc li{margin:.28em 0}',
+    '.wbs-mdp-doc li.wbs-mdp-task{list-style:none;margin-left:-1.35em}',
+    '.wbs-mdp-doc li.wbs-mdp-task input{margin-right:.45em;vertical-align:middle}',
+    '.wbs-mdp-doc blockquote{margin:.8em 0;padding:.3em 0 .3em .95em;border-left:3px solid var(--wb-border-default,#e0e0e0);color:var(--wb-color-text-secondary,#5f626a)}',
+    '.wbs-mdp-doc code{padding:.14em .38em;border-radius:4px;background:color-mix(in srgb,var(--wb-border-subtle,#f0f0f0) 72%,transparent);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em}',
+    '.wbs-mdp-pre{margin:.85em 0;padding:11px 13px;border-radius:9px;background:var(--wb-bg-hover,#f6f7f9);border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));overflow-x:auto}',
+    '.wbs-mdp-pre code{padding:0;background:none;font-size:12px;line-height:1.6;white-space:pre}',
+    '.wbs-mdp-tablewrap{margin:.85em 0;overflow-x:auto}',
+    '.wbs-mdp-doc table{border-collapse:collapse;width:100%;font-size:12.5px}',
+    '.wbs-mdp-doc th,.wbs-mdp-doc td{padding:6px 10px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.14));text-align:left;vertical-align:top}',
+    '.wbs-mdp-doc th{background:color-mix(in srgb,var(--wb-border-subtle,#f0f0f0) 62%,transparent);font-weight:650;white-space:nowrap}',
+    '.wbs-mdp-doc hr{margin:1.4em 0;border:0;border-top:1px solid var(--wb-border-subtle,rgba(20,24,32,.14))}',
+    '.wbs-mdp-doc a{color:var(--wb-accent-blue,#4f86ff);text-decoration:none}',
+    '.wbs-mdp-doc a:hover{text-decoration:underline}',
+    '.wbs-mdp-doc img{max-width:100%;height:auto;border-radius:6px}',
+    '.wbs-mdp-local{color:var(--wb-icon-tertiary,#999);font-size:.92em}',
+    '.wbs-mdp-warn{margin:.7em 0;padding:7px 11px;border-radius:8px;border:1px dashed var(--wb-border-default,#dcdcdc);background:color-mix(in srgb,var(--wb-bg-warning,#fdf6e3) 66%,transparent);font-size:12px;color:var(--wb-color-text-secondary,#5f626a)}',
+    '.wbs-mdp-empty{padding:26px 8px;text-align:center;font-size:12.5px;color:var(--wb-icon-tertiary,#999)}',
+    /* ---- T32：代码块顶栏（语言标签 + 复制）+ 语法高亮配色 + 细节拉齐 ---- */
+    '.wbs-mdp-code{margin:.85em 0;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:9px;background:var(--wb-bg-hover,#f6f7f9);overflow:hidden}',
+    '.wbs-mdp-code-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 10px 5px 12px;border-bottom:1px solid var(--wb-border-subtle,rgba(20,24,32,.08));background:color-mix(in srgb,var(--wb-border-subtle,#f0f0f0) 42%,transparent)}',
+    '.wbs-mdp-code-lang{font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--wb-icon-tertiary,#999);text-transform:uppercase}',
+    '.wbs-mdp-code-copy{padding:2px 8px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--wb-color-text-secondary,#5f626a);font:inherit;font-size:11px;line-height:1.6;cursor:pointer;transition:background .15s,color .15s}',
+    '.wbs-mdp-code-copy:hover{background:var(--wb-bg-popover,#fff);color:var(--wb-color-text-primary,#1f1f1f);border-color:var(--wb-border-subtle,rgba(20,24,32,.12))}',
+    '.wbs-mdp-code-copy.is-done{color:var(--wb-accent-green,#2ea043)}',
+    '.wbs-mdp-code .wbs-mdp-pre{margin:0;border:0;border-radius:0;background:transparent}',
+    '.wbs-hl-kw{color:#cf222e}',
+    '.wbs-hl-st{color:#0a3069}',
+    '.wbs-hl-cm{color:#6e7781;font-style:italic}',
+    '.wbs-hl-nu{color:#0550ae}',
+    '.wbs-hl-bi{color:#953800}',
+    '.wbs-hl-fn{color:#8250df}',
+    '.wbs-hl-cl{color:#1f6feb}',
+    '.wbs-hl-va{color:#953800}',
+    '.wbs-mdp-doc ul>li::marker,.wbs-mdp-doc ol>li::marker{color:var(--wb-icon-tertiary,#9aa0a6);font-weight:600}',
+    '.wbs-mdp-doc blockquote{background:color-mix(in srgb,var(--wb-border-subtle,#f0f0f0) 34%,transparent);border-radius:0 6px 6px 0}',
+    '.wbs-mdp-doc kbd{padding:.1em .4em;border:1px solid var(--wb-border-default,#dcdcdc);border-bottom-width:2px;border-radius:4px;background:var(--wb-bg-popover,#fff);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em}',
+    '.wbs-mdp-doc mark{background:#fff3b0;color:inherit;padding:0 .15em;border-radius:2px}',
+    'html.cb-dark .wbs-hl-kw,html[data-theme="dark"] .wbs-hl-kw{color:#ff7b72}',
+    'html.cb-dark .wbs-hl-st,html[data-theme="dark"] .wbs-hl-st{color:#a5d6ff}',
+    'html.cb-dark .wbs-hl-cm,html[data-theme="dark"] .wbs-hl-cm{color:#8b949e}',
+    'html.cb-dark .wbs-hl-nu,html[data-theme="dark"] .wbs-hl-nu{color:#79c0ff}',
+    'html.cb-dark .wbs-hl-bi,html[data-theme="dark"] .wbs-hl-bi{color:#ffa657}',
+    'html.cb-dark .wbs-hl-fn,html[data-theme="dark"] .wbs-hl-fn{color:#d2a8ff}',
+    'html.cb-dark .wbs-hl-cl,html[data-theme="dark"] .wbs-hl-cl{color:#79c0ff}',
+    'html.cb-dark .wbs-hl-va,html[data-theme="dark"] .wbs-hl-va{color:#ffa657}',
+    'html.cb-dark .wbs-mdp-code,html[data-theme="dark"] .wbs-mdp-code{background:rgba(255,255,255,.045);border-color:rgba(255,255,255,.1)}',
+    'html.cb-dark .wbs-mdp-code-bar,html[data-theme="dark"] .wbs-mdp-code-bar{background:rgba(255,255,255,.05)}',
+    'html.cb-dark .wbs-mdp-doc mark,html[data-theme="dark"] .wbs-mdp-doc mark{background:#5c4b00;color:#ffe98a}',
+    'html.cb-dark .wbs-mdp-doc code,html[data-theme="dark"] .wbs-mdp-doc code{background:rgba(255,255,255,.1)}',
+    'html.cb-dark .wbs-mdp-pre,html[data-theme="dark"] .wbs-mdp-pre{background:rgba(255,255,255,.055)}',
+    'html.cb-dark .wbs-mdp-dock,html[data-theme="dark"] .wbs-mdp-dock{background:var(--wb-bg-popover,#202126);color:var(--wb-color-text-primary,#f2f3f5);border-left-color:rgba(255,255,255,.1);box-shadow:-12px 0 32px rgba(0,0,0,.34)}',
   ].join('');
   (document.head || document.documentElement).appendChild(css);
   start();

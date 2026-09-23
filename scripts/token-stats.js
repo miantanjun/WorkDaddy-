@@ -1,8 +1,24 @@
 'use strict';
 
+/**
+ * Token 用量三维统计（日期 × 账号 × 模型）。
+ *
+ * ⚠️ T23（2026-09-23）起本文件遵守 `stats-discipline.js` 的五条工程纪律：
+ *  1. **数字错比报错糟糕** —— 时间戳拿不到**就留空**（不再回落成 `now`），并计入 `undated`
+ *     台账显式暴露。旧实现把「无时间戳的导入行」记到扫描当天，等于把历史搬到今天，
+ *     而用户不会去核对数字。实测本机 60 397 条 usage 行的时间戳覆盖率 = 100%，
+ *     所以这次收紧对真实数字**零位移**，纯粹是把「万一」变成「报出来」。
+ *  2. 只读打开（本文件只 `readFileSync`，不做任何写入）。
+ *  3. 只读头部/尾部 —— 见 `thinking-stats.js`（trace 元信息在 span 之前，读头即可判窗口）。
+ *  4. **参数组合做不到就报错** —— `days` 与 `from` 同时给、只给 `until` 不给 `from`，
+ *     一律抛 `bad-param`，不再「静默挑一个用」。
+ *  5. 命中率口径走 `stats-discipline.cacheHitRate`（`cached/input`，越界自动换分母）。
+ */
+
 const fs = require('fs');
 const path = require('path');
 const { createHash } = require('node:crypto');
+const discipline = require('./stats-discipline.js');
 
 const TOKEN_FIELDS = {
   input: ['input_tokens', 'prompt_tokens', 'inputTokens', 'promptTokens'],
@@ -10,6 +26,11 @@ const TOKEN_FIELDS = {
   cacheRead: ['cache_read_input_tokens', 'cache_read_tokens', 'cacheReadTokens', 'cached_tokens'],
   cacheWrite: ['cache_creation_input_tokens', 'cache_write_tokens', 'cacheWriteTokens'],
 };
+
+// 思维链 token。实测（2026-09-23，本机 88 个 jsonl / 52858 条 usage 行）：
+// `completion_thinking_tokens` 每条 usage 行都有且**只出现一次**；
+// 而 `reasoning_tokens` 会在同一条记录里重复出现 3 次（会算成 3 倍）⇒ 只用前者。
+const THINKING_FIELDS = ['completion_thinking_tokens', 'completionThinkingTokens'];
 
 function numberField(value, fields) {
   for (const field of fields) {
@@ -76,34 +97,34 @@ function localDayString(timestamp) {
   return `${y}-${m}-${d}`;
 }
 
-function timestampValue(value, fallback) {
-  if (typeof value === 'number' && Number.isFinite(value)) return value < 1e12 ? value * 1000 : value;
-  if (typeof value === 'string' && value.trim()) {
-    const numeric = Number(value);
-    if (Number.isFinite(numeric)) return numeric < 1e12 ? numeric * 1000 : numeric;
-    const parsed = Date.parse(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return fallback;
-}
-
-const CACHE_VERSION = 8;
+const CACHE_VERSION = 10; // 10: item 增加 undated 台账（纪律 1）；9: entries 增加 thinking / requestId
 const MAX_CACHE_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function dateBounds(now, options = {}) {
-  const days = Math.max(1, Math.min(MAX_CACHE_DAYS, Number(options.days) || 7));
+  // 纪律 4：参数组合做不到就报错。
+  // 旧实现在「给了 days 又给了 from」时静默用 from、「只给 until 不给 from」时静默忽略 until
+  // —— 两种都是「看起来对、其实答非所问」，而调用方无法察觉。
+  const hasFrom = options.from !== undefined && options.from !== null && options.from !== '';
+  const hasUntil = options.until !== undefined && options.until !== null && options.until !== '';
+  const hasDays = options.days !== undefined && options.days !== null && options.days !== '';
+  discipline.rejectUnsupported(!(hasFrom && hasDays), 'bad-param',
+    'from 与 days 不能同时给：区间要么用 days 反推，要么用 from/until 显式指定', { from: options.from, days: options.days });
+  discipline.rejectUnsupported(!(hasUntil && !hasFrom), 'bad-param',
+    'until 必须与 from 成对出现（只给 until 无法确定窗口起点）', { until: options.until });
+  if (hasDays) discipline.requireIntRange(options.days, 1, MAX_CACHE_DAYS, 'days');
+  const days = hasDays ? Number(options.days) : 7;
   const localStart = new Date(now); localStart.setHours(0, 0, 0, 0);
   localStart.setDate(localStart.getDate() - (days - 1));
   const defaultSince = localStart.getTime();
-  const parsedFrom = options.from ? Date.parse(options.from) : NaN;
-  const parsedUntil = options.until ? Date.parse(options.until) + DAY_MS - 1 : now;
-  if (options.from && !Number.isFinite(parsedFrom)) throw new Error('开始日期无效');
-  if (options.until && !Number.isFinite(parsedUntil)) throw new Error('结束日期无效');
+  const parsedFrom = hasFrom ? Date.parse(options.from) : NaN;
+  const parsedUntil = hasUntil ? Date.parse(options.until) + DAY_MS - 1 : now;
+  if (hasFrom && !Number.isFinite(parsedFrom)) throw discipline.statsError('bad-param', '开始日期无效', { from: options.from });
+  if (hasUntil && !Number.isFinite(parsedUntil)) throw discipline.statsError('bad-param', '结束日期无效', { until: options.until });
   const from = Number.isFinite(parsedFrom) ? parsedFrom : defaultSince;
   const until = Number.isFinite(parsedUntil) ? Math.min(parsedUntil, now) : now;
-  if (from > until) throw new Error('开始日期不能晚于结束日期');
-  if (until - from > MAX_CACHE_DAYS * DAY_MS) throw new Error('日期范围不能超过 90 天');
+  if (from > until) throw discipline.statsError('bad-param', '开始日期不能晚于结束日期');
+  if (until - from > MAX_CACHE_DAYS * DAY_MS) throw discipline.statsError('bad-param', '日期范围不能超过 90 天');
   return { from, until, days };
 }
 
@@ -116,6 +137,8 @@ function parseRecords(root, options = {}) {
   let parseErrors = 0;
   let parsedLines = 0;
   const parseErrorFiles = new Set();
+  // 纪律 1：无时间戳的记录**不猜**。这里只计数留痕，不把它们混进任何日期/账号/模型维度。
+  const undated = discipline.makeUndatedLedger();
   for (const file of files) {
     const relative = path.relative(root, file).split(path.sep).join('/');
     if (options.skipUnchanged && options.knownFileState && options.knownFileState[relative]) {
@@ -144,13 +167,26 @@ function parseRecords(root, options = {}) {
       if (!record || typeof record !== 'object' || record.isSnapshotUpdate) continue;
       const usage = findUsage(record.message && record.message.usage) || findUsage(record.providerData && record.providerData.usage) || findUsage(record);
       if (!usage) continue;
-      const timestamp = timestampValue(record.timestamp || record.created_at || record.createdAt || usage.timestamp, now);
-      if (!Number.isFinite(timestamp) || timestamp < lowerBound || timestamp > upperBound) continue;
       const input = numberField(usage, TOKEN_FIELDS.input);
       const output = numberField(usage, TOKEN_FIELDS.output);
       const cacheRead = numberField(usage, TOKEN_FIELDS.cacheRead);
       const cacheWrite = numberField(usage, TOKEN_FIELDS.cacheWrite);
       if (!(input || output || cacheRead || cacheWrite)) continue;
+      // 纪律 1：时间戳拿不到就**留空**，绝不回落成 `now`。
+      // 旧实现回落成扫描时刻 ⇒ 导入的历史行会在时间轴上跳到今天，
+      // 而且总量仍然对得上（少的那块补到了今天），没人能看出来。
+      // 现在：这类记录不进任何日期维度，但进 `undated` 台账并被显式暴露。
+      const timestamp = discipline.firstTimestamp([record.timestamp, record.created_at, record.createdAt, usage.timestamp]);
+      if (timestamp === discipline.UNKNOWN_TIMESTAMP) {
+        undated.add({ input, output, calls: 1 });
+        continue;
+      }
+      if (timestamp < lowerBound || timestamp > upperBound) continue;
+      // 思维链 token：优先 usage，其次 providerData.rawUsage（WorkBuddy 多数落在这里）
+      const thinking = numberField(usage, THINKING_FIELDS) ||
+        numberField(record.providerData && record.providerData.rawUsage, THINKING_FIELDS);
+      // 记录 id：32 位 hex，是 workbuddy.db `session_usage.credit_json` 的键（实测 54/54 命中）。
+      const recordId = typeof record.id === 'string' && /^[0-9a-f]{32}$/i.test(record.id) ? record.id : '';
       const model = findText(record, ['model', 'modelName', 'model_id', 'modelId']) || findText(usage, ['model', 'modelName', 'model_id', 'modelId']);
       const account = findText(record, ['accountUid', 'accountId', 'uid', 'userId']) || findText(usage, ['accountUid', 'accountId', 'uid', 'userId']);
       // Imports/copies preserve the entire JSONL row. Hash the whole record,
@@ -172,12 +208,18 @@ function parseRecords(root, options = {}) {
         output,
         cacheRead,
         cacheWrite,
+        thinking,
+        recordId,
         calls: 1,
       });
       parsedLines++;
     }
   }
-  return { records, files: files.length, parsedLines, parseErrors, parseErrorFiles: Array.from(parseErrorFiles) };
+  return {
+    records, files: files.length, parsedLines, parseErrors,
+    parseErrorFiles: Array.from(parseErrorFiles),
+    undated: { count: undated.count, tokens: undated.tokens, calls: undated.calls },
+  };
 }
 
 function sessionAccount(options, id) {
@@ -266,6 +308,35 @@ function writeCache(file, payload) {
   } catch (_) { return false; /* cache failure must not break statistics */ }
 }
 
+/** 纪律 5：给一行聚合结果补上命中率（口径见 stats-discipline.cacheHitRate，越界自动换分母） */
+function withHitRate(row) {
+  if (!row) return row;
+  const detail = discipline.cacheHitRateDetail(row.cacheRead, row.input);
+  row.cacheHitRate = detail.rate;
+  row.cacheHitDenominator = detail.denominator;
+  row.cacheHitGuarded = detail.guarded;
+  return row;
+}
+
+/** 调用点表（thinking-stats 用它按时间窗把 trace span 对齐到模型） */
+function buildCallPoints(records, limit = 200000) {
+  const seen = new Set();
+  const points = [];
+  let truncated = false;
+  for (const record of records || []) {
+    if (!record || !record.timestamp || !record.model) continue;
+    // 同一个物理调用会在「副本文件」里重复出现 ⇒ 按 (时间, 模型, 输入, 输出) 去重，
+    // 否则一次调用会变成多个候选点，把「唯一命中」判成「歧义」。
+    const key = record.timestamp + '\u0000' + record.model + '\u0000' + record.input + '\u0000' + record.output;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (points.length >= limit) { truncated = true; break; }
+    points.push({ t: record.timestamp, model: record.model });
+  }
+  points.sort((a, b) => a.t - b.t);
+  return { points, truncated };
+}
+
 function aggregateRecords(records, options = {}) {
   const now = Number(options.now) || Date.now();
   const bounds = dateBounds(now, options);
@@ -305,14 +376,25 @@ function aggregateRecords(records, options = {}) {
     if (!byAccount.has(uid)) byAccount.set(uid, { account: uid, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, nickname: account.nickname || '' });
     else if (account.nickname) byAccount.get(uid).nickname = account.nickname;
   }
+  // 纪律 1 留痕：无时间戳的记录**必须暴露**（`aggregateCachedBuckets` 同款）。
+  // 2026-09-23 修：此前只有缓存路径带 undated/warnings，非缓存路径（scanTokenStats，
+  // CLI 与测试都用它）静默丢掉台账 —— 「留空但不说」等于用户永远看不到少了一块。
+  const undated = options.undated || { count: 0, tokens: 0, calls: 0 };
+  const warnings = [];
+  if (undated.count > 0) {
+    warnings.push(`有 ${undated.count} 条 usage 记录没有可用时间戳（${undated.tokens} token / ${undated.calls} 次调用）——`
+      + '已按纪律留空、不计入任何日期维度（不猜测归到扫描当天）');
+  }
   return {
     source: 'local-workbuddy-jsonl',
     since: bounds.from,
     until: bounds.until,
-    totals,
-    daily: Array.from(byDay.values()).sort((a, b) => a.day.localeCompare(b.day)),
-    models: Array.from(byModel.values()).sort((a, b) => (b.input + b.output) - (a.input + a.output)),
-    accounts: Array.from(byAccount.values()).sort((a, b) => (b.input + b.output) - (a.input + a.output)),
+    totals: withHitRate(totals),
+    daily: Array.from(byDay.values(), withHitRate).sort((a, b) => a.day.localeCompare(b.day)),
+    models: Array.from(byModel.values(), withHitRate).sort((a, b) => (b.input + b.output) - (a.input + a.output)),
+    accounts: Array.from(byAccount.values(), withHitRate).sort((a, b) => (b.input + b.output) - (a.input + a.output)),
+    undated,
+    warnings,
   };
 }
 
@@ -324,11 +406,12 @@ function aggregateBuckets(records) {
     const account = String(record.account || '');
     const model = String(record.model || '');
     const key = day + '\u0000' + account + '\u0000' + model;
-    const bucket = buckets.get(key) || { day, account, model, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
+    const bucket = buckets.get(key) || { day, account, model, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, thinking: 0, calls: 0 };
     bucket.input += Number(record.input) || 0;
     bucket.output += Number(record.output) || 0;
     bucket.cacheRead += Number(record.cacheRead) || 0;
     bucket.cacheWrite += Number(record.cacheWrite) || 0;
+    bucket.thinking += Number(record.thinking) || 0;
     bucket.calls += Number(record.calls) || 1;
     buckets.set(key, bucket);
   }
@@ -342,7 +425,7 @@ function aggregateCachedBuckets(buckets, options = {}) {
   const modelFilter = String(options.model || '').trim();
   const firstDay = localDayString(bounds.from);
   const lastDay = localDayString(bounds.until);
-  const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
+  const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, thinking: 0, calls: 0 };
   const byDay = new Map();
   const byModel = new Map();
   const byAccount = new Map();
@@ -357,21 +440,22 @@ function aggregateCachedBuckets(buckets, options = {}) {
       output: Number(bucket.output) || 0,
       cacheRead: Number(bucket.cacheRead) || 0,
       cacheWrite: Number(bucket.cacheWrite) || 0,
+      thinking: Number(bucket.thinking) || 0,
       calls: Number(bucket.calls) || 0,
     };
     for (const key of Object.keys(totals)) totals[key] += values[key];
     const day = String(bucket.day);
     dailyBreakdown.push({ day, account: String(bucket.account || ''), model: String(bucket.model || ''), ...values });
-    const dayRow = byDay.get(day) || { day, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
+    const dayRow = byDay.get(day) || { day, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, thinking: 0, calls: 0 };
     for (const key of Object.keys(values)) dayRow[key] += values[key];
     byDay.set(day, dayRow);
     if (bucket.model) {
-      const modelRow = byModel.get(bucket.model) || { model: bucket.model, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
+      const modelRow = byModel.get(bucket.model) || { model: bucket.model, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, thinking: 0, calls: 0 };
       for (const key of Object.keys(values)) modelRow[key] += values[key];
       byModel.set(bucket.model, modelRow);
     }
     if (bucket.account) {
-      const accountRow = byAccount.get(bucket.account) || { account: bucket.account, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
+      const accountRow = byAccount.get(bucket.account) || { account: bucket.account, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, thinking: 0, calls: 0 };
       for (const key of Object.keys(values)) accountRow[key] += values[key];
       byAccount.set(bucket.account, accountRow);
     }
@@ -380,15 +464,24 @@ function aggregateCachedBuckets(buckets, options = {}) {
   for (const account of accountOptions) {
     const uid = String(account && (account.uid || account.account) || '').trim();
     if (!uid) continue;
-    if (!byAccount.has(uid)) byAccount.set(uid, { account: uid, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, nickname: account.nickname || '' });
+    if (!byAccount.has(uid)) byAccount.set(uid, { account: uid, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, thinking: 0, calls: 0, nickname: account.nickname || '' });
     else if (account.nickname) byAccount.get(uid).nickname = account.nickname;
   }
+  const undated = options.undated || { count: 0, tokens: 0, calls: 0 };
+  const warnings = [];
+  if (undated.count > 0) {
+    warnings.push(`有 ${undated.count} 条 usage 记录没有可用时间戳（${undated.tokens} token / ${undated.calls} 次调用）——`
+      + '已按纪律留空、不计入任何日期维度（不猜测归到扫描当天）');
+  }
   return {
-    source: 'local-workbuddy-jsonl', since: bounds.from, until: bounds.until, totals,
-    daily: Array.from(byDay.values()).sort((a, b) => a.day.localeCompare(b.day)),
+    source: 'local-workbuddy-jsonl', since: bounds.from, until: bounds.until,
+    totals: withHitRate(totals),
+    daily: Array.from(byDay.values(), withHitRate).sort((a, b) => a.day.localeCompare(b.day)),
     dailyBreakdown: dailyBreakdown.sort((a, b) => a.day.localeCompare(b.day) || a.account.localeCompare(b.account) || a.model.localeCompare(b.model)),
-    models: Array.from(byModel.values()).sort((a, b) => (b.input + b.output) - (a.input + a.output)),
-    accounts: Array.from(byAccount.values()).sort((a, b) => (b.input + b.output) - (a.input + a.output)),
+    models: Array.from(byModel.values(), withHitRate).sort((a, b) => (b.input + b.output) - (a.input + a.output)),
+    accounts: Array.from(byAccount.values(), withHitRate).sort((a, b) => (b.input + b.output) - (a.input + a.output)),
+    undated,
+    warnings,
   };
 }
 
@@ -404,6 +497,7 @@ function scanTokenStatsCached(root, options = {}) {
   const currentFiles = walkJsonl(root, options.maxFiles || 5000);
   const todayFiles = {};
   let parsedLines = 0, parseErrors = 0;
+  const undated = { count: 0, tokens: 0, calls: 0 };
   const parseErrorFiles = new Set();
   for (const currentFile of currentFiles) {
     const relative = path.relative(root, currentFile).split(path.sep).join('/');
@@ -417,12 +511,17 @@ function scanTokenStatsCached(root, options = {}) {
       const parsed = parseRecords(root, { ...options, now, lowerBound: cutoff, upperBound: now,
         files: [currentFile] });
       item = { mtimeMs: stat.mtimeMs, size: stat.size, entries: parsed.records,
-        parsedLines: parsed.parsedLines, parseErrors: parsed.parseErrors, parseErrorFiles: parsed.parseErrorFiles };
+        parsedLines: parsed.parsedLines, parseErrors: parsed.parseErrors, parseErrorFiles: parsed.parseErrorFiles,
+        // 纪律 1 留痕：无时间戳的条目**不进 entries**（null 比较是地雷），只留计数
+        undated: parsed.undated };
     }
     item.entries = item.entries.filter(entry => entry.timestamp >= cutoff);
     todayFiles[relative] = item;
     parsedLines += item.parsedLines || 0;
     parseErrors += item.parseErrors || 0;
+    undated.count += (item.undated && item.undated.count) || 0;
+    undated.tokens += (item.undated && item.undated.tokens) || 0;
+    undated.calls += (item.undated && item.undated.calls) || 0;
     for (const errorFile of item.parseErrorFiles || []) parseErrorFiles.add(errorFile);
   }
   const records = Object.values(todayFiles).flatMap(item => item.entries);
@@ -430,10 +529,17 @@ function scanTokenStatsCached(root, options = {}) {
   const cacheReady = writeCache(file, { version: CACHE_VERSION, generatedAt: now, cutoff,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     historicalBuckets: [], todayFiles });
-  const stats = aggregateCachedBuckets(buckets, { ...options, now });
-  return { ...stats, files: currentFiles.length, parsedLines, parseErrors,
+  const stats = aggregateCachedBuckets(buckets, { ...options, now, undated });
+  const result = { ...stats, files: currentFiles.length, parsedLines, parseErrors,
     parseErrorFiles: Array.from(parseErrorFiles), cached: hadValidCache, cacheHit: hadValidCache,
     cacheReady, cacheGeneratedAt: hadValidCache ? cache.generatedAt : now };
+  // 调用点表按需构建：三维看板不需要它（会白占 400 KB 响应），只有 thinking-stats 要。
+  if (options.withCallPoints) {
+    const built = buildCallPoints(records, Number(options.callPointLimit) || 200000);
+    result.callPoints = built.points;
+    result.callPointsTruncated = built.truncated;
+  }
+  return result;
 }
 
 function scanTokenStats(root, options = {}) {
@@ -441,8 +547,11 @@ function scanTokenStats(root, options = {}) {
   const bounds = dateBounds(now, options);
   const parsed = parseRecords(root, { ...options, now, lowerBound: bounds.from,
     upperBound: bounds.until, legacyParseErrors: true });
-  const stats = aggregateRecords(distinctRecords(parsed.records, options), { ...options, now });
+  const stats = aggregateRecords(distinctRecords(parsed.records, options), { ...options, now, undated: parsed.undated });
   return { ...stats, files: parsed.files, parsedLines: parsed.parsedLines, parseErrors: parsed.parseErrors };
 }
 
-module.exports = { tokenStatsCacheReady, scanTokenStats, scanTokenStatsCached, findUsage, walkJsonl, dateBounds };
+module.exports = {
+  tokenStatsCacheReady, scanTokenStats, scanTokenStatsCached, findUsage, walkJsonl, dateBounds,
+  THINKING_FIELDS, localDayString, buildCallPoints, CACHE_VERSION,
+};

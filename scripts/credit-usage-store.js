@@ -362,9 +362,41 @@ function createCreditUsageStore(options = {}) {
     try { fs.chmodSync(dbPath, 0o600); } catch (_) {}
   }
 
+  /**
+   * 按**模型**聚合权威积分（T20 用）。
+   *
+   * 为什么单独开一个方法：其它接口都只按 uid / 日期聚合，而「模型性价比」需要
+   * 「这个模型花了多少 credit」。**必须用 `credit_usage_records.model` 直接 SUM**，
+   * 不能拿 token 占比去摊派会话级 credit —— 摊派是在编数据（纪律「数字错比报错糟糕」）。
+   * 实测本机该列有值率 100%（690 条 / 9 个模型）。
+   *
+   * @param {string} fromDate YYYY-MM-DD（含）
+   * @param {string} toDate   YYYY-MM-DD（含）
+   * @returns {Promise<Array<{model:string, credit:number, count:number}>>}
+   */
+  async function listModelUsageRange(fromDate, toDate) {
+    await initialize();
+    const from = validDate(fromDate);
+    const to = validDate(toDate);
+    if (from > to) throw new Error('用量日期范围无效');
+    const rows = await db.all(
+      `SELECT model, ROUND(SUM(credit), 6) AS credit, COUNT(*) AS count
+       FROM credit_usage_records
+       WHERE profile_id = ? AND usage_date >= ? AND usage_date <= ?
+       GROUP BY model ORDER BY credit DESC`,
+      [profileId, from, to]
+    );
+    return rows.map((row) => ({
+      model: String(row.model || ''),
+      credit: Number(row.credit) || 0,
+      count: Number(row.count) || 0,
+    })).filter((row) => row.model);
+  }
+
   return {
     dailyUsageForUid,
     listDailyUsageRange,
+    listModelUsageRange,
     getDailyCheckin,
     listDailyCheckins,
     getSyncState,

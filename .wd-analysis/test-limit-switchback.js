@@ -261,10 +261,18 @@ function makeSandbox(options) {
 const sandbox = makeSandbox({});
 const SUCCESS = { ok: true, fromUid: 'A', toUid: 'B', toNickname: '账号B', modelId: 'm1', taskSource: 'lastUserMessage', tried: ['B'], verdict: { hit: false } };
 
+// ⚠️ 必须**合并本次运行写出的所有日志文件**，不能只取「最后一个」：
+// 文件名带日期（`WorkDaddy-账号切换日志-YYYY-MM-DD.txt`），而本套件用假时钟做 9 分钟级等待 ⇒
+// 真实墙钟一旦跨越本地午夜，同一次运行里就会同时产出 `-09-23` 与 `-09-24` 两个文件；
+// 而 `readdirSync` 给的是**字典序**（不是 mtime），日期大的排最后 ⇒ 只取最后一个会**漏掉前半场**
+// 写下的断言依据。2026-09-23 23:57 实测撞上：W4「找不到主账号」那段落在 `-09-23` 里，
+// 而 logText() 读的是 `-09-24` ⇒ W4c 假红（产品行为本身正确，是这条断言取错了文件）。
 function logText() {
-  const files = fs.readdirSync(desktopDir).filter((n) => n.indexOf('账号切换日志') >= 0);
+  const files = fs.readdirSync(desktopDir)
+    .filter((n) => n.indexOf('账号切换日志') >= 0)
+    .sort();
   if (!files.length) return '';
-  return fs.readFileSync(path.join(desktopDir, files[files.length - 1]), 'utf8');
+  return files.map((n) => fs.readFileSync(path.join(desktopDir, n), 'utf8')).join('');
 }
 function clearLogs() { fs.readdirSync(desktopDir).forEach((n) => fs.unlinkSync(path.join(desktopDir, n))); }
 async function waitLast(sb, timeoutMs) {
