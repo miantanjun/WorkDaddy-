@@ -22,7 +22,16 @@
 
 **质量门**：回归 **45 套件 / 3210 断言全绿**；护栏 `tools/updater-guard.js` **18 PASS**；mac 打包白名单**传递闭包**自查 **60 可达 / 0 缺失**；daemon `1.7.0`（buildId `release-1.7.0-20260923-session-titles-r1`）已按 **pid** 重启并活体验证；上游基线 `1.2.5`。
 
-**发布**：待 CI 完成后回填（tag `v1.7.0`）。
+**发布**：GitHub Release [`v1.7.0`](https://github.com/miantanjun/WorkDaddy-/releases/tag/v1.7.0)（tag 指向 `baf8e07`），CI run [`35885761328`](https://github.com/miantanjun/WorkDaddy-/actions/runs/35885761328) **19 步全绿**，4 资产齐备：
+
+| 资产 | 大小 | SHA-256 |
+|---|---|---|
+| `WorkDaddy-Setup-1.7.0.exe` | 27.7 MB | `cb2ed505a4caa462e7ca7221a564bd788a77302d171e2bcaf11359467acc0de1` |
+| `WorkDaddy-AI-Setup-1.7.0.exe` | 27.7 MB | `cf01cbc2bceb058d579fbe15937b1e40bbdb5dc762d45ae667a0c853883de946` |
+| `WorkDaddy-Portable-1.7.0.zip` | 39.0 MB | `e4f0eb8041f9befeeeb1190fb0d429380370c3f372e134ea5b809c337c603d9c` |
+| `WorkDaddy-AI-Portable-1.7.0.zip` | 39.0 MB | `f95dd191c47984bde299ed44c2f0a35dd2c0b09b8438d37f15256c39a3744340` |
+
+发版后**实下载便携版复验**（不只看 CI 绿）：便携 ZIP 39.0 MB / **175 条目**，本地 SHA-256 与 Release `digest` **逐字节一致**；本版 6 个新模块 `session-titles.js` / `session-cost.js` / `stats-discipline.js` / `thinking-stats.js` / `usage-unified.js` / `usage-board-html.js` **均在包内且正文可读**（§36.6：条目名明文可搜，正文是 deflate、必须真解压读）；包内 `daemon.js` 版本 `1.7.0` / buildId `release-1.7.0-20260923-session-titles-r1`；`package.json` 与 `package-lock.json` **三处** version 同为 `1.7.0`（`ws` 仍 `8.21.3`）；`inject.js` 含 `wbs-mdp-dock` / `wbs-sess-token-rate` / `wbs-perf-` 三个特征串。
 
 ### 新增功能
 
