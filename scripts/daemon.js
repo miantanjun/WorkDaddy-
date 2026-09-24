@@ -8526,6 +8526,65 @@ async function openConversationById(sessionId, timeoutMs) {
   if (!id || !cdp.connected) return false;
   const budgetMs = Math.min(300000, Math.max(3000, Number(timeoutMs) || 15000));
   const startedAt = Date.now();
+
+  /* ---------------- 快路径：直调官方会话导航（上游 1.2.6「切换账号自动激活之前的会话」） ----------------
+   * 下面的兜底是「模拟用户点击」：滚侧栏、按候选轮换点 `_card_`、等 20s 加载、唤醒收起侧栏……
+   * 那一整串补丁都是为了绕开**点击本身的不确定性**（renderer 有三条静默 no-op 分支）。
+   * 官方导航 handler / SDK 不同：它是「发起动作」，不需要这些绕行。
+   *
+   * ⚠️ 认成功必须**可验证**，缺一不可，否则原样回落到点击循环：
+   *   ① renderer 报「拿到的是官方 handler / SDK」（authoritative === true）。
+   *      `adapter.emit('jump-to-conversation')` 那条给老版本留的退路**不算**：它返回 true
+   *      但不保证真的导航，而它的 authoritative 恰好是 false ⇒ 这里天然被排除。
+   *   ② `activate()` 之后要**轮询确认目标会话的控制器真的挂上了** —— 判据与下面的点击
+   *      循环**同源**（`controller.conversationId === id`）。这是「打开了」的定义，
+   *      不是「调用没抛错」。
+   *   ③ 任何一步不成立（没 compat / 没官方 handler / activate 返回 false / 抛错 / 超时）
+   *      ⇒ 走下面老流程，逐行为与今天一致。
+   * 快路径耗时**不计入**「找行」预算（与侧栏唤醒同理：它是前置动作本身的时间）。
+   */
+  try {
+    const fastWaitMs = Math.min(2500, Math.max(600, Math.floor(budgetMs / 4)));
+    const fastExpr = (activate) =>
+      '(function(){try{' +
+      'var id=' + JSON.stringify(id) + ';' +
+      'var compat=window.__wbsWorkBuddyCompat;' +
+      'if(!compat||typeof compat.findConversationActivationApi!=="function")return {ok:false,reason:"no-compat"};' +
+      'var api=null;try{api=compat.findConversationActivationApi(document)}catch(e){api=null}' +
+      'if(!api||api.authoritative!==true)return {ok:false,reason:"no-authoritative-api"};' +
+      (activate
+        ? 'var activated=false;try{activated=api.activate(id)}catch(e){activated=false}' +
+          'if(!activated)return {ok:false,reason:"activate-false"};'
+        : '') +
+      'var opened=false;var cids="";' +
+      'try{var cs=(compat.findConversationControllers&&compat.findConversationControllers(document))||[];' +
+      'for(var q=0;q<cs.length;q++){var cid=String(cs[q].conversationId||"");' +
+      'if(cid){cids+=(cids?",":"")+cid.slice(0,8)}' +
+      'if(cid===id){opened=true;break}}}'+ 'catch(e){}' +
+      'return {ok:true,opened:opened,controllers:cids};' +
+      '}catch(e){return {ok:false,reason:String(e&&e.message||e)}}})()';
+    const fastSent = await runCdpExpression(fastExpr(true), { awaitPromise: false }).catch(() => null);
+    if (fastSent && fastSent.ok) {
+      const fastUntil = Date.now() + fastWaitMs;
+      let fastOpened = !!fastSent.opened;
+      let fastDiag = fastSent;
+      while (!fastOpened && Date.now() < fastUntil) {
+        await sleep(250);
+        const again = await runCdpExpression(fastExpr(false), { awaitPromise: false }).catch(() => null);
+        if (again) fastDiag = again;
+        if (again && again.ok && again.opened) { fastOpened = true; break; }
+      }
+      if (fastOpened) {
+        log('[session-open] 已打开 id=' + id + ' 用时 ' + (Date.now() - startedAt) + 'ms 点击=0 轮次=0 方式=official'
+          + ' controllers=[' + String((fastDiag && fastDiag.controllers) || '') + ']');
+        return true;
+      }
+      // 官方导航发出去了但目标没落地（例如 renderer 正在加载）⇒ 交给点击循环，它本来就会等。
+      log('[session-open] 官方导航未落地 id=' + id + ' 用时=' + (Date.now() - startedAt) + 'ms ⇒ 回落点击循环'
+        + ' controllers=[' + String((fastDiag && fastDiag.controllers) || '') + ']');
+    }
+  } catch (_) { /* 快路径的任何异常都不阻断老流程 */ }
+
   // 候选按「实测有效度」排序：_card_ 是唯一在半就绪状态下被证明有效的那个。
   const picks = [
     'hit.querySelector(\'[class*="_card_"]\')',
@@ -16186,6 +16245,24 @@ function handleApiRoute(req, res) {
         catch (busy) { const conflict = new Error(busy.message); conflict.statusCode = 409; throw conflict; }
         const sourceAccount = currentAccount() || {};
         const sourceUid = String(sourceAccount.uid || '').trim();
+        // A9（上游 1.2.6）：renderer 可以把「切换前正在看的会话」带过来。
+        // ⚠️ 但那个 id 可能残留着**别的**账号的会话（投影未刷新时的常见残留）⇒
+        // **必须**用会话索引证明它属于**正在被替换的源账号**才准用。
+        // 验证不过/查不到 ⇒ 丢掉（不报错、不影响切换），下面聚焦回落到「找带 selected 类的行」老路径。
+        let carriedSessionId = '';
+        if (sourceUid) {
+          const rawCarried = String((body && body.currentConversationId) || '').trim();
+          if (rawCarried && rawCarried.length >= 8 && rawCarried.length <= 128) {
+            try {
+              const ownerRow = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id = ? AND deleted_at IS NULL LIMIT 1;', [rawCarried]);
+              const owner = String((ownerRow && ownerRow[0] && ownerRow[0].user_id) || '').trim();
+              if (owner && owner === sourceUid) carriedSessionId = rawCarried;
+              else log('[switch] 丢弃不属于源账号的当前会话 session=' + rawCarried.slice(0, 8) + ' owner=' + (owner ? owner.slice(0, 8) : '?') + ' source=' + sourceUid.slice(0, 8));
+            } catch (e) {
+              log('[switch] 当前会话所有权校验失败，已忽略该入参: ' + String((e && e.message) || e));
+            }
+          }
+        }
         const acct = switchTo(DATA_DIR, uid, log);
         const hint = '登录文件已切换，请重启 WorkBuddy 使新账号生效';
         let reloaded = false;
@@ -16195,29 +16272,46 @@ function handleApiRoute(req, res) {
           let sourceSessionTitle = '';
           try {
             if (cdp.connected) {
+              // A9 的落点：带过来的 id 通过所有权校验时，**按 id 精确定位那一行**读标题。
+              // 老路径「找带 selected 类的行」依赖「selected 类与真实选中态同步」——这个假设
+              // 在切号前后未必成立（正是上游要修的场景）。两段文本抽取逻辑完全一致，只换「选哪一行」。
               const titleExpr =
                 '(function(){' +
-                'var list = document.querySelector(".conversation-list");' +
-                'if (!list) return "";' +
-                'var rows = list.querySelectorAll(".conversation-item");' +
-                'for (var i = 0; i < rows.length; i++) {' +
-                '  var r = rows[i];' +
-                '  if ((r.className || "").indexOf("selected") === -1) continue;' +
-                '  var best = "";' +
-                '  var els = r.querySelectorAll("*");' +
-                '  for (var j = 0; j < els.length; j++) {' +
-                '    var el = els[j];' +
-                '    if (el.children.length === 0) {' +
-                '      var t = (el.textContent || "").trim();' +
-                '      if (t.length > best.length) best = t;' +
+                'var wanted = ' + JSON.stringify(carriedSessionId) + ';' +
+                'var row = null;' +
+                'if (wanted) {' +
+                '  try {' +
+                '    var all = document.querySelectorAll("[data-conversation-id]");' +
+                '    for (var a = 0; a < all.length; a++) {' +
+                '      if (all[a].getAttribute("data-conversation-id") === wanted) { row = all[a]; break; }' +
                 '    }' +
-                '  }' +
-                '  if (best) return best;' +
+                '  } catch (_) {}' +
                 '}' +
-                'return "";' +
+                'if (!row) {' +
+                '  var list = document.querySelector(".conversation-list");' +
+                '  if (!list) return "";' +
+                '  var rows = list.querySelectorAll(".conversation-item");' +
+                '  for (var i = 0; i < rows.length; i++) {' +
+                '    var r = rows[i];' +
+                '    if ((r.className || "").indexOf("selected") === -1) continue;' +
+                '    row = r; break;' +
+                '  }' +
+                '}' +
+                'if (!row) return "";' +
+                'var best = "";' +
+                'var els = row.querySelectorAll("*");' +
+                'for (var j = 0; j < els.length; j++) {' +
+                '  var el = els[j];' +
+                '  if (el.children.length === 0) {' +
+                '    var t = (el.textContent || "").trim();' +
+                '    if (t.length > best.length) best = t;' +
+                '  }' +
+                '}' +
+                'return best;' +
                 '})()';
               const t = await cdpSend('Runtime.evaluate', { expression: titleExpr, returnByValue: true });
               sourceSessionTitle = String((t && t.result && t.result.value) || '').trim();
+              if (sourceSessionTitle) log('[switch] 会话聚焦来源=' + (carriedSessionId ? 'id(已过所有权校验)' : 'dom-selected') + ' title=' + JSON.stringify(sourceSessionTitle.slice(0, 60)));
             }
           } catch (_) { /* 读不到就跳过自动聚焦会话 */ }
           try {

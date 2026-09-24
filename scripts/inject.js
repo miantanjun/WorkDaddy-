@@ -11901,7 +11901,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
                   api('/api/switch', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ uid: uid, reload: true }),
+                    body: JSON.stringify({ uid: uid, reload: true, currentConversationId: acSwitchConversationId() }),
                   })
                     .then(function (switched) {
                       if (cancelled) return;
@@ -12734,6 +12734,17 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             /_copyButton_|_ratingButton_|_actionButton_|_shareButton_|_moreButton_/i.test(String(el.className || ''))) return true;
       }
       return false;
+    }
+
+    // A9：把「切换前正在看的会话」带给 daemon。daemon 侧**必须**用会话索引证明它属于
+    // 正在被替换的源账号才准用（投影未刷新时这个 id 可能是别的账号的残留）。
+    // 读不到就返回空串 —— 不能为了「带上一个 id」把切换本身拖挂。
+    function acSwitchConversationId() {
+      try {
+        var compat = window.__wbsWorkBuddyCompat;
+        if (!compat || typeof compat.getSelectedConversationId !== "function") return "";
+        return String(compat.getSelectedConversationId(document) || "").trim();
+      } catch (_) { return ""; }
     }
 
     function acHasErrorSignal(row) {
@@ -16532,7 +16543,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           api('/api/switch', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uid: btn.dataset.uid, reload: true }),
+            body: JSON.stringify({ uid: btn.dataset.uid, reload: true, currentConversationId: acSwitchConversationId() }),
           })
             .then(function (r) {
               var autoCopy = r && r.autoCopy;
@@ -16776,7 +16787,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         if (button.disabled) return;
         button.disabled = true;
         button.textContent = '切换中…';
-        api('/api/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: candidate.uid, reload: true }) })
+        api('/api/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: candidate.uid, reload: true, currentConversationId: acSwitchConversationId() }) })
           .then(function (result) {
             closeRotationNotice();
             toast('已切换为「' + (result.nickname || candidate.nickname || candidate.uid) + '」', false, root);
