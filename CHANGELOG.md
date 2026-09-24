@@ -24,7 +24,23 @@
 
 **基线核验**（唯一有效证据，不看「有没有新版」那个布尔）：`GET /api/update-check` → `upstreamVersion 1.2.6 === upstreamLatest 1.2.6`、`upstreamError null`、`checkedVia api`、`upstreamHasUpdate false`。
 
-**发布**：待补（CI 与 Release 完成后回填）。
+**发布**：GitHub Release [`v1.8.0`](https://github.com/miantanjun/WorkDaddy-/releases/tag/v1.8.0)（tag 指向 `25cdcde`），
+CI run [`35980452866`](https://github.com/miantanjun/WorkDaddy-/actions/runs/35980452866) **19 步全绿**（约 4 分 53 秒）。
+
+| 资产 | 大小 | SHA-256 |
+|---|---|---|
+| `WorkDaddy-Setup-1.8.0.exe` | 27.7 MB | `c6176dc583deb5020c6b156df139601ecefa0a9ec78bad08d34f71dfd0e4a8d7` |
+| `WorkDaddy-AI-Setup-1.8.0.exe` | 27.7 MB | `2b884bbcc28448ba6c9969a23191a25e651565ff82a818cc4f20300984aa7226` |
+| `WorkDaddy-Portable-1.8.0.zip` | 39.0 MB | `31b3697c2bb626cdfa4a1a35a79acfcaf4d65acc7ba7ced422eac0925ec5069f` |
+| `WorkDaddy-AI-Portable-1.8.0.zip` | 39.0 MB | `222d9c507f5016779ca65cd0ec93a3289b60ab2ecea2c8d49dcb89325f494226` |
+
+发版后**实下载便携版复验**（不只看 CI 绿）：便携 ZIP 39.0 MB / **176 条目**（v1.7.1 为 175，本版**新增 1 个模块** `session-dirty.js`），
+本地 SHA-256 与 Release `digest` **逐字节一致**、文件头 `PK`；包内 `package.json` 与 `package-lock.json` 三处均为 `1.8.0`（`ws` 仍钉 `8.21.3`）；
+包内 `daemon.js` 为 `1.8.0` / `UPSTREAM_VERSION = '1.2.6'` / buildId `release-1.8.0-20260924-upstream-126-absorbed-r1`；
+并且**六批吸纳的特征串都能在包内源码正文里读到**（真解压读，不只看条目名）：
+`lib.js` 的 `[wd-compat]` 适配层、`daemon.js` 的 token 接线与 `/api/sessions/dirty` 与所有权校验与官方导航快路径、
+`inject.js` 的中断判据与脏追踪器与切号带 id、`automation-runtime.js` 的 `expectedReceipt`、
+`session-sync.js` 的延迟重读与 `session-meta` 排除与 `SKIP_LOCAL_DIR`、以及新增的 `session-dirty.js`。
 
 ### 新增功能
 
