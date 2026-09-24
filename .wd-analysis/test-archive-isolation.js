@@ -8,6 +8,11 @@
  *   ③ 其他账号上的归档副本在「该账号为当前登录账号」时被清掉
  * 不变量 I-1：全表 archived 行只允许属于主账号。
  *
+ * 2026-09-24 补（来源②）：待清理集合由两个来源合成 ——
+ *   来源① `rows`：其他账号**自己带 archived** 的行；
+ *   来源② `leakedRows`：主账号 archived lineage 在其他账号上的**活行（不限 status）**。
+ * 只查①会漏掉「先取消归档 → 切号复制 → 再归档」留下的 completed 副本（技能 §33.6）。
+ *
  * 四组：
  *   A 纯函数（lib.pickArchivedCrossAccountTargets，真跑）
  *   B 源码接线（daemon.js / lib.js 文本断言 + 行尾）
@@ -117,6 +122,51 @@ console.log('\n[A] pickArchivedCrossAccountTargets 纯函数');
   check('A15 非法行被忽略（null / 空 id 不计入任何一组）',
     junk.keep.length === 1 && junk.targets.length === 1 && junk.orphanArchived.length === 0,
     'keep=' + junk.keep.length + ' targets=' + junk.targets.length + ' orphan=' + junk.orphanArchived.length);
+
+  /* --- 来源② leakedRows：主账号 archived lineage 在其他账号上的活行（不限 status）--- */
+  const leakIndex = { a1: 'L1', b1: 'L1' };
+  const leakMembers = { L1: [{ uid: A, id: 'a1' }, { uid: B, id: 'b1' }] };
+  const leakRows = [{ id: 'a1', uid: A, title: '主账号这份', updatedAt: 11 }];
+  const leak = lib.pickArchivedCrossAccountTargets({
+    rows: leakRows,
+    leakedRows: [{ id: 'b1', uid: B, title: 'B 的活副本', status: 'completed', updatedAt: 12 }],
+    lineageBySession: leakIndex, membersByLineage: leakMembers, primaryUid: A,
+  });
+  check('A16 leakedRows：他账号 completed 活副本进 targets 且 via=leaked-copy',
+    leak.targets.length === 1 && leak.targets[0].id === 'b1' && leak.targets[0].via === 'leaked-copy'
+    && leak.targets[0].status === 'completed', JSON.stringify(leak.targets));
+  check('A17 leakedRows 命中时 keep 仍是主账号那份、不产生 orphan',
+    leak.keep.length === 1 && leak.keep[0].id === 'a1' && leak.orphanArchived.length === 0);
+
+  const both = lib.pickArchivedCrossAccountTargets({
+    rows: [{ id: 'a1', uid: A }, { id: 'b1', uid: B }],
+    leakedRows: [{ id: 'b1', uid: B, status: 'archived' }],
+    lineageBySession: leakIndex, membersByLineage: leakMembers, primaryUid: A,
+  });
+  check('A18 同一行同时出现在两个来源 → 去重成 1 条（保留 archived-copy 那条）',
+    both.targets.length === 1 && both.targets[0].via === 'archived-copy', JSON.stringify(both.targets.map((t) => t.via)));
+
+  const guard = lib.pickArchivedCrossAccountTargets({
+    rows: [{ id: 'a1', uid: A }],
+    leakedRows: [
+      { id: 'a1', uid: A, status: 'completed' },
+      { id: 'zz', uid: '', status: 'completed' },
+      { id: 'yy', uid: B, status: 'completed' },
+    ],
+    lineageBySession: leakIndex, membersByLineage: leakMembers, primaryUid: A,
+  });
+  check('A19 leakedRows 里「主账号自己 / 无归属 / 血缘对不上」一律不删（宁可漏删不可误删）',
+    guard.targets.length === 0, JSON.stringify(guard.targets));
+  check('A20 未设主账号时 leakedRows 也不处理',
+    lib.pickArchivedCrossAccountTargets({
+      rows: [], leakedRows: [{ id: 'b1', uid: B }],
+      lineageBySession: leakIndex, membersByLineage: leakMembers, primaryUid: '',
+    }).targets.length === 0);
+  check('A21 不传 leakedRows 时与旧行为逐字等价（向后兼容）', (() => {
+    const r = lib.pickArchivedCrossAccountTargets({ rows, lineageBySession, membersByLineage, primaryUid: A });
+    return r.keep.length === 1 && r.targets.length === 2 && r.orphanArchived.length === 0
+      && r.targets.every((t) => t.via === 'archived-copy');
+  })());
 }
 
 /* ------------------------------- B 组 ------------------------------- */
@@ -183,6 +233,22 @@ console.log('\n[B] 源码接线');
   })());
   check('B23 拍子状态文件与只读报告都能看到 lastRunAt',
     daemonSrc.includes('archive-isolation.json') && /lastRunAt: Number\(archiveIsolation\.lastRunAt\)/.test(daemonSrc));
+  check('B24 来源① 仍在：collectArchivedCopyState 查「全表 archived 活行」',
+    /WHERE deleted_at IS NULL AND status = 'archived';/.test(daemonSrc));
+  check('B25 来源② 新增：collectArchivedCopyState 有 leakedRows 第二次查询（按 lineage 正向筛）',
+    /const leakedRows = \[\];/.test(daemonSrc)
+    && /FROM sessions WHERE deleted_at IS NULL AND id IN \(/.test(daemonSrc));
+  check('B26 collectArchivedCopyState 把 leakedRows 一起返回',
+    /return \{ rows, leakedRows, lineageBySession, membersByLineage \};/.test(daemonSrc));
+  check('B27 三处调用点都透传 state.leakedRows（列表 / 手动清理 / 拍子）',
+    (daemonSrc.match(/leakedRows: state\.leakedRows,/g) || []).length === 3,
+    '命中 ' + (daemonSrc.match(/leakedRows: state\.leakedRows,/g) || []).length + ' 次');
+  check('B28 只收「登记归属 == 库内 user_id」的行（防元数据漂移误删他人会话）',
+    /expectUid !== realUid \|\| realUid === primaryUid/.test(daemonSrc));
+  check('B29 报告 / 拍子台账 / 拍子写回三处都暴露 leakedCount（可观测）',
+    /leakedCount: picked\.targets\.filter\(\(item\) => item\.via === 'leaked-copy'\)\.length,/.test(daemonSrc)
+    && /leakedCount: Number\(archiveIsolation\.leakedCount\) \|\| 0,/.test(daemonSrc)
+    && /archiveIsolation\.leakedCount = picked\.targets\.filter/.test(daemonSrc));
 }
 
 /* ------------------------------- C 组 ------------------------------- */
@@ -271,6 +337,24 @@ async function groupC() {
   const c8 = await run({ current: 'third-uid' });
   check('C12 当前账号没有归档副本 → 不误删别人的（该账号这份不在此次清单里）',
     c8.calls.length === 0 && c8.result.purged === 0);
+
+  /* --- 来源②（2026-09-24 补漏）：他账号上是 completed 的活副本也要被清 --- */
+  const leakState = async () => ({
+    rows: [{ id: 'a1', uid: PRIMARY, title: 'A', updatedAt: 1 }],
+    leakedRows: [{ id: 'b1', uid: OTHER, title: 'B 的活副本', status: 'completed', updatedAt: 2 }],
+    lineageBySession, membersByLineage,
+  });
+  const k1 = await run({ collectState: leakState });
+  check('C13 他账号那份是 completed（不带 archived）→ 仍然清掉 1 份',
+    k1.result.purged === 1 && k1.calls.length === 1 && k1.calls[0].id === 'b1', JSON.stringify(k1.result));
+  check('C14 这条路径同样 by=archive-isolation（日志可归因）', k1.calls[0].by === 'archive-isolation');
+
+  const k2 = await run({ collectState: leakState, current: PRIMARY });
+  check('C15 主账号上仍不动作（skipped=on-primary，0 次删除）',
+    k2.result.skipped === 'on-primary' && k2.calls.length === 0);
+
+  const k3 = await run({ collectState: async () => ({ rows: [], leakedRows: [], lineageBySession: {}, membersByLineage: {} }) });
+  check('C16 两个来源都空时行为不变（不删、lastRunAt 仍推进）', k3.calls.length === 0 && k3.state.lastRunAt > 0);
 }
 
 /* ------------------------------- D 组 ------------------------------- */

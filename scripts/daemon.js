@@ -518,7 +518,12 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //           scripts/session-cost.js（GET /api/session-cost，会话页成本卡）。
 //         · 前端侧（inject.js 热更，与本常量无关）：md 快速查看器（右侧停靠 + 接管自动打开）、
 //           token 速度读数、运维弹出层与面板缩放。
-const DAEMON_VERSION = '1.7.0';
+// 1.7.1：归档跨账号隔离补漏 —— 清理目标集合从「其他账号自己带 archived 的行」扩为
+//        「+ 主账号 archived lineage 在其他账号上的【活行】（不限 status）」。
+//        修的是「先取消归档 → 切号复制 → 再归档」留下的 completed 副本自动与手动都清不掉
+//        （技能 §33.6）。落点：collectArchivedCopyState 加 leakedRows 第二次查询 +
+//        lib.pickArchivedCrossAccountTargets 加第二来源分支（via='leaked-copy'）。
+const DAEMON_VERSION = '1.7.1';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.5';
@@ -541,7 +546,7 @@ const UPSTREAM_VERSION = '1.2.5';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.7.0-20260923-session-titles-r1';
+const DAEMON_BUILD_ID = 'release-1.7.1-20260924-archive-isolation-leak-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -7507,7 +7512,54 @@ async function collectArchivedCopyState() {
   } catch (error) {
     log('[archive-isolation] 读取血缘登记失败: ' + String((error && error.message) || error));
   }
-  return { rows, lineageBySession, membersByLineage };
+  // ② 主账号 archived 行的 lineage 在**其他账号**上的活行（不限 status）。
+  //    原实现只查 `status='archived'` 的行，而 R1 切断 status 传播后其他账号的副本永远是
+  //    completed ⇒ 「先取消归档 → 切号复制 → 再归档」留下的漏网副本整片扫不到（技能 §33.6）。
+  //    这里按 lineage 正向筛：宁可只收「主账号那份此刻确为 archived」的那些，绝不扩大误删面。
+  const leakedRows = [];
+  const primaryUid = String(primaryAccountStore.get() || '').trim();
+  if (primaryUid) {
+    const archivedLineages = new Set();
+    for (const row of rows) {
+      if (row.uid !== primaryUid) continue;
+      const lineageId = String(lineageBySession[row.id] || '');
+      if (lineageId) archivedLineages.add(lineageId);
+    }
+    const wanted = [];
+    const wantedIds = new Set();
+    for (const lineageId of archivedLineages) {
+      for (const member of (membersByLineage[lineageId] || [])) {
+        if (!member || !member.id || member.uid === primaryUid) continue;
+        if (wantedIds.has(member.id)) continue;
+        wantedIds.add(member.id);
+        wanted.push({ id: String(member.id), uid: String(member.uid || '') });
+      }
+    }
+    if (wanted.length) {
+      const placeholders = wanted.map(() => '?').join(',');
+      const live = await sqliteQuery(
+        'SELECT id, user_id, title, custom_title, status, updated_at FROM sessions WHERE deleted_at IS NULL AND id IN (' + placeholders + ');',
+        wanted.map((member) => member.id)
+      );
+      const declaredUid = new Map(wanted.map((member) => [member.id, member.uid]));
+      for (const row of live) {
+        const id = String(row.id || '');
+        if (!id) continue;
+        const expectUid = String(declaredUid.get(id) || '');
+        const realUid = String(row.user_id || '');
+        // 双保险：登记归属与库里的 user_id 必须一致，否则宁可漏删（防元数据漂移把别人的会话删了）
+        if (!expectUid || !realUid || expectUid !== realUid || realUid === primaryUid) continue;
+        leakedRows.push({
+          id,
+          uid: realUid,
+          title: String(row.custom_title || row.title || ''),
+          status: String(row.status || ''),
+          updatedAt: Number(row.updated_at || 0),
+        });
+      }
+    }
+  }
+  return { rows, leakedRows, lineageBySession, membersByLineage };
 }
 
 /** 只读报告：主账号该留的 / 其他账号该清的 / 归类不明只上报的 */
@@ -7520,6 +7572,7 @@ async function listArchivedCrossAccountCopies() {
     rows: state.rows,
     lineageBySession: state.lineageBySession,
     membersByLineage: state.membersByLineage,
+    leakedRows: state.leakedRows,
     primaryUid,
   });
   return {
@@ -7527,6 +7580,7 @@ async function listArchivedCrossAccountCopies() {
     primaryUid: primaryUid || null,
     currentUid: currentUid || null,
     onPrimary: !!(primaryUid && currentUid === primaryUid),
+    leakedCount: picked.targets.filter((item) => item.via === 'leaked-copy').length,
     enabled: archiveIsolationEnabled(),
     intervalMs: ARCHIVE_ISOLATION_INTERVAL_MS,
     maxPerRun: ARCHIVE_ISOLATION_MAX_PER_RUN,
@@ -7540,6 +7594,7 @@ async function listArchivedCrossAccountCopies() {
       lastError: String(archiveIsolation.lastError || ''),
       pendingForCurrent: Number(archiveIsolation.pendingForCurrent) || 0,
       orphanCount: Number(archiveIsolation.orphanCount) || 0,
+      leakedCount: Number(archiveIsolation.leakedCount) || 0,
       skipped: String(archiveIsolation.skipped || ''),
       inFlight: archiveIsolationInFlight === true,
     },
@@ -7547,7 +7602,9 @@ async function listArchivedCrossAccountCopies() {
     targets: picked.targets,
     orphanArchived: picked.orphanArchived,
     note: '归档只属于主账号（不变量 I-1）。其他账号上的归档副本要切到该账号登录态才能删 —— '
-      + '云端删除按当前登录账号鉴权，非登录态删本地只会让会话被云端以普通身份拉回列表。',
+      + '云端删除按当前登录账号鉴权，非登录态删本地只会让会话被云端以普通身份拉回列表。'
+      + 'targets 含两类（用 item.via 区分）：archived-copy＝该账号自己带 archived 的行；'
+      + 'leaked-copy＝主账号已归档 lineage 在该账号上的活行（不限 status，2026-09-24 补的漏网副本）。',
   };
 }
 
@@ -7596,6 +7653,7 @@ async function purgeArchivedCrossAccountCopies(options = {}) {
     rows: state.rows,
     lineageBySession: state.lineageBySession,
     membersByLineage: state.membersByLineage,
+    leakedRows: state.leakedRows,
     primaryUid,
   });
   const wanted = Array.isArray(options.uids) ? options.uids.map((uid) => String(uid || '').trim()).filter(Boolean) : [];
@@ -7663,9 +7721,11 @@ async function sweepArchivedCopies() {
       rows: state.rows,
       lineageBySession: state.lineageBySession,
       membersByLineage: state.membersByLineage,
+      leakedRows: state.leakedRows,
       primaryUid,
     });
     archiveIsolation.orphanCount = picked.orphanArchived.length;
+    archiveIsolation.leakedCount = picked.targets.filter((item) => item.via === 'leaked-copy').length;
     if (currentUid === primaryUid) {
       // 主账号上的归档是**合法**的（「归档只在主账号进行」）：只统计、不动作。
       archiveIsolation.pendingForCurrent = 0;

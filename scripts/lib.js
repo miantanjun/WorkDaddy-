@@ -1003,12 +1003,21 @@ function removeAutoCopySessionMember(dataDir, lineageId, uid, sessionId) {
 // 归档跨账号隔离的清单计算（纯函数、零 IO；daemon 只负责喂数据）。
 //
 // 不变量 I-1：全表 `sessions.status='archived'` 的行只允许属于主账号。
-// 于是「其他账号上的 archived 行」= 需要清理的副本；但删之前必须确认
-// **同 lineage 的主账号成员此刻也是 archived** —— 否则那份内容可能只存在于这个账号里，
-// 删了就真没了（归入 orphanArchived，只上报、不自动删）。
+//
+// 待清理集合由**两个来源**合成，缺一不可：
+//   ① `rows`       —— 全表「自己就带 archived」的活行。主账号那份进 keep；其他账号那份在
+//                     「同 lineage 主账号此刻也 archived」时进 targets；判不出来源的进
+//                     orphanArchived（只上报、不自动删）。
+//   ② `leakedRows` —— 主账号 archived 行的 lineage 在**其他账号上的活行（不限 status）**。
+// ⚠️ 为什么必须补 ②（2026-09-24 实测缺口）：归档隔离的 R1 刻意切断 status 的跨账号传播，
+//    其他账号的副本于是**永远停在 completed**；那么「先取消归档 → 切号复制 → 再归档」留下的
+//    那份 completed 副本，靠 ① 的 SQL（`status='archived'`）**永远扫不到** ⇒ targets 恒 0、
+//    自动拍子与面板手工清理都够不着（技能 §33.6）。② 只做最后一道归属与血缘校验，真正
+//    「同 lineage 且主账号那份确为 archived」的前置筛选在 daemon 侧 collectArchivedCopyState 完成。
 function pickArchivedCrossAccountTargets(input) {
   const src = input && typeof input === 'object' ? input : {};
   const rows = Array.isArray(src.rows) ? src.rows : [];
+  const leakedRows = Array.isArray(src.leakedRows) ? src.leakedRows : [];
   const primaryUid = String(src.primaryUid || '').trim();
   const lineageBySession = src.lineageBySession && typeof src.lineageBySession === 'object' ? src.lineageBySession : {};
   const membersByLineage = src.membersByLineage && typeof src.membersByLineage === 'object' ? src.membersByLineage : {};
@@ -1043,10 +1052,34 @@ function pickArchivedCrossAccountTargets(input) {
     const lineageId = String(lineageBySession[id] || '');
     const primaryId = lineageId ? String(primaryArchivedByLineage[lineageId] || '') : '';
     if (lineageId && primaryId && primaryId !== id) {
-      targets.push(Object.assign({}, item, { lineageId, primaryId }));
+      targets.push(Object.assign({}, item, { lineageId, primaryId, status: 'archived', via: 'archived-copy' }));
     } else {
       orphanArchived.push(Object.assign({}, item, { lineageId, reason: lineageId ? 'primary-not-archived' : 'no-lineage' }));
     }
+  }
+  // ② 主账号 archived lineage 在其他账号上的活行（不限 status）：把「漏网副本」也纳入清理。
+  for (const row of leakedRows) {
+    if (!row || !row.id) continue;
+    const id = String(row.id);
+    if (seen.has(id)) continue;
+    const uid = String(row.uid || '');
+    // 只处理「确属其他账号」的行：无归属、未设主账号、或其实属于主账号的一律不碰
+    if (!uid || !primaryUid || uid === primaryUid) continue;
+    const lineageId = String(lineageBySession[id] || '');
+    const primaryId = lineageId ? String(primaryArchivedByLineage[lineageId] || '') : '';
+    // 血缘与「主账号那份」必须都能对上才敢删 —— 对不上就整条丢掉，宁可漏删不可误删
+    if (!lineageId || !primaryId || primaryId === id) continue;
+    seen.add(id);
+    targets.push({
+      id,
+      uid,
+      title: String(row.title || ''),
+      updatedAt: Number(row.updatedAt || 0),
+      lineageId,
+      primaryId,
+      status: String(row.status || ''),
+      via: 'leaked-copy',
+    });
   }
   return { keep, targets, orphanArchived };
 }

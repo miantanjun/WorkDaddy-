@@ -25,7 +25,7 @@ const SUITES = [
   ['test-stats-t20-discipline.js', 139],  // 2026-09-23 T23（统计工程纪律五条）+ T20（思考效率与模型性价比）：宁缺勿猜（时间戳不留空回落/派生指标 null 不是 0/undated 台账）+ 只读打开（含写模式反向守卫）+ 只读头尾（单行 JSON 头部探测回归）+ 参数组合报错 + 命中率分母守卫 + 模型归属两路径（歧义/无候选/多模型一律不摊派）+ 三源合成派生口径精确 + credit 只来自权威表（含反向守卫）+ 缓存增量与版本号重建 + daemon/inject/i18n 接线静态守卫
   ['test-scheduled-send.js', 184],
   ['test-schedule-verify.js', 254],
-  ['test-archive-isolation.js', 63],
+  ['test-archive-isolation.js', 79],  // v1.3.8 归档仅主账号（63）；v1.7.1 补来源②：主账号 archived lineage 在其他账号上的【活行】（不限 status）也纳入清理，修「先取消归档→切号复制→再归档」留下的 completed 副本清不掉（+16）
   ['test-session-open.js', 87],   // v1.3.9/1.3.10：session.open 迷你 renderer 仿真；v1.3.13 加侧栏收起态
   ['test-copy-manifest.js', 96],  // v1.3.11：空间扫描 → 复制排队清单 → 排序；H4/H4b 拆开新鲜度口径
   ['test-send-verify.js', 81],    // v1.3.12 草稿核验 / 1.3.14 composerSendExpr / 1.3.15 草稿残留 / 1.3.16 busy 落定
