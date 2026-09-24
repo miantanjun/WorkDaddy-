@@ -16,6 +16,38 @@
 
 ---
 
+## v1.7.1 —— 2026-09-24
+
+**本版主题**：**归档副本清得掉** —— 归档跨账号隔离补漏，修掉一类**自动与手动都删不掉的残留副本**。触发顺序只有三步：在主账号**取消归档 → 切到其他账号（副本这时被复制过去）→ 再回主账号归档**。
+
+**质量门**：回归 **45 套件 / 3226 断言全绿**（v1.7.0 为 3210，本版 +16）；护栏 `tools/updater-guard.js` **18 PASS**；daemon `1.7.1`（buildId `release-1.7.1-20260924-archive-isolation-leak-r1`）已按 **pid** 重启并**活体验证**；上游基线 `1.2.5`。
+
+**发布**：GitHub Release [`v1.7.1`](https://github.com/miantanjun/WorkDaddy-/releases/tag/v1.7.1)（tag 指向 `7b50701`），CI run [`35965017053`](https://github.com/miantanjun/WorkDaddy-/actions/runs/35965017053) **19 步全绿**（`06:32:55Z → 06:35:57Z`，约 3 分 2 秒），4 资产齐备：
+
+| 资产 | 大小 | SHA-256 |
+|---|---|---|
+| `WorkDaddy-Setup-1.7.1.exe` | 27.7 MB | `c7e1b58ce0ffcba7804bab2dfc14fcd1d8f1bfc055249ecdbcadbeea4ec546db` |
+| `WorkDaddy-AI-Setup-1.7.1.exe` | 27.7 MB | `b5b00e94c0852a26fefb6036b7f9c70791b69e10141936a71cb2a48076811d33` |
+| `WorkDaddy-Portable-1.7.1.zip` | 39.0 MB | `e937521905e9a1e7546073a70603927bf9c72542309b1b988a701128682eefdd` |
+| `WorkDaddy-AI-Portable-1.7.1.zip` | 39.0 MB | `00a2dfadb196ed9603edb780ad030c505b3c11d343c9dc078ca00f9f93d86d45` |
+
+发版后**实下载便携版复验**（不只看 CI 绿）：便携 ZIP 39.0 MB / **175 条目**（与 v1.7.0 同数 —— 本版**没有新增模块**，只改了两个已有模块），本地 SHA-256 与 Release `digest` **逐字节一致**、文件头 `PK`；包内 `package.json` 与 `package-lock.json` **三处** version 同为 `1.7.1`（`ws` 仍 `8.21.3`）；包内 `daemon.js` version `1.7.1` / buildId `release-1.7.1-20260924-archive-isolation-leak-r1`；**本版修复本体在包内可读**（条目标题只是名字，正文是 deflate、必须真解压读）—— 包内 `lib.js`（93 157 B）含 `const leakedRows = Array.isArray(src.leakedRows)` / `via: 'leaked-copy'` / `via: 'archived-copy'`，包内 `daemon.js`（900 450 B）含 `const leakedRows = [];` / `return { rows, leakedRows, lineageBySession, membersByLineage };` / `expectUid !== realUid || realUid === primaryUid`；`inject.js` 三个特征串 `wbs-mdp-dock` / `wbs-sess-token-rate` / `wbs-perf-` 仍在。
+
+### 缺陷修复
+
+| 项 | 内容 | 落地位置 |
+|---|---|---|
+| **漏网归档副本自动与手动都清不掉** | 触发只需三步：主账号**取消归档 → 切号（副本此时被复制过去）→ 再归档**。根因是两条设计叠在一起：① 归档隔离**刻意不跨账号传播 `status`**（传播了就等于「其他账号也归档了」，破坏不变量 I-1）；② 清理清单 `collectArchivedCopyState` 的 SQL 是 `WHERE deleted_at IS NULL AND status = 'archived'` —— **只查「自己就带 archived」的行**。于是其他账号那份永远停在 `completed`，②永远扫不到它 ⇒ `targets` 恒 0，**自动拍子够不着**；而面板手工清理 `/api/sessions/archived-copies/purge` 走的是**同一个纯函数**，也够不着。实测：177 账号上那份副本（alive / `completed`）切回后 1 分钟仍在。**修法（方案 A：对齐语义）**：清理目标集合补**第二个来源** —— 主账号**已归档血缘**在其他账号上的**活行（不限 status）**。删前两道校验：血缘必须两向对得上（登记的血缘存在，且主账号那份此刻确为 `archived`），且**登记归属必须等于库内 `user_id`**（防元数据漂移把他人的会话删了）—— 对不上就整条丢掉，**宁可漏删不可误删**。报告与台账新增 `leakedCount` 可观测；`targets` 每条带 `via` 区分来源（`archived-copy` = 该账号自己带 archived 的行；`leaked-copy` = 主账号已归档血缘在该账号上的活行）。**活体验证**：daemon 重启至 1.7.1 后 `leakedCount` 1 → 0、`totalPurged` 10 → 11，日志 `[archive-isolation] 登录账号 028cbdf0 上清掉 1 份归档副本（归档只属于主账号）`。 | `scripts/daemon.js`（`collectArchivedCopyState` 加 `leakedRows` 第二次查询；只读列表 / 手动清理 / 拍子三处调用点各透传一次；报告与台账加 `leakedCount`；`DAEMON_VERSION` 1.7.0 → 1.7.1、`DAEMON_BUILD_ID` 换新）、`scripts/lib.js`（`pickArchivedCrossAccountTargets` 加第二来源分支，命中标 `via: 'leaked-copy'`，`targets` 补 `status` 字段）、`scripts/package.json` + `scripts/package-lock.json`（version → 1.7.1） |
+
+### 工程与文档
+
+| 项 | 内容 | 落地位置 |
+|---|---|---|
+| 回归套件补 16 条 | **A 组纯函数 6 条**：`leakedRows` 进 `targets` 且 `via='leaked-copy'`；两来源同时命中**去重且保留 `archived-copy`** 那条；「主账号自己 / 无归属 / 血缘对不上」一律不删；未设主账号时不处理；**不传 `leakedRows` 时与旧行为逐字等价**（向后兼容）。**B 组源码接线 6 条**：两个来源 SQL 并存；三处调用点各透传一次 `state.leakedRows`；双校验表达式在位；三处 `leakedCount` 可观测（报告 / 台账读 / 台账写）。**C 组端到端 4 条**：他账号 `completed` 活副本仍被清掉；这条路径同样 `by=archive-isolation`（日志可归因）；主账号上仍不动作（`skipped=on-primary`）；两来源都空时行为不变。 | `.wd-analysis/test-archive-isolation.js`、`.wd-analysis/run-regression-all.js`（预期 63 → 79） |
+| 排障手册补 §33.6 | 把「漏网副本」的根因、触发顺序、三种修法取舍（A 对齐语义 / B 传播 status / C 只修面板）与可复用的诊断脚本写进 `workdaddy-maintain` 技能（不入库）。 | 技能 `references/06-会话同步与副本.md` |
+
+---
+
 ## v1.7.0 —— 2026-09-23
 
 **本版主题**：**用量看得清 + 报告读得快** —— 统一用量看板（账号/模型/日期三维筛选、积分走权威源、会话排行显示**真实会话名**）、单会话成本卡、md 快速查看器、模型效率面板、token 速度读数；并修掉看板三处口径错误（「总 token 虚增 ≈+98%」「总积分虚增 ≈49 倍」「账号 × 模型归属全错」）。
