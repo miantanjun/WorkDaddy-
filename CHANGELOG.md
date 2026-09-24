@@ -16,6 +16,61 @@
 
 ---
 
+## v1.8.0 —— 2026-09-24
+
+**本版主题**：**追平上游 1.2.6** —— 上游基线从 `1.2.5` 提到 **`1.2.6`**，把「WorkBuddy 5.6 适配 + 会话同步提速」这个上游大版本按六批全部吸纳；同时修掉 5.6 引入的两处真实故障。
+
+**质量门**：回归 **51 套件 / 3511 断言全绿**（v1.7.1 为 45 / 3226，本版 +6 套件 / +285 断言）；护栏 `tools/updater-guard.js` **18 PASS**；打包白名单传递闭包 **61 可达模块 / 0 缺失**；daemon `1.8.0`（buildId `release-1.8.0-20260924-upstream-126-absorbed-r1`）已按 pid 重启并活体验证。
+
+**基线核验**（唯一有效证据，不看「有没有新版」那个布尔）：`GET /api/update-check` → `upstreamVersion 1.2.6 === upstreamLatest 1.2.6`、`upstreamError null`、`checkedVia api`、`upstreamHasUpdate false`。
+
+**发布**：待补（CI 与 Release 完成后回填）。
+
+### 新增功能
+
+| 项 | 内容 | 落地位置 |
+|---|---|---|
+| **WorkBuddy 5.6+ 字段加密适配** | 5.6 起客户端把 `nickname` / `phoneNumber` / `accessToken` / `refreshToken` 写成 `$wbEncrypted` **信封**（AES-256-GCM）。新增 `[wd-compat]` 只读解密层：密钥只经子进程管道回传（`ELECTRON_RUN_AS_NODE=1` 跑官方 Electron 求值）、内存缓存、**绝不落盘绝不写日志**；解不开就**保留原值**并让界面降级成「(已加密)」占位。**账号备份仍写密文原样**（`backupAuthFile` 改 `copyFileSync` + `chmod 0600`），`refreshAccountBackupToken` 的刷新结果**只进内存缓存不回写**（`persisted:false`）—— 不在插件目录里制造明文 token 副本。已在本机客户端升到 **5.6.2** 后用**真信封**验收：账号列表 / 积分 / 切号 / 成长全绿，账号文件仍全是密文。 | `scripts/lib.js`（`[wd-compat]` 段）、`scripts/daemon.js`（25 处 token 接线 + `refreshAccountBackupToken`） |
+| **会话激活直调官方导航** | 打开会话原先只有「模拟用户点击」一条路（滚侧栏、按候选轮换点 `_card_`、等 20s 加载、唤醒收起侧栏……那一整套补丁都是为了绕开点击本身的不确定性）。现改为**优先直调官方会话导航 handler / SDK**，且**只在可验证时**认成功 —— 必须确认目标会话的控制器真的挂上（判据与点击循环同源）；拿不到官方能力 / `activate` 返回 false / 没落地 ⇒ **原样回落到点击循环**，老路径零行为变化。 | `scripts/daemon.js` `openConversationById` |
+| **异常中断的任务更容易续跑** | 原先只按「还在跑」过滤，一个**已经停下但本该续跑**的会话（错误 UI / 网络类错误 / 结构化未终局 / 明确未终局）在绑定阶段就被当成历史会话丢掉 ⇒ 判定层一次都走不到；它又不会再产生新回复 ⇒「等新回复」成了一条**死等待**（关掉再打开开关也无效，因为重开只是在同一条卡住的回复上重建 baseline）。现补上「已停下但可续跑」判据，并与判定层**共用同一份映射**，保证「允许绑定的会话」永远等于「会被续跑的会话」。 | `scripts/inject.js` |
+| **会话同步少做无用功（接线就绪）** | 新增脏标记索引：只把 renderer 生命周期 feed 里**真的变了**的会话标脏（账号 reload 的全量状态抖动、以及「只是打开了一下」造成的 `lastActivityAt` 漂移都**不算脏**），daemon 侧据此少做扫描。⚠️ 本批是**接线就绪 + 开关默认关**，真正的提速要配合行修订号体系（见「优化调整」里的说明）。 | `scripts/session-dirty.js`（新增）、`scripts/daemon.js`、`scripts/inject.js` |
+
+### 缺陷修复
+
+| 项 | 内容 | 落地位置 |
+|---|---|---|
+| **升级 5.6 后自动化「发送并等待」被误打断** | WorkBuddy 5.6 起会把「乐观 user 消息」换成正式 ID（CDP 实测本机 5.6.2 当前会话 **15 条 user 里 10 条 `id !== requestId`**，且消息带 `_optimistic` / `_optimisticRequestId`）。旧实现用 `id \|\| requestId` 定位、且只比对这一个字段 ⇒ ID 一换就与回执对不上、抛「会话已有其他请求，已停止等待」。现改为**按稳定的 `requestId` 绑定本轮回执**。真机差分验收：同一份真实数据下**旧逻辑抛错、新逻辑不抛**。 | `scripts/automation-runtime.js`、`scripts/daemon.js` |
+| **会话同步对「一次投影抖动」过敏感** | 5.6 下会话文件会**短暂暴露**而账号投影尚未稳定；单次采样判分叉会**生成重复副本**（用户看到「多出一个同名会话」）。现改为对同一目标按 100 / 200 / 400 ms 递增退避**延迟重读**，读通了就用重读结论；读完仍是冲突才新建物理会话。 | `scripts/session-sync.js`（上游原文，随重定基到手） |
+| **「打开/恢复会话」被误判成正文变化** | WorkBuddy 每次打开/恢复会话都会追加 `session-meta` 生命周期记录，旧版把它当「正文变了」⇒ 误判需同步、严重时**误报分叉**。现从语义上把这类记录**排除出比较域**；同批还拿到 `SKIP_LOCAL_DIR`（只排回滚副本 `modify_backup` 与 `.modify_backup_meta`），与本地原有的「整段排除 `workspace/sessions`」互补。 | `scripts/session-sync.js`（上游原文，随重定基到手） |
+
+### 优化调整
+
+| 项 | 内容 | 落地位置 |
+|---|---|---|
+| **`session-sync.js` 重定基到 1.2.6** | 上游把这份文件从 427 行重写到 937 行（异步读取族、符号链接处理、进度回调）。本地这份是 **fixture + delta 表的产物**：新增 `fixtures/session-sync.upstream-1.2.6.js`、迁移 7 条 delta（其中两条锚点在新版各命中 2 次 —— 上游新增了异步孪生 `readSnapshotAsync` —— 用相邻唯一行**钉死作用域**，继续满足「恰好命中 1 次」的守卫），重新生成后 `[A]` provenance 锁绿。 | `.wd-analysis/fixtures/*`、`scripts/session-sync.js` |
+| **零冲突套用 4 项** | `workbuddy-compat.js` / `session-db.js` / `credit-history-sync.js` 三份**实测与上游 1.2.5 逐字节一致**（⇒ 整份套用不可能丢本地定制），加新增 `session-dirty.js`。新模块按纪律做三件事：转 CRLF、补 mac 白名单**两处**、同步回归套件预期数。 | `scripts/*.js`、`scripts/build-mac-dmg.sh` |
+| **切号重聚焦改为按 id 精确定位** | 切号后要「在新账号里打开原来那个会话」。旧实现读**选中行**的标题文本再按标题找；现在 renderer 会把「切换前正在看的会话 id」带给 daemon，daemon **用会话索引证明它属于正在被替换的源账号**才准用（投影未刷新时该 id 可能是**别的账号**的残留），并据此**按 id 定位那一行**；id 不可用 / 定位不到一律回落老路径，逐行为不变。 | `scripts/daemon.js` `/api/switch`、`scripts/inject.js` |
+| **脏索引：为什么只接线不开闸** | 上游 1.2.109 原文：**「暂停持久化指纹快路径，恢复完整比较，避免旧映射误判」—— 上游自己回滚过这条路**；1.2.114–1.2.124 才用「行修订号 + 启动批量校准 + `fingerprintVersion:2` 门控」把它安全做回来。本仓的映射**没有** fingerprintVersion / revision 体系 ⇒ 规划期快路径的第三道门控**永远不成立** ⇒ 今天零行为变化。这是刻意的：只摘「跳过扫描」那一半而不要门控，就是上游回滚过的那条错路。真正的提速要等行修订号体系落地，而它压在 `copySessionRecord` 的 **I-1 红线上**（「全表 `status='archived'` 只允许属于主账号」），单独一轮做。 | `scripts/daemon.js` |
+
+### 工程与文档
+
+| 项 | 内容 | 落地位置 |
+|---|---|---|
+| 回归套件 +6 | 新增 `test-session-monitor.js`（55）、`test-session-activation.js`（36）、`test-session-dirty-wiring.js`（49）；扩充 `test-session-sync-124.js` 74 → 80、`test-wb-encrypted-compat.js` 56 → 60、`test-archive-isolation.js` 63 → 79。 | `.wd-analysis/` |
+| 修掉一个**测试脚手架**的环境缺陷 | 本沙箱里「给子进程建 stdin 管道」的 spawn 一律 `EBUSY`（同一二进制从 bash 直接跑正常）。三个套件因此失败，其中一个的症状是**静默少 8 条断言**（异常被 `catch` 吞掉，不报错只跳过）—— 只看退出码永远发现不了。三处改为显式 `stdio: ['ignore','pipe','pipe']` / 落文件再执行，断言本身一条未改。 | `.wd-analysis/test-build-pin.js` 等 |
+| 版本基线对齐 | `UPSTREAM_VERSION` 1.2.5 → **1.2.6**；`README.md` 基线/版本行同步（漏了不报错、不红测试，只会静静显示过期基线与误报「上游有新版」）。 | `scripts/daemon.js`、`README.md` |
+
+### 判定不做
+
+| 项 | 为什么不做 |
+|---|---|
+| `build-linux-deb.sh` 的 `arm64` + README Linux 段 | 本地**没有 Linux 打包链**，也不发 Linux 包 ⇒ 纯 N/A。 |
+| 上游 28 个 `test/*.test.js` 的改动 | 本地用 `.wd-analysis/` 自有套件体系，不引入第二套。**但它们的 diff 是极好的「行为意图索引」**—— 本次已用它定位到 `session-dirty` / `session-monitor` / 票据绑定三处。 |
+| `selectBestUpdateCandidate` / `selectUpdateAsset`（多源择优） | 本地更新源**只有 GitHub 单源 + 网页兜底**，多源择优无收益；且本地已明确「上游官方包不自动安装」（会丢本地增强）。 |
+| 行修订号 / 指纹快路径（上游 A5 的实质） | 压在 `copySessionRecord` 的 **I-1 红线上**（单函数 16 个 hunk + 本地自带让路闸与产物二阶段）。需要**逐列人工合并 + 逐项回归**，单独一轮做。**当前状态：接线就绪、开关关闭、零行为变化。** |
+
+---
+
 ## v1.7.1 —— 2026-09-24
 
 **本版主题**：**归档副本清得掉** —— 归档跨账号隔离补漏，修掉一类**自动与手动都删不掉的残留副本**。触发顺序只有三步：在主账号**取消归档 → 切到其他账号（副本这时被复制过去）→ 再回主账号归档**。

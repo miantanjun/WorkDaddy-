@@ -529,12 +529,27 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //        修的是「先取消归档 → 切号复制 → 再归档」留下的 completed 副本自动与手动都清不掉
 //        （技能 §33.6）。落点：collectArchivedCopyState 加 leakedRows 第二次查询 +
 //        lib.pickArchivedCrossAccountTargets 加第二来源分支（via='leaked-copy'）。
-const DAEMON_VERSION = '1.7.1';
+// 1.8.0：**上游 1.2.6 吸纳完成** —— 上游基线 1.2.5 → **1.2.6**（「检查更新」/「关于」页显示的上游版本号）。
+//        本版把 1.2.6 按六批做完：
+//        ① 零冲突套用 4 项（workbuddy-compat / session-db / credit-history-sync / 新增 session-dirty.js）；
+//        ② session-sync 重定基（427 → 937 行；顺带**免费**拿到 session-meta 生命周期记录排除、
+//           SKIP_LOCAL_DIR 回滚副本排除、以及 5.6 瞬态冲突延迟重读）；
+//        ③ 脏索引接线（**带开关、默认关**；规划期快路径是守卫版，本仓映射无 fingerprintVersion
+//           ⇒ 今天必然不可达。真正的提速要等 A5 的 revision 体系，它压在 copySessionRecord 的 I-1 红线上）；
+//        ④ 正确性项：会话回执按稳定 requestId 绑定（修 5.6「乐观 user 消息换正式 ID」误报）
+//           + 会话监控中断判据（`isSessionMonitorInterrupted`，治「等新回复」的死等待）；
+//        ⑤ 会话激活分层融合：官方导航 handler/SDK 快路径（可验证）+ 本地 DOM 点击兜底，
+//           外加切号 `currentConversationId` 的**所有权校验**；
+//        ⑥ WorkBuddy 5.6+ `$wbEncrypted` 字段加密适配层（lib.js `[wd-compat]` + daemon 25 处接线
+//           + `refreshAccountBackupToken` 的「加密备份不回写」纪律），并已在客户端升到 5.6.2 后
+//           用**真信封**验收通过（账号列表 / 积分 / 切号 / 成长 全绿，账号备份仍全为密文、零明文副本）。
+//        全量回归 51 套件 / 3511 断言全绿。
+const DAEMON_VERSION = '1.8.0';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
-const UPSTREAM_VERSION = '1.2.5';
+const UPSTREAM_VERSION = '1.2.6';
 // 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.5）。
-// 本机 fork 用自己的修改版版本号（1.5.x = 上游 1.2.5 基线 + 本地增强），否则更新检查会误判。
+// 本机 fork 用自己的修改版版本号（当前 1.8.x = 上游 1.2.6 基线 + 本地增强），否则更新检查会误判。
 // 1.5.0-b：省 token 专项批次 —— 账号页通用折叠卡片（自动切换 / 换号续跑 / 上下文体检三卡默认收起，
 //         复用 wbs-idle-card 的 .collapsed + chevron 语言，localStorage 记忆）；
 //         上下文体检「处理路径」：findings 带结构化 fix（auto -> POST /api/context-audit/fix，paste -> 复制指令），
@@ -552,7 +567,7 @@ const UPSTREAM_VERSION = '1.2.5';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.7.1-20260924-archive-isolation-leak-r1';
+const DAEMON_BUILD_ID = 'release-1.8.0-20260924-upstream-126-absorbed-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
