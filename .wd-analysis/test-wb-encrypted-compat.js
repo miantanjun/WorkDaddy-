@@ -18,7 +18,7 @@
  *   [C] 信封 + 取钥不可用时的 fail-safe（保留原值、不抛错、不返回 [object Object]、留痕、不重复取钥）
  *   [D] 安全不变量（源码级）：解密只用于校验、密文原样备份、明文不入盘
  *   [E] 行为实测：backupAuthFile 对**明文源**与**信封源**都逐字节原样
- *   [F] 阶段边界账本：lib 层已就绪 / daemon 层**未接线**（含危险点登记），防「假装做完了」
+ *   [F] 接线账本：lib 层 + daemon 层**均已接线**（裸 token 直读清零 / 导入走归一化 / 写入者唯一）
  *
  * 跑法：node .wd-analysis/test-wb-encrypted-compat.js
  * ⚠️ 全程把 WORKDADDY_WB_EXE 指向不存在的文件 ⇒ 取钥必然失败，**绝不会 spawn 真的 WorkBuddy.exe**；
@@ -216,10 +216,17 @@ ok(switchFn.includes('const raw = fs.readFileSync(src, \'utf8\')')
 ok(/写回仍用 raw 原字节/.test(switchFn), 'D4 switchTo 代码里留有「写回仍用 raw 原字节」的警示注释');
 
 const refreshFn = daemonSrc.slice(daemonSrc.indexOf('async function refreshAccountBackupToken('),
-  daemonSrc.indexOf('async function refreshAccountBackupToken(') + 3000);
-ok(refreshFn.includes('fs.writeFileSync(tmp, JSON.stringify(nextRoot, null, 2)'),
-  'D5 ⚠️ 危险点已登记：refreshAccountBackupToken 会把刷新后的 root **写回 accounts/<uid>.info**。'
-  + '因此 daemon 侧接线时不能简单地在 5826 行套 wdCompatDecryptAuthJson —— 必须先解决「用原密文回写」');
+  daemonSrc.indexOf('async function refreshAccountBackupToken(') + 3600);
+ok(refreshFn.includes('encryptedAtRest')
+  && refreshFn.includes('persisted: false')
+  && refreshFn.includes('backupAuthRuntimeCache.set(uid,'),
+  'D5 ⭐⭐ 危险点已解决：refreshAccountBackupToken 检测到 `encryptedAtRest` 时**不落盘** —— '
+  + '刷新结果只进内存缓存并返回 `persisted: false`。这是「不解密结果写回加密备份」的落地形态');
+ok(refreshFn.includes("const stored = JSON.parse(fs.readFileSync(file, 'utf8'));")
+  && refreshFn.includes('wdCompatContainsEncryptedFields(stored)'),
+  'D6 且是「**先探测、后解密**」：先按原样解析判断是否信封，再决定是否解密 —— 顺序颠倒就检测不到加密');
+ok(refreshFn.includes("fs.writeFileSync(tmp, JSON.stringify(nextRoot, null, 2)"),
+  'D7 明文路径（≤5.5）的落盘分支原样保留 ⇒ 本机行为不变');
 ok(!LIB_SRC.includes('wdCompatLog(key') && !/wdCompatLog\([^)]*\bkey\b/.test(LIB_SRC),
   'D6 密钥不进日志（wdCompatLog 的调用参数里不出现 key 变量）');
 
@@ -285,7 +292,7 @@ ok(fs.readFileSync(E1.src).equals(E1.srcBytes) && fs.readFileSync(E4.src).equals
 fs.rmSync(SANDBOX, { recursive: true, force: true });
 
 /* ==================================================================== */
-section('[F] 阶段边界账本：lib 层已就绪 / daemon 层未接线（防「假装做完了」）');
+section('[F] 接线账本：lib 层 + daemon 层均已接线（防「假装做完了」）');
 /* ==================================================================== */
 
 // lib 层：三个「读账号文件」入口已解密
@@ -295,17 +302,17 @@ ok(libEntries.every((fn) => {
   return i >= 0 && LIB_SRC.slice(i, i + 900).includes('wdCompatDecryptAuthJson');
 }), 'F1 lib 层三个读入口（parseAuthFile / parseAuthJson / listAccounts）都已接解密');
 
-// daemon 层：未接线 ⇒ 未接线的点必须与登记的数量一致（新增点会红，逼你做决定）
-const RAW_PATTERNS = [
-  ['auth.accessToken || auth.access_token || auth.token', 10],
-  ['raw.auth.accessToken || raw.auth.access_token || raw.auth.token', 2],
-  ['j.auth && j.auth.accessToken', 3],
-  ['auth && (auth.accessToken || auth.access_token || auth.token)', 1],
+// daemon 层：裸 token 直读模式必须**全部清零**（接线前这里是 16，现应为 0）
+const WIRED_PATTERNS = [
+  'auth.accessToken || auth.access_token || auth.token',
+  'raw.auth.accessToken || raw.auth.access_token || raw.auth.token',
+  'j.auth && j.auth.accessToken',
+  'auth && (auth.accessToken || auth.access_token || auth.token)',
 ];
-const drift = RAW_PATTERNS.filter(([p, n]) => (daemonSrc.split(p).length - 1) !== n)
-  .map(([p, n]) => p + '(期望 ' + n + ' 实际 ' + (daemonSrc.split(p).length - 1) + ')');
-ok(drift.length === 0,
-  'F2 阶段锁：daemon.js 里**未接线**的 raw token 直读点共 16 处，与登记一致（改动后必须同步本清单）', drift);
+const residual = WIRED_PATTERNS.filter((p) => daemonSrc.split(p).length - 1 !== 0)
+  .map((p) => p + '(残留 ' + (daemonSrc.split(p).length - 1) + ')');
+ok(residual.length === 0,
+  'F2 ⭐ daemon 层裸 token 直读模式**已清零**（接线前 16 处）—— 新增一处未接线的裸读取会立刻让本行变红', residual);
 
 const INTENTIONAL = [
   ['rawToken.accessToken || rawToken.access_token', 1],
@@ -314,17 +321,29 @@ const INTENTIONAL = [
 ok(INTENTIONAL.every(([p, n]) => (daemonSrc.split(p).length - 1) === n),
   'F3 另有 2 处属「登录响应明文，刻意不改」（rawToken / data —— 来自服务端而非磁盘文件）');
 
-ok((daemonSrc.split('wdCompat').length - 1) === 0
-  && (daemonSrc.split('isWbEncryptedEnvelope').length - 1) === 0,
-  'F4 ⚠️**已知缺口（不是通过）**：daemon.js 目前 0 处 wdCompat 引用 ⇒ 客户端升到 5.6 时，'
-  + '上述 16 处仍会拿到信封对象。6-B 完成后本断言的期望值必须改成 16/16 全接线');
+ok((daemonSrc.split('wdCompatAuthToken').length - 1) === 15
+  && (daemonSrc.split('wdCompatDecryptAuthJson').length - 1) === 13,
+  'F4 daemon 层已接线：wdCompatAuthToken ×15 / wdCompatDecryptAuthJson ×13（含导入），'
+  + '数目不符即有人动过接线面');
 
-ok((daemonSrc.split('normalizeAccountImportJson').length - 1) === 0,
-  'F5 ⚠️ 已知缺口：daemon 的账号导入路径尚未接 normalizeAccountImportJson（lib 侧已就绪）');
+const importFn = LIB_SRC.slice(LIB_SRC.indexOf('function normalizeAccountImportJson('),
+  LIB_SRC.indexOf('function normalizeAccountImportJson(') + 1200);
+ok((daemonSrc.split('normalizeAccountImportJson(candidate)').length - 1) === 1,
+  'F5 账号导入路径已改走 normalizeAccountImportJson（本地原先是自己拼 normalized 再写盘）');
+ok(importFn.includes('JSON.parse(JSON.stringify(normalized))'),
+  'F6 ⭐ 导入校验在**深克隆**上做（parseAuthJson 会就地解密；不克隆就会把解密结果写回备份）');
+
+// accounts/<uid>.info 的写入者必须唯一且受 encryptedAtRest 守卫
+const writerLines = daemonSrc.split(/\r?\n/)
+  .map((l, i) => ({ l, n: i + 1 }))
+  .filter((x) => /writeFileSync|renameSync|copyFileSync/.test(x.l) && /accounts|accountBackupFile|backupPath/.test(x.l));
+ok(writerLines.length === 0,
+  'F7 accounts/<uid>.info 无**直接**写入点（写入统一走 lib.backupAuthFile / refreshAccountBackupToken）',
+  writerLines.map((x) => x.n + ':' + x.l.trim().slice(0, 60)));
 
 console.log('');
-console.log('本套件不通过的项 = 0 即代表「阶段一（lib 层）已落地且可证明零行为变化」；');
-console.log('F2/F4/F5 是**阶段账本**，它们绿 = 缺口被如实登记，不代表 daemon 层已完成。');
+console.log('本套件不通过项 = 0 ⇒ lib 层与 daemon 层接线均已完成，且 5.5.6 下可证明零行为变化。');
+console.log('⚠️ 仍未做的：**功能性验收**（真信封 + 真密钥）—— 需客户端升到 5.6 后才能做。');
 
 /* ---- 还原桩 ---- */
 fs.appendFileSync = realAppend;
