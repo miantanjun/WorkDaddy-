@@ -339,6 +339,30 @@ section('[E] 沙箱：选主 + applySnapshot 真写');
   ok(/async function readSnapshotAsync\(root, id, aliases = \[\], cache = null\) \{/.test(SOURCE),
     'G9 边界已登记：readSnapshotAsync 不带 options.skipPrefixes（切异步前必须补 delta）');
 
+  /* ==================================================================== */
+  section('[H] 瞬态冲突延迟重读（上游 1.2.128 · 批次 4 第 2 项 —— 同样随重定基免费到手）');
+  /* ==================================================================== */
+
+  // 为什么单独立一段守它：这是「从源头减少假 conflict」的那一条，而**判据藏在
+  // selectTargetSnapshot 内部**，删掉它不会让任何断言变红、只会让一次投影抖动就能
+  // 生成一份 branchCopy 重复会话（用户看到的是「多出一个同名会话」）。
+  // 上游原文注释：A single conflict sample is not enough evidence of an independent branch.
+  ok(SOURCE.includes('A single conflict sample is not enough'),
+    'H1 上游「一次冲突采样不构成分叉证据」的注释在（判据的存在性锚点）');
+  ok(/if \(comparison\.kind === 'conflict'\) \{\s*\n\s*for \(const delayMs of \[100, 200, 400\]\) \{/.test(SOURCE),
+    'H2 ⭐ 冲突时按 100 / 200 / 400 ms 递增退避**重读同一个目标**，读通了就不再判定冲突');
+  ok(/if \(comparison\.kind !== 'conflict'\) break;/.test(SOURCE),
+    'H3 重读后一旦不再是冲突立即跳出（不是无脑重试到底，抖动消失就走）');
+  ok(/catch \(error\) \{\s*\n\s*errors\.push\(error\);\s*\n\s*\}/.test(SOURCE),
+    'H4 重读自身读失败时收进 errors（**不让重读把原本可用的匹配路径带崩**）');
+  // 关键语义：重读结果必须**覆盖**原采样（snapshot / comparison 都被替换），
+  // 这样调用方拿到的 kind 才是「重读后」的结论，而不是「抖动时」的结论。
+  ok(/snapshot = retry;\s*\n\s*comparison = retryComparison;/.test(SOURCE),
+    'H5 ⭐ 重读结果覆盖原采样（调用方看到的是重读后的 kind，不是抖动瞬间的 kind）');
+  // 重读只作用于「同一目标」；候选顺序不从处理结果里重建，抖动期不会漏出孤儿会话
+  ok(!/for \(const delayMs of \[100, 200, 400\]\) \{[\s\S]{0,400}randomUUID\(\)/.test(SOURCE),
+    'H6 重读块内部不产生新 id（id 分配在该块之外，抖动期不会漏出孤儿会话）');
+
   fs.rmSync(SANDBOX, { recursive: true, force: true });
 
   console.log('\n结果：' + pass + ' 通过 / ' + failures.length + ' 失败');
