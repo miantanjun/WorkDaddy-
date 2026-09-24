@@ -37,11 +37,12 @@ const SUITES = [
   ['test-watchdog-backoff.js', 16],  // v1.4.1 §9-4：watchdog 退避复位判据（存活超 60s）+ 熔断
   ['test-failover-clock.js', 42],  // v1.4.1 §9-7：限流窗口绝对到期时刻 + 时钟回拨不可信 + 结构化「选不出账号」
   ['test-build-pin.js', 27],  // v1.4.1 §9-5：ws 钉版本（manifest+lock+npm ci）+ 真跑 vendoring 与内嵌 Python 块
-  ['test-session-sync-124.js', 65],  // 上游 1.2.5 会话同步重定基：五态判定 + 选主不猜 + applySnapshot 真写 + fixture/delta provenance 锁（锚 1.2.5）+ 上限取消/惰性读守卫 + readSessionSizes
+  ['test-session-sync-124.js', 74],  // 上游 1.2.6 会话同步重定基：五态判定 + 选主不猜 + applySnapshot 真写 + fixture/delta provenance 锁（锚 1.2.6）+ 上限取消/惰性读守卫 + readSessionSizes + [G] 免费继承项与本地 4 条 skip 域 delta 未被冲掉（+9）
   ['test-auto-copy-judge.js', 39],  // 方案 D/D0：judge 开关（默认 mtime ⇒ 零行为变化）+ 快照域切分 + 指纹 memo（命中零读盘）+ slim/writable 护栏；2026-09-22 加 [E] D4 灰度入口（GET/POST /api/sessions/auto-copy/judge + 非法值 400 + 全仓唯一调用点反向守卫）12 条
   ['test-auto-copy-leader.js', 68],  // 方案 D/D1+D1.5：内容定源判主偏序 + mtime 不参与定源 + alias 契约 + daemon 接线 + 打包白名单 + 面板文案；2026-09-21 冲突文案抽共用 helper 后 +2（I4 两处共用 / I5 conflict 分支）；2026-09-23 打包白名单判据升级为**传递闭包**后 +1（H3，共用 packaging-whitelist.js）
   ['test-auto-copy-content-write.js', 54],  // 方案 D/D2：content 模式改走 applySnapshot 事务写入（差异集 + 备份 + journal + 发布后复检）+ 目标多余文件清理 + 产物域不动 + 备份按 mtime 裁剪 + 默认 mtime 路径逐字节未变
   ['test-session-sync-cache-a3.js', 41],  // 上游 1.2.5 吸纳/A3：文件级指纹缓存（命中零 readFileSync / 结论等价 / 同长度改写必失效 / 排除域不污染）+ judge/leader 第 4 参透传 + daemon 接线 + 缓存本体去抖落盘与脏条目剔除
+  ['test-session-dirty.js', 43],  // 上游 1.2.6 吸纳/批次 1：脏标记索引（纯函数判据层）。重点守 **fail-open**（没 markBaseline 的账号 shouldSync 恒 true，错了是静默漏同步不是变慢）+ clear(expectedAt) 防竞态（陈旧通知不许抹掉新标记）+ 脏数据净化 + prune 不碰 initialized + CRLF 纪律 + mac 白名单两处
   ['test-growth-tasks.js', 113],  // 成长任务「一键完成」：指纹派生稳定 + 桌面 6 连事件形状 + 四条 CN 通道 + 领奖主备降级 + accept 回读重试 + 档位门控（tier3 默认关）+ 行形状兼容 + 端到端自动领奖 + 面板/daemon 接线 + 全量中文文案 i18n 守卫
   ['test-automation-protocol-v3.js', 111],  // 上游 1.2.5 吸纳/B 组协议 V3：校验负向门（V1/V2 拒 prepare、prepare 只读白名单、condition 形状）+ prepare/condition 真跑语义（切换前执行 / 跳过不切不跑 / 收尾还原不受影响）+ orderCheckinAccounts 稳定排序 + B4 闸门有界可取消 + A9 失败屏障 + A11 409 + 接线静态守卫（含「不搬上游 job.completion / waitAutomationSyncJob」的反向守卫）
   ['test-upstream-125-step4-panel.js', 98],  // 上游 1.2.5 吸纳/Step 4：A7 作业指标（真跑切片函数 + 速率口径）+ A8 大会话提示 + A7/A8 面板文案整句入典（含重复 key 去重守卫）+ A10 会话体积/总量口径（总量不受筛选）+ 体积筛选字节精确

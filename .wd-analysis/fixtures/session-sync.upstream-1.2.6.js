@@ -1,16 +1,5 @@
 'use strict';
 
-// ⚠️ 本文件是**产物**，由 .wd-analysis/fixtures/session-sync.upstream-1.2.6.js + session-sync.deltas.js
-//   经 regen-session-sync.js 生成。要改行为 ⇒ **先改 deltas 表再重生成**；直接改本文件会让
-//   test-session-sync-124.js 的 [A] 组「上游原文 + delta 表 == 工作副本」逐字节锁立刻翻红。
-//   本地与上游的**全部**差异都在 deltas 表里登记，其余逐字节一致，便于日后 diff 上游 1.2.6+。
-//   （1.2.6 的 `session-meta` 排除、`SKIP_LOCAL_DIR`、异步读取族都是**上游原生**能力，不是本地 delta。）
-//   [delta-2] readSnapshot 第 4 参 options.skipPrefixes：允许调用方把体积可达数百 MB 的
-//     workspace/sessions/<id>/ 排除在内容快照之外（交回 daemon 的产物二阶段推进）。不传 ⇒ 与上游等价；
-//     cache（上游第 4 参）本地顺延为第 5 参。
-//   [delta-3] applySnapshot 的发布后复检沿用同一 skip 域。
-//   依据：WorkDaddy-上游1.2.4影响面实测报告.md、WorkDaddy-OpenViking吸纳评估与功能进度总览.md §2.1。
-
 // Account copies share a logical session, but may have independent continuations.
 // File times are only race detectors; they never choose a winning conversation.
 const fs = require('node:fs');
@@ -151,7 +140,7 @@ function aliasesEqual(left, right) {
 // lazily (only files actually copied/backed up are read). Transcript records
 // and the artifact index hash depend on the alias set, so those are reused
 // only when computed for the same aliases.
-function readSnapshot(root, id, aliases = [], options = {}, cache = null) {
+function readSnapshot(root, id, aliases = [], cache = null) {
   if (!id || /[/\\\x00]/.test(id) || id === '.' || id === '..') throw Error('无效的会话标识');
   // The configured WorkBuddy data root may itself be a Windows junction. Trust
   // only that configured boundary; safePathFast/safePath still reject links at
@@ -159,7 +148,6 @@ function readSnapshot(root, id, aliases = [], options = {}, cache = null) {
   root = fs.realpathSync(path.resolve(root));
   if (fs.lstatSync(root).isSymbolicLink()) throw Error('会话目录包含符号链接，未同步');
   const knownIds = Array.from(new Set([id, ...aliases]));
-  const skipPrefixes = new Set((options && options.skipPrefixes) || []);
   const files = new Map();
   let total = 0;
   // Directory components repeat across thousands of session files. Verify each
@@ -249,10 +237,7 @@ function readSnapshot(root, id, aliases = [], options = {}, cache = null) {
       }
     }
   }
-  for (const prefix of ['workspace/sessions', 'tasks', 'file-history']) {
-    if (skipPrefixes.has(prefix)) continue;
-    visit(prefix + '/' + id, prefix + '/__session__');
-  }
+  for (const prefix of ['workspace/sessions', 'tasks', 'file-history']) visit(prefix + '/' + id, prefix + '/__session__');
   visit('artifact-index/' + id + '.json', 'artifact-index/__session__.json');
   // Workspace files and history snapshots are user work products. Their
   // extension does not guarantee valid JSON (JSONC, drafts, empty files,
@@ -304,7 +289,7 @@ function readSnapshot(root, id, aliases = [], options = {}, cache = null) {
       });
     }
   }
-  return { root, id, aliases: knownIds, files, records, transcriptKey, totalBytes: total, cache, skipPrefixes: [...skipPrefixes] };
+  return { root, id, aliases: knownIds, files, records, transcriptKey, totalBytes: total, cache };
 }
 
 function validSessionId(id) {
@@ -694,7 +679,7 @@ async function selectTargetSnapshot(source, targetIds, readTarget, preferredId) 
 }
 
 function unchanged(snapshot) {
-  const now = readSnapshot(snapshot.root, snapshot.id, snapshot.aliases, { skipPrefixes: snapshot.skipPrefixes }, snapshot.cache || null);
+  const now = readSnapshot(snapshot.root, snapshot.id, snapshot.aliases, snapshot.cache || null);
   return now.files.size === snapshot.files.size && [...snapshot.files].every(([key, file]) => now.files.get(key)?.hash === file.hash);
 }
 
@@ -751,7 +736,7 @@ async function applySnapshot(source, target, options) {
   let totalBytes = 0;
   const verifyPublished = () => {
     if (!unchanged(source)) throw Error('源会话正在变化，已停止同步');
-    const now = readSnapshot(target.root, target.id, target.aliases, { skipPrefixes: target.skipPrefixes }, target.cache || null);
+    const now = readSnapshot(target.root, target.id, target.aliases, target.cache || null);
     if (now.files.size !== expected.size || [...expected].some(([key, hash]) => now.files.get(key)?.hash !== hash)) {
       throw Error('目标会话正在变化，已停止同步');
     }

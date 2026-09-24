@@ -16,7 +16,16 @@
  *     · 新增 [F] readSessionSizes 的功能性守卫（A4 吸纳）
  *   文件名叫 …-124 是历史遗留（这轮延续改名成本 > 收益，改名会牵动 SUITES 与多处文档引用）。
  *
- * 本套件守六件事：
+ * 2026-09-24（上游 1.2.6 吸纳批，见 WorkDaddy-上游1.2.6吸纳建议报告-2026-09-24.md §4 批次 2）：
+ *   基线 fixture 从 1.2.5 升到 **1.2.6**（session-sync.js 从 427 行扩到 937 行）。本套件同步升级：
+ *     · [A] provenance 锁锚到 fixtures/session-sync.upstream-1.2.6.js；导出面 5 → **9**
+ *     · [C] C7 反转为「遍历内**跳过** symlink 条目、写入路径 safePath 仍直接抛错」
+ *       （上游 1.2.129 的刻意变更：会话内符号链接不再让整次同步失败）
+ *     · 新增 [G]：守「1.2.6 免费继承项」＋「本地 4 条 skip 域 delta 没被上游重写冲掉」
+ *   注意：本地 delta 从 1.2.5 的 7 条**一条没少**，只是 delta-2b/2d 需要限定作用域
+ *   （1.2.6 新增了异步孪生，同形代码各出现两次）。
+ *
+ * 本套件守七件事：
  *   [A] 契约 + 「上游原文 fixture + delta 表 == 工作副本」的逐字节 provenance 锁（保证可长期与上游 diff）
  *   [B] 判据是「内容」不是「时间」
  *   [C] 上限已取消（A1）+ 惰性读（A2）+ 原有防线仍在
@@ -66,8 +75,8 @@ ok(typeof sync.readSnapshot === 'function', 'A2 readSnapshot 是函数');
 ok(typeof sync.compareSnapshots === 'function', 'A3 compareSnapshots 是函数');
 ok(typeof sync.selectTargetSnapshot === 'function', 'A4 selectTargetSnapshot 是函数');
 ok(typeof sync.applySnapshot === 'function', 'A5 applySnapshot 是函数');
-ok(Object.keys(sync).sort().join(',') === 'applySnapshot,compareSnapshots,readSessionSizes,readSnapshot,selectTargetSnapshot',
-  'A6 导出面与上游 1.2.5 一致（恰好 5 个，新增 readSessionSizes）', Object.keys(sync).sort());
+ok(Object.keys(sync).sort().join(',') === 'applySnapshot,applySnapshotAsync,compareSnapshots,readSessionFingerprintAsync,readSessionQuickFingerprintAsync,readSessionSizes,readSnapshot,readSnapshotAsync,selectTargetSnapshot',
+  'A6 导出面与上游 1.2.6 一致（9 个：1.2.5 的 5 个 + 异步孪生 applySnapshotAsync/readSnapshotAsync + 两个指纹助手）', Object.keys(sync).sort());
 
 ok(SOURCE.indexOf('\r') === -1, 'A7 纯 LF（与上游逐字节可 diff）');
 ok(!SOURCE.startsWith('\uFEFF'), 'A8 无 BOM');
@@ -77,7 +86,7 @@ ok(!SOURCE.startsWith('\uFEFF'), 'A8 无 BOM');
 // 任何人绕过 delta 表直接改工作副本，这条立刻翻红。
 // （2026-09-20 从「正则还原两个常量」升级而来：那时差异只有常量，现在有多处，
 //   硬编码还原式已经不可维护，改由 fixtures/session-sync.deltas.js 作唯一真相。）
-const FIXTURE = path.join(ROOT, '.wd-analysis', 'fixtures', 'session-sync.upstream-1.2.5.js');
+const FIXTURE = path.join(ROOT, '.wd-analysis', 'fixtures', 'session-sync.upstream-1.2.6.js');
 const deltas = require('./fixtures/session-sync.deltas.js');
 ok(fs.existsSync(FIXTURE), 'A9 上游原文 fixture 存在（可随时 diff 上游）');
 const fixtureText = fs.readFileSync(FIXTURE, 'utf8');
@@ -116,8 +125,9 @@ ok(/now\.size !== entry\.size \|\| now\.mtimeMs !== entry\.mtimeMs \|\| now\.cti
   'C5 惰性读之前校验 size/mtimeMs/ctimeMs 三元组（防读到半写状态）');
 ok(/const trustedComponents = new Map\(\)/.test(SOURCE) && /function safePathFast\(relative\) \{/.test(SOURCE),
   'C6 safePathFast 在：快照内目录组件只验一次（A6，减重复 lstat）');
-ok(/if \(stat\.isSymbolicLink\(\)\) throw Error\('会话文件包含符号链接，未同步'\)/.test(SOURCE),
-  'C7 但**每个文件仍单独查 symlink**（快路径不许放松安全边界）');
+ok(/if \(stat\.isSymbolicLink\(\)\) return;/.test(SOURCE)
+  && /if \(fs\.lstatSync\(target\)\.isSymbolicLink\(\)\) throw Error\('会话文件包含符号链接，未同步'\)/.test(SOURCE),
+  'C7 但**每个文件仍单独查 symlink**（1.2.6 起：快照遍历内跳过 symlink 条目，写入路径 safePath 仍直接抛错）');
 ok(/无效的会话标识/.test(SOURCE), 'C8 会话 id 校验仍在（路径注入防线）');
 ok(/无效的会话文件路径/.test(SOURCE), 'C9 相对路径校验仍在');
 ok(/isSymbolicLink\(\)/.test(SOURCE), 'C10 符号链接拒绝仍在');
@@ -294,6 +304,40 @@ section('[E] 沙箱：选主 + applySnapshot 真写');
     'F1 正常会话返回累计字节数（只 lstat 累加 size，不解析消息、不读 payload）', sizes instanceof Map && sizes.get('SRC'));
   ok(sizes.get('NOPE') === 0, 'F2 合法但不存在的 id → 0（不是 null、也不抛）', sizes.get('NOPE'));
   ok(sizes.get('../evil') === null, 'F3 非法 id → null：单个失败不拖垮整批', sizes.get('../evil'));
+
+  /* ==================================================================== */
+  section('[G] 1.2.6 免费继承项 + 本地 skip 域未被冲掉（批次 2 重定基的产出）');
+  /* ==================================================================== */
+
+  // 「免费继承」的定义：上游 1.2.6 原生做到、本地以前根本没这些概念 ⇒ 重定基后自动到手。
+  // 其中 G1 修的是一条**已经在发生的假阳性**：WorkBuddy 每次打开/恢复会话都会追加
+  // session-meta 生命周期记录，本地旧版把它当「正文变了」⇒ 误判需同步、严重时误报分叉。
+  const META_SITES = SOURCE.split("record.type === 'session-meta'").length - 1;
+  ok(META_SITES >= 3,
+    'G1 session-meta 排除在 ≥3 处生效（canonical 归一化 / 快照过滤 / 复制前过滤）', META_SITES);
+  ok(SOURCE.includes('const SKIP_LOCAL_DIR = /^workspace')
+    && SOURCE.includes('modify_backup|\\.modify_backup_meta'),
+    'G2 SKIP_LOCAL_DIR 只排回滚副本与回滚元数据（比本地整段排除 workspace/sessions 更精细，两者互补）');
+  ok((SOURCE.split('SKIP_LOCAL_DIR.test(').length - 1) >= 3,
+    'G3 SKIP_LOCAL_DIR 在计字节与快照遍历等多处生效', SOURCE.split('SKIP_LOCAL_DIR.test(').length - 1);
+  ok(typeof sync.readSnapshotAsync === 'function' && typeof sync.applySnapshotAsync === 'function',
+    'G4 异步读取族已就位（readSnapshotAsync / applySnapshotAsync）');
+
+  // ⚠️ 真正要守的是「本地那 4 条 delta 没有被上游的重写冲掉」—— 冲掉了就静默丢产物排除域。
+  ok(SOURCE.includes('const skipPrefixes = new Set((options && options.skipPrefixes) || []);'),
+    'G5 delta-2b 仍在：readSnapshot 解析 options.skipPrefixes');
+  ok(SOURCE.includes('cache, skipPrefixes: [...skipPrefixes] };'),
+    'G6 delta-2d 仍在：快照对象带回 skipPrefixes');
+  ok(SOURCE.includes('readSnapshot(snapshot.root, snapshot.id, snapshot.aliases, { skipPrefixes: snapshot.skipPrefixes }'),
+    'G7 delta-2e 仍在：unchanged 复检沿用同一 skip 域');
+  ok(SOURCE.includes('readSnapshot(target.root, target.id, target.aliases, { skipPrefixes: target.skipPrefixes }'),
+    'G8 delta-3 仍在：applySnapshot 发布后复检沿用同一 skip 域');
+
+  // 已知边界（有意为之，不是漏改）：异步孪生没有 skipPrefixes 支持。
+  // 本地 daemon 目前只用同步版（D2 事务写入器 + 快照域）⇒ 无行为差异；
+  // 将来若把 daemon 切到异步版，必须先给 readSnapshotAsync 补这组 delta。
+  ok(/async function readSnapshotAsync\(root, id, aliases = \[\], cache = null\) \{/.test(SOURCE),
+    'G9 边界已登记：readSnapshotAsync 不带 options.skipPrefixes（切异步前必须补 delta）');
 
   fs.rmSync(SANDBOX, { recursive: true, force: true });
 
