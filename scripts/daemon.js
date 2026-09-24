@@ -5552,11 +5552,19 @@ function startAutomationRun(task, event = null) {
     error.maybeSent = true;
     return error;
   };
-  const readSession = async () => {
-    if (isCancelled()) throw new Error('任务已停止');
-    const response = await cdpSend('Runtime.evaluate', { expression: '(' + probeSessionReceipt.toString() + ')()', returnByValue: true });
-    return response && response.result && response.result.value || null;
-  };
+    // expectedReceipt：把本轮回执**序列化进注入表达式**，让 renderer 侧按稳定 requestId 绑定回合。
+    // ⚠️ 5.6 的「乐观 user 消息换正式 ID」会让 userMessageId 变化，只认「最后一条」会在换 ID 的
+    // 瞬间指向错的回合 ⇒ 等待判定误报「会话已有其他请求，已停止等待」。
+    // 不传 ⇒ 注入 `(null)` ⇒ 与改动前逐字等价（发送前 before / 发送后 selected 两处快照
+    // 必须保持原语义，否则会波及后面的「发送是否被受理」判定）。
+    const readSession = async (expectedReceipt = null) => {
+      if (isCancelled()) throw new Error('任务已停止');
+      const expected = expectedReceipt && typeof expectedReceipt === 'object'
+        ? { userMessageId: String(expectedReceipt.userMessageId || ''), requestId: String(expectedReceipt.requestId || '') }
+        : null;
+      const response = await cdpSend('Runtime.evaluate', { expression: '(' + probeSessionReceipt.toString() + ')(' + JSON.stringify(expected) + ')', returnByValue: true });
+      return response && response.result && response.result.value || null;
+    };
   const sessionAction = async (op, detail) => {
     if (isCancelled()) throw new Error('任务已停止');
     // 打开指定会话：把目标会话真正选中（侧栏可滚动查找、按需展开分组），
@@ -5584,7 +5592,7 @@ function startAutomationRun(task, event = null) {
       const end = Date.now() + Math.min(300000,Math.max(1000,Number(detail.timeoutMs)||120000));
       while (Date.now() < end) {
         if ((currentAccount() || {}).uid !== receipt.accountUid) throw new Error('账号已变化，已停止等待');
-        const snapshot = await readSession();
+        const snapshot = await readSession(receipt);
         if (receiptComplete(receipt,snapshot)) {
           if (detail.contains) {
             const response = await cdpSend('Runtime.evaluate', {expression: `(function(){var c=window.__wbsWorkBuddyCompat.findConversationControllers(document).find(c=>String(c.conversationId)===${JSON.stringify(receipt.conversationId)});if(!c)return false;var m=c.messageStore.getState().messages.find(m=>String(m.id||m.requestId||'')===${JSON.stringify(snapshot.assistantId)});return !!m&&JSON.stringify(m.content||[]).includes(${JSON.stringify(String(detail.contains))});})()`,returnByValue:true});

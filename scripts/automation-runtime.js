@@ -68,7 +68,15 @@ function createRendererGate() {
 }
 
 // Executed read-only inside the renderer. Never returns composer or message text.
-function probeSessionReceipt() {
+// ⚠️ 与上游 1.2.6 的关系（有意的最小化取舍，不是漏改）：
+//   上游把本函数改成 `probeSessionReceipt(expectedReceipt)`，同时**改写 busy 语义并删掉**
+//   `hydrating` / `streaming` / `turnActive` 三个字段。本地**只取 requestId 绑定那一半**，
+//   因为 daemon 有两处闸门依赖那三个字段与本地 busy 语义：
+//     · daemon `waitForAutomationTurnState` → `if (!probe.streaming && !probe.turnActive)`（换号落定闸门）
+//     · daemon `session.send` 发送前落定循环 → `if (!snap.busy) break` + `snap.busy && !snap.hydrating`
+//   若照抄上游版，这两处会**静默失效**（字段变 undefined ⇒ 恒判「已落定」），属于典型的
+//   「只换模块 = 静默退化」。故此处保留本地三字段与本地 busy，只补 requestId 作用域。
+function probeSessionReceipt(expectedReceipt) {
   const compat = window.__wbsWorkBuddyCompat;
   if (!compat) return null;
   const selected = compat.getSelectedConversationId(document);
@@ -79,8 +87,22 @@ function probeSessionReceipt() {
     const session = controller.getSessionViewState();
     const messages = Array.isArray(state.messages) ? state.messages : [];
     const users = messages.filter(m => (m.messageType || m.role) === 'user');
-    const user = users[users.length-1];
-    const last = [...messages].reverse().find(m => (m.messageType || m.role) === 'assistant' && !/^timeline:/.test(String(m.id || '')));
+    // [上游 1.2.6 / 适配 WorkBuddy 5.6] 按**稳定 requestId** 绑定本轮请求：
+    //   5.6 会把「乐观 user 消息」换成正式 ID（实测本机 15 条 user 里 10 条 id !== requestId，
+    //   且消息带 `_optimistic` / `_optimisticRequestId`）⇒ 只认「最后一条」会在换 ID 的瞬间
+    //   指向错的回合，等待判定随即误报「会话已有其他请求，已停止等待」。
+    const expectedUserMessageId = String(expectedReceipt && expectedReceipt.userMessageId || '');
+    const expectedRequestId = String(expectedReceipt && expectedReceipt.requestId || '');
+    const user = (expectedUserMessageId || expectedRequestId)
+      ? users.find(m => String(m.id || m.requestId || '') === expectedUserMessageId || String(m.requestId || '') === expectedRequestId) || users[users.length-1]
+      : users[users.length-1];
+    // ⚠️ 只有**显式传入 expectedRequestId** 时才按 requestId 作用域选 assistant：
+    //   不传票据的调用点（发送前 before / 发送后 selected 快照）必须与改动前逐字等价，
+    //   否则会波及 daemon 的「发送是否被受理」判定（比较 userMessageId 变化）。
+    const assistants = messages.filter(m => (m.messageType || m.role) === 'assistant' && !/^timeline:/.test(String(m.id || '')));
+    const last = expectedRequestId
+      ? [...assistants].reverse().find(m => String(m.requestId || '') === expectedRequestId) || assistants[assistants.length-1]
+      : assistants[assistants.length-1];
     const error = typeof controller.getErrorViewState === 'function' ? controller.getErrorViewState() : {};
     const extra = last && last.extra || {};
     return {
@@ -105,7 +127,11 @@ function probeSessionReceipt() {
 }
 function receiptComplete(receipt, snapshot) {
   if (!snapshot || snapshot.conversationId !== receipt.conversationId) throw new Error('目标会话不再可见，已停止等待');
-  if (snapshot.userMessageId !== receipt.userMessageId) throw new Error('会话已有其他请求，已停止等待');
+  // [上游 1.2.6 / 适配 WorkBuddy 5.6] `userMessageId` 在「乐观消息换正式 ID」时**会变**，
+  // 但 `requestId` 稳定 ⇒ 只要 requestId 对得上就仍属本轮，不能判成「会话已有其他请求」。
+  // 向后兼容：receipt.requestId 为空（旧回执）时退化为改动前的纯 userMessageId 比较。
+  const snapshotRequestId = snapshot.requestId || snapshot.assistantRequestId || '';
+  if (snapshot.userMessageId !== receipt.userMessageId && snapshotRequestId !== receipt.requestId) throw new Error('会话已有其他请求，已停止等待');
   if (snapshot.error || snapshot.cancelled) throw new Error('会话回复失败或已取消');
   if (receipt.requestId && snapshot.assistantRequestId && snapshot.assistantRequestId !== receipt.requestId) return false;
   return !!snapshot.assistantId && snapshot.assistantId !== receipt.baselineAssistantId && snapshot.complete && !snapshot.busy;

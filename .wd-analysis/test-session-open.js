@@ -61,11 +61,14 @@ const NEWFN = sliceFn(SRC, 'openConversationById');
 let OLDFN = null;
 let OLDREF = null;
 try {
+  // ⚠️ 沙箱兼容：默认 stdio 会给子进程建 stdin 管道，本沙箱里那种 spawn 会 EBUSY
+  //    （同一二进制从 bash 直接跑是正常的）⇒ 显式忽略 stdin。
+  //    不修的话异常被下面的 catch 吞掉 ⇒ 这一整组「修复前对照」会被**静默跳过**（不是报错，是少 8 条断言）。
   const shas = execFileSync(GIT, ['-C', 'D:/WorkDaddy', 'log', '--format=%H', '-n', '120', '--', 'scripts/daemon.js'],
-    { maxBuffer: 8 * 1024 * 1024 }).toString('utf8').trim().split('\n').filter(Boolean);
+    { maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).toString('utf8').trim().split('\n').filter(Boolean);
   for (const sha of shas) {
     const src = norm(execFileSync(GIT, ['-C', 'D:/WorkDaddy', 'show', sha + ':scripts/daemon.js'],
-      { maxBuffer: 64 * 1024 * 1024 }).toString('utf8'));
+      { maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).toString('utf8'));
     // 必须「同时」满足：① 这份 daemon.js 里真有 openConversationById；② 它还没有 waitOnly。
     // 只判 waitOnly 会合并后被上游分支的提交骗到 —— 上游 1.2.3 的提交也满足「没有 waitOnly」，
     // 但它压根没有这个函数，sliceFn 直接抛 ⇒ 整组对照被静默跳过（2026-09-19 踩过）。

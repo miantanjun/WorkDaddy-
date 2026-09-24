@@ -245,7 +245,9 @@ console.log('[B] readCreditRecords —— 三维聚合与字符串 SUM 兜底');
   const jsFile = path.join(TMP, 'inline.js');
   fs.writeFileSync(jsFile, appScript, 'utf8');
   let parseOk = true;
-  try { execFileSync(process.execPath, ['--check', jsFile], { stdio: 'pipe' }); } catch (e) {
+  // ⚠️ `stdio: 'pipe'` 会给子进程建 **stdin 管道**；本沙箱里那种 spawn 会 EBUSY
+  //    （同一二进制从 bash 直接跑正常，显式 ignore stdin 也正常）⇒ 显式忽略 stdin。
+  try { execFileSync(process.execPath, ['--check', jsFile], { stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) {
     parseOk = false;
     console.log('     内联脚本解析失败: ' + String((e.stderr || '') + (e.stdout || '')).slice(0, 300));
   }

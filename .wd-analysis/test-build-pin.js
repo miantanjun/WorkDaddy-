@@ -149,12 +149,16 @@ if (!py) {
 
   // 逐字取「profile 替换」那个 heredoc（就是本次改动的所在）
   const target = heredocs.find((h) => h.indexOf('for package_name in') >= 0);
+  // ⚠️ 沙箱兼容：本沙箱里「给子进程建 stdin 管道」的 spawn 会 EBUSY（`python -` + input 正是这一类），
+  //    而同一个二进制从 bash 直接跑、或把 stdin 设为 'ignore' 都正常。
+  //    ⇒ 把这份 heredoc 原样落成文件再执行，语义等价（仍逐字跑的就是被切出来的那一块）。
+  const pyScript = path.join(staging, '__embedded__.py');
+  fs.writeFileSync(pyScript, target, 'utf8');
   let ran = null;
   try {
-    execFileSync(py[0], py[1].concat(['-', staging]), {
-      input: target,
+    execFileSync(py[0], py[1].concat([pyScript, staging]), {
       env: { ...process.env, PROFILE: 'workbuddy-cn', BUILD_VERSION: '9.9.9' },
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     ran = 'ok';
   } catch (e) {
