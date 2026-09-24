@@ -254,7 +254,7 @@ const hasFast = (n) => n.exprs.some((e) => e.includes('findConversationActivatio
     'B18 老 renderer 没有该 API 时同样安全降级');
 
   console.log('');
-  console.log('结果：' + pass + ' 通过，' + failures.length + ' 失败');
+  console.log('结果：' + pass + ' 通过 / ' + failures.length + ' 失败');
   if (failures.length) {
     console.log('失败项：');
     failures.forEach((f) => console.log('  - ' + f));
@@ -262,7 +262,7 @@ const hasFast = (n) => n.exprs.some((e) => e.includes('findConversationActivatio
   }
 })().catch((e) => {
   console.log('');
-  console.log('结果：' + pass + ' 通过，' + (failures.length + 1) + ' 失败');
+  console.log('结果：' + pass + ' 通过 / ' + (failures.length + 1) + ' 失败');
   console.log('  - 未捕获异常: ' + ((e && e.stack) || e));
   process.exit(1);
 });

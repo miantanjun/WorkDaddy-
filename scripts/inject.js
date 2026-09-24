@@ -624,6 +624,70 @@ function subscribeSessionMonitorResource(resource, listener) {
   };
 }
 
+// Keep a renderer-local baseline so a broad sessionsChanged snapshot only
+// marks records whose observable state actually changed. The daemon receives
+// ids and event names, never message text or session contents.
+function createSessionDirtyTracker(send, options) {
+  var opts = options || {};
+  var seen = Object.create(null);
+  var pending = Object.create(null);
+  var timer = null;
+  var delay = Math.max(0, Number(opts.delay == null ? 120 : opts.delay));
+  function signature(update) {
+    var value = update && typeof update === 'object' ? update : {};
+    // 账号 reload 会给**每一行**发 status/state/active/terminal 抖动 —— 那些字段描述的是
+    // renderer 生命周期，不是会话内容。只保留可能代表「编辑」的持久化元数据修订号；
+    // 万一漏掉一次内容事件，daemon 侧还有行修订号兜底。
+    return JSON.stringify([
+      String(value.id || ''), String(value.title || ''), String(value.customTitle || ''),
+      // 打开/激活一个已复制的会话，在某些 WorkBuddy 版本里会改 lastActivityAt。
+      // 那也是 renderer 生命周期抖动，不是消息编辑；updatedAt 仍是内容侧兜底。
+      Number(value.updatedAt || 0),
+    ]);
+  }
+  function flush() {
+    timer = null;
+    var batch = Object.keys(pending).map(function (id) { return pending[id]; });
+    pending = Object.create(null);
+    if (batch.length && typeof send === 'function') send(batch);
+  }
+  function queue(update) {
+    var id = String((update && update.id) || '').trim();
+    if (!id) return false;
+    pending[id] = { id: id, event: String(update.event || 'sessionUpdated').slice(0, 40) };
+    if (timer == null) timer = setTimeout(flush, delay);
+    return true;
+  }
+  function observe(update) {
+    var id = String((update && update.id) || '').trim();
+    if (!id) return false;
+    var next = signature(update);
+    if (seen[id] === undefined) {
+      seen[id] = next;
+      // 第一次见到就存在的行 = 历史行，**不能**当成「刚变脏」；只有 sessionCreated 例外。
+      return String(update.event || '') === 'sessionCreated' ? queue(update) : false;
+    }
+    if (seen[id] === next) return false;
+    seen[id] = next;
+    return queue(update);
+  }
+  function baseline(records) {
+    var list = Array.isArray(records) ? records : [];
+    for (var i = 0; i < list.length; i++) {
+      var id = String((list[i] && (list[i].id || list[i].sessionId)) || '').trim();
+      if (id) seen[id] = signature(list[i]);
+    }
+    if (typeof send === 'function') send({ ready: true });
+  }
+  function destroy() {
+    if (timer != null) clearTimeout(timer);
+    timer = null;
+    pending = Object.create(null);
+    seen = Object.create(null);
+  }
+  return { observe: observe, baseline: baseline, flush: flush, destroy: destroy };
+}
+
 // In-memory state for background-session monitors. This deliberately has no
 // persistence or daemon transport: the About-page viewer is a live diagnostic
 // surface and must not turn conversation activity into a local log file.
@@ -723,6 +787,7 @@ if (typeof module !== 'undefined' && module.exports) {
     normalizeSessionMonitorResourceRecord: normalizeSessionMonitorResourceRecord,
     sessionMonitorLifecycleAction: sessionMonitorLifecycleAction,
     subscribeSessionMonitorResource: subscribeSessionMonitorResource,
+    createSessionDirtyTracker: createSessionDirtyTracker,
     createSessionMonitorRegistry: createSessionMonitorRegistry,
   };
 }
@@ -13702,6 +13767,71 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }
       return records.length > 0;
     }
+
+    /* ---------------- 批次 3：会话生命周期 → 脏标记（上游 1.2.6 / 1.2.140-1.2.147） ----------------
+     * 只上报「会话 id + 事件名」，**正文永不出 WorkBuddy**（上游明写的隐私边界，原样保留）。
+     * 与多会话监控**各自独立订阅**：脏标记是为了「少做无用扫描」，监控是为了「续跑中断任务」，
+     * 职责不同；合在一起会让两边的重试/解绑互相牵连。
+     * 任何失败（资源拿不到 / 请求失败）都只是**退回「全当脏」**，绝不影响会话本身的运行。
+     */
+    var sessionDirtyResource = null;
+    var sessionDirtyUnsubscribe = null;
+    var sessionDirtyRetryTimer = null;
+    var sessionDirtyUid = '';
+    var sessionDirtyTracker = createSessionDirtyTracker(function (payload) {
+      var body = payload && Array.isArray(payload) ? { events: payload } : (payload || {});
+      if (sessionDirtyUid) body.uid = sessionDirtyUid;
+      api('/api/sessions/dirty', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }).catch(function () {});
+    });
+    api('/api/current').then(function (current) {
+      sessionDirtyUid = String((current && current.uid) || '').trim();
+    }).catch(function () {});
+    function sessionDirtyResourceRecords(resource) {
+      if (!resource || typeof resource.list !== 'function') return null;
+      try {
+        var result = resource.list();
+        return Promise.resolve(result).then(function (value) {
+          if (Array.isArray(value)) return value;
+          if (!value || typeof value !== 'object') return [];
+          return value.agents || value.sessions || value.conversations || value.records || [];
+        });
+      } catch (_) { return null; }
+    }
+    function bindSessionDirtyMonitor() {
+      if (sessionDirtyResource || !WBS_COMPAT || typeof WBS_COMPAT.findSessionsResource !== 'function') return !!sessionDirtyResource;
+      var resource = null;
+      try { resource = WBS_COMPAT.findSessionsResource(document); } catch (_) {}
+      if (!resource) {
+        // 会话资源要等 React 挂载；拿不到就隔 1.5s 再试，绝不阻塞主流程。
+        if (!sessionDirtyRetryTimer) sessionDirtyRetryTimer = setTimeout(function () {
+          sessionDirtyRetryTimer = null;
+          bindSessionDirtyMonitor();
+        }, 1500);
+        return false;
+      }
+      sessionDirtyResource = resource;
+      sessionDirtyUnsubscribe = subscribeSessionMonitorResource(resource, function (update) {
+        sessionDirtyTracker.observe(update);
+      });
+      // 首次快照当基线：**历史行不上报**，只有此后的真变化才算脏。
+      var snapshot = sessionDirtyResourceRecords(resource);
+      if (snapshot) snapshot.then(function (records) { sessionDirtyTracker.baseline(records); }).catch(function () {});
+      return true;
+    }
+    bindSessionDirtyMonitor();
+    registerDisposer(function () {
+      if (sessionDirtyRetryTimer) { clearTimeout(sessionDirtyRetryTimer); sessionDirtyRetryTimer = null; }
+      if (typeof sessionDirtyUnsubscribe === 'function') {
+        try { sessionDirtyUnsubscribe(); } catch (_) {}
+      }
+      sessionDirtyUnsubscribe = null;
+      sessionDirtyResource = null;
+      sessionDirtyTracker.destroy();
+    });
 
     function acMultiBindSessionResource() {
       if (acMulti.sessionResource) return true;

@@ -294,6 +294,7 @@ const copyManifest = require('./copy-manifest.js');
 const autoCopyJudge = require('./auto-copy-judge.js');
 const autoCopyLeader = require('./auto-copy-leader.js');
 const cloudCleanup = require('./cloud-cleanup.js');
+const { createDirtyIndex } = require('./session-dirty.js'); // 批次 3：脏标记索引（纯函数判据层）
 const PROFILE = getProfile();
 const DATA_DIR = defaultDataDir();
 const thirdPartyModels = createThirdPartyImport({ targetFile: workbuddyModelsFile(), dataDir: DATA_DIR });
@@ -8294,6 +8295,102 @@ const files = await copySessionFiles(wbHome, src.id, newId, ownerIds, { skipWork
   }
 }
 
+/* ---------------- 批次 3：脏标记索引（会话生命周期 → 少做无用扫描） ----------------
+ * 上游 1.2.6 的提速骨架。⚠️ **本仓只落接线，开关默认关** —— 理由是上游自己踩过：
+ *   1.2.109 原文「暂停持久化指纹快路径，恢复完整比较，避免旧映射误判」（**上游自己回滚过**），
+ *   1.2.114–1.2.124 才用「行修订号 + 启动批量校准 + fingerprintVersion:2 门控」把它安全做回来。
+ * ⚠️ 本仓的映射**没有** fingerprintVersion / revision 体系 ⇒ 下面 `isAutoCopyRowCleanByDirty` 的
+ * 「映射必须是 fingerprintVersion === 2」这一条**永远不成立** ⇒ 今天**必然不可达**、零行为变化。
+ * 这是**刻意**的：只摘「跳过扫描」那一半而不要门控，就是上游回滚过的那条错路。
+ * 真正的提速要等 A5（revision 体系）落地 —— 它压在 copySessionRecord 的 I-1 红线上，单独一轮做。
+ *
+ * fail-open 是硬要求：索引未建基线 / 查不到映射 / 任何异常 ⇒ 一律**当脏**（走完整比较）。
+ * 判据写反的后果不是变慢，是**静默漏同步**（该复制的会话不复制，界面一切正常、不报错、不红测试）。
+ */
+const SESSION_DIRTY_FILE = path.join(DATA_DIR, 'session-dirty.json');
+const AUTO_COPY_DIRTY_FASTPATH_FILE = path.join(DATA_DIR, 'auto-copy-dirty-fastpath.json');
+let sessionDirtyState = null;
+
+function getSessionDirtyIndex() {
+  if (sessionDirtyState) return sessionDirtyState.index;
+  let raw = null;
+  try { raw = JSON.parse(fs.readFileSync(SESSION_DIRTY_FILE, 'utf8')); } catch (_) {}
+  const index = createDirtyIndex(raw);
+  sessionDirtyState = { index, timer: null, dirty: false };
+  return index;
+}
+function scheduleSessionDirtySave() {
+  const state = sessionDirtyState;
+  if (!state || !state.dirty || state.timer) return;
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    if (!state.dirty) return;
+    state.dirty = false;
+    try {
+      // 本地口径：落盘走 atomicWriteText。上游那边的 replaceFileWithRetry 只是另一套等价物，
+      // 别照抄名字（§46.8 踩过同款）。
+      fs.mkdirSync(path.dirname(SESSION_DIRTY_FILE), { recursive: true });
+      atomicWriteText(SESSION_DIRTY_FILE, JSON.stringify(state.index.state) + '\n');
+    } catch (_) { state.dirty = true; }
+  }, 250);
+  if (typeof state.timer.unref === 'function') state.timer.unref();
+}
+/** 记一条脏标记；**只有真变化才置脏**（同一时刻的重复通知不写盘）。 */
+function markSessionDirty(uid, sessionId, event) {
+  const state = sessionDirtyState || (getSessionDirtyIndex(), sessionDirtyState);
+  const before = state.index.get(uid, sessionId);
+  const marker = state.index.mark(uid, sessionId, event);
+  if (marker && (!before || before.at !== marker.at || before.event !== marker.event)) {
+    state.dirty = true;
+    scheduleSessionDirtySave();
+  }
+  return marker;
+}
+/** renderer 建立基线（`body.ready`）。未建基线的账号一律 fail-open = 全当脏。 */
+function markSessionDirtyBaseline(uid) {
+  const state = sessionDirtyState || (getSessionDirtyIndex(), sessionDirtyState);
+  if (state.index.markBaseline(uid)) { state.dirty = true; scheduleSessionDirtySave(); }
+}
+/** 清一条脏标记；`expectedAt` 不匹配就不清（**并发到来的新事件不许被旧的在飞清理抹掉**）。 */
+function clearSessionDirty(uid, sessionId, expectedAt) {
+  const state = sessionDirtyState || (getSessionDirtyIndex(), sessionDirtyState);
+  if (!state.index.clear(uid, sessionId, expectedAt)) return false;
+  state.dirty = true;
+  scheduleSessionDirtySave();
+  return true;
+}
+
+/** 批次 3 的开关：**默认关**（文件缺失 / 内容不是 {enabled:true} 都算关）。每次规划读一次。 */
+function autoCopyDirtyFastpathEnabled() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(AUTO_COPY_DIRTY_FASTPATH_FILE, 'utf8'));
+    return !!(raw && raw.enabled === true);
+  } catch (_) { return false; }
+}
+
+/**
+ * 「这一行是否被脏索引判定为**干净可跳过**」——是则规划期可以不做完整比较。
+ * **任何一条不满足就返回 false（= 不跳过，走完整比较）**：
+ *   ① 索引已为该源账号建基线（未建基线 = fail-open）；
+ *   ② 该会话在索引里**没有**脏标记；
+ *   ③ 映射存在、有 targetId、且 `fingerprintVersion === 2`（**本仓永远不成立** ⇒ 今天必然不可达）；
+ *   ④ 任何异常一律返回 false。
+ * ⚠️ 开关判断**不在这里**（在调用点短路上），否则每一行都要读一次开关文件。
+ */
+function isAutoCopyRowCleanByDirty(sourceUid, row, rules) {
+  try {
+    const index = getSessionDirtyIndex();
+    if (!index.isInitialized(sourceUid)) return false;
+    if (index.shouldSync(sourceUid, row && row.id)) return false;
+    const lineageId = (rules && rules.allLineages && rules.allLineages[String(row.id)]) || '';
+    if (!lineageId || typeof getAutoCopyMapping !== 'function') return false;
+    const mapping = getAutoCopyMapping(DATA_DIR, lineageId, null) || null;
+    if (!mapping || !mapping.targetId) return false;
+    if (Number(mapping.fingerprintVersion) !== 2) return false;
+    return true;
+  } catch (_) { return false; }
+}
+
 async function buildAutoCopyPlan(sourceUid, targetUid) {
   const source = String(sourceUid || '').trim();
   const target = String(targetUid || '').trim();
@@ -8301,6 +8398,9 @@ async function buildAutoCopyPlan(sourceUid, targetUid) {
   normalizeAutoCopyLineages(DATA_DIR);
   const rules = getAutoCopyRules(DATA_DIR, source);
   if (!rules.allSessions && !rules.sessionIds.length && !rules.workspaces.length) return [];
+  // 批次 3 的开关在**规划开始读一次**（默认关）⇒ 关着时下面每行 `false && ...` 直接短路，
+  // 连 getAutoCopyMapping 都不会调 —— 「加了条判据」不许变成「每行多读一次盘」。
+  const dirtyFastpathOn = autoCopyDirtyFastpathEnabled();
   const rows = await sqliteQuery(
     'SELECT id, cwd, user_id, title, custom_title, status, created_at, updated_at, last_activity_at, is_playground, source_mode, is_background_automation, mode, model, expert_id, expert_locale, expert_runtime_identity, expert_marketplace, permission_mode, use_sandbox_cli, project_id ' +
     'FROM sessions WHERE deleted_at IS NULL AND user_id = ? ORDER BY created_at DESC;',
@@ -8319,15 +8419,23 @@ async function buildAutoCopyPlan(sourceUid, targetUid) {
     // 「对账回写 / 云端回写」来回抖。这里刻意用**按 status 动态过滤**而不是写 suppressed
     // 抑制表：抑制是不可逆的，而用户以后取消归档时理应恢复复制。
     .filter((row) => String(row.status || '') !== 'archived');
+    // 批次 3（守卫版）：脏索引说「干净」且映射带 `fingerprintVersion:2` 才少收这一行。
+    // ⚠️ **刻意独立一步，不挂在上面的过滤链上** —— 那条链（尤其 archived 那条）是既有守卫
+    //    套件（`test-archive-isolation` B1/B2）的锚点，它守的是「归档行不参与复制」这条不变量；
+    //    动它的形态 = 让那条不变量失去守卫。
+    // 开关默认关 + 本仓映射无 fingerprintVersion ⇒ 今天**必然不可达**（见上面的注释块）。
+    const planRows = dirtyFastpathOn
+      ? selectedRows.filter((row) => !isAutoCopyRowCleanByDirty(source, row, rules))
+      : selectedRows;
   // Full-copy and workspace matches need stable hidden lineages for idempotent
   // repeated switches. Prepare the whole batch with one metadata write.
-  const lineageSessionIds = selectedRows
+  const lineageSessionIds = planRows
     .filter((row) => rules.allSessions || workspaceSet.has(canonicalWorkspace(row.cwd)))
     .map((row) => row.id);
   const ensuredLineages = lineageSessionIds.length
     ? ensureAutoCopySessions(DATA_DIR, source, lineageSessionIds, { enabled: !rules.allSessions })
     : {};
-  return selectedRows.map((row) => Object.assign({}, row, {
+  return planRows.map((row) => Object.assign({}, row, {
     lineageId: rules.allLineages[String(row.id)] || ensuredLineages[String(row.id)] || null,
   }));
 }
@@ -15105,6 +15213,41 @@ function handleApiRoute(req, res) {
         if (!body || typeof body.enabled !== 'boolean') return json(res, 400, { ok: false, error: '缺少全量自动复制开关状态' });
         const result = setAutoCopyAllSessions(DATA_DIR, body.enabled);
         return json(res, 200, { ok: true, autoCopyAll: result.allSessions });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: e.message });
+      }
+    });
+  }
+  // 批次 3（上游 1.2.6 / 1.2.142）：renderer 的会话生命周期 feed —— 增量规划用，不上报正文。
+  // 负载**刻意**只有会话 id 与事件名；正文永不出 WorkBuddy，本地 API token 仍是唯一鉴权闸门。
+  if (req.method === 'POST' && p === '/api/sessions/dirty') {
+    return readBody(req).then((body) => {
+      try {
+        const currentUid = String((currentAccount() || {}).uid || '').trim();
+        const claimedUid = String((body && body.uid) || '').trim();
+        // 守卫①（账号切换竞态）：renderer 可能在一次切号**正在替换它的 auth 文件时**才把
+        // 防抖批次刷出来。那种旧页面既不许把**新**账号标脏，也不许把**旧**账号一直标脏。
+        if (currentUid && claimedUid && claimedUid !== currentUid) {
+          return json(res, 409, { ok: false, error: '账号已切换，忽略旧会话通知' });
+        }
+        const uid = currentUid
+          || (/^[A-Za-z0-9_-]{1,128}$/.test(claimedUid) && fs.existsSync(accountBackupFile(claimedUid)) ? claimedUid : '');
+        if (!uid) return json(res, 409, { ok: false, error: '当前账号不可用' });
+        if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { ok: false, error: '脏会话通知格式无效' });
+        // `ready` = renderer 已建立基线；此前该账号一律 fail-open（全当脏）。
+        if (body.ready === true) markSessionDirtyBaseline(uid);
+        const events = Array.isArray(body.events) ? body.events : [];
+        // 守卫②（负载上限）：renderer 最多防抖批 500 条；超了说明对面行为异常，直接拒。
+        if (events.length > 500) return json(res, 400, { ok: false, error: '脏会话通知过多' });
+        let marked = 0;
+        for (const event of events) {
+          const id = String((event && event.id) || '').trim();
+          // 守卫③（逐条过滤非法 id）：id 会被当成文件名/路径片段用，绝不能放行非法形状。
+          if (!isValidSessionId(id)) continue;
+          markSessionDirty(uid, id, String((event && event.event) || 'sessionUpdated'));
+          marked++;
+        }
+        return json(res, 200, { ok: true, marked, initialized: getSessionDirtyIndex().isInitialized(uid) });
       } catch (e) {
         return json(res, 400, { ok: false, error: e.message });
       }

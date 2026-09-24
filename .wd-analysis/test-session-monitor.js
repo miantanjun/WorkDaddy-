@@ -200,7 +200,7 @@ ok(inject.sessionMonitorLifecycleAction({ id: 'task-b', active: false, terminal:
 
 /* ==================================================================== */
 console.log('');
-console.log('结果：' + pass + ' 通过，' + failures.length + ' 失败');
+console.log('结果：' + pass + ' 通过 / ' + failures.length + ' 失败');
 if (failures.length) {
   console.log('失败项：');
   failures.forEach((f) => console.log('  - ' + f));
