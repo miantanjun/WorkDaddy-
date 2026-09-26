@@ -757,8 +757,61 @@ function createSessionMonitorRegistry(options) {
   return { ensure: ensure, update: update, append: append, remove: remove, clear: clear, list: list, get: function (id) { return sessions[String(id || '')] || null; } };
 }
 
+// 将官方消息 store 中的用户/助手消息还原成可直接粘贴的 Markdown。
+// 消息列表可能被虚拟化，复制必须依赖完整 store，而不是当前 DOM 中的节点。
+// 来源：上游 1.2.7（P3「会话用量模块增加复制完整会话的按钮」）—— 本地只取这一个纯函数，
+// 不搬上游那 30 个宿主函数（本地没有 wbs-session-usage-* 模块，见 reports/1.2.7 §3.2 R2/R4）。
+function conversationMessagesToMarkdown(messages) {
+  var source = Array.isArray(messages) ? messages : [];
+  function roleOf(message) {
+    var role = String(message && (message.messageType || message.role || message.type) || '').toLowerCase();
+    if (role === 'user' || role.indexOf('user') >= 0) return 'user';
+    if (role === 'assistant' || role.indexOf('assistant') >= 0) return 'assistant';
+    return '';
+  }
+  function blocksToMarkdown(content) {
+    var parts = [];
+    function visit(value) {
+      if (typeof value === 'string') {
+        parts.push(value);
+        return;
+      }
+      if (Array.isArray(value)) {
+        for (var i = 0; i < value.length; i++) visit(value[i]);
+        return;
+      }
+      if (!value || typeof value !== 'object') return;
+      var type = String(value.type || '').toLowerCase();
+      if (typeof value.text === 'string' && (!type || type === 'text' || type === 'markdown')) {
+        parts.push(value.text);
+        return;
+      }
+      if (typeof value.content === 'string') {
+        parts.push(value.content);
+        return;
+      }
+      if (value.content) visit(value.content);
+      else if (value.children) visit(value.children);
+    }
+    visit(content);
+    return parts.join('\n');
+  }
+  var turns = [];
+  for (var i = 0; i < source.length; i++) {
+    var message = source[i];
+    var role = roleOf(message);
+    if (!role || /^timeline:/.test(String(message && message.id || ''))) continue;
+    var markdown = blocksToMarkdown(message && message.content);
+    if (!markdown) continue;
+    // WorkDaddy 的完成标记是内部 Markdown 定义，不属于用户看到的回复正文。
+    if (role === 'assistant') markdown = markdown.replace(/\n?\[wbs-reply-done\]:\s*#\s*$/, '');
+    turns.push((role === 'user' ? '用户' : '助手') + '：\n\n' + markdown);
+  }
+  return turns.join('\n\n---\n\n');
+}
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    conversationMessagesToMarkdown: conversationMessagesToMarkdown,
     createUsageActivity: createUsageActivity,
     createBuildLifecycle: createBuildLifecycle,
     createBrandClickAction: createBrandClickAction,
@@ -2362,9 +2415,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var toastRuntime = window.__wbsToastRuntime;
     if (!toastRuntime) throw new Error('通知组件未加载');
     registerDisposer(function () { toastRuntime.destroy(); });
-    function toast(msg, isErr, targetRoot) {
+    function toast(msg, isErr, targetRoot, level) {
       if (!alive) return;
-      return toastRuntime.show({ message: wbsTranslateString(String(msg == null ? '' : msg), WBS_LANGUAGE), level: isErr ? 'error' : 'info' });
+      return toastRuntime.show({ message: wbsTranslateString(String(msg == null ? '' : msg), WBS_LANGUAGE), level: level || (isErr ? 'error' : 'info') });
     }
     function receiveToast(detail) {
       if (!alive) throw new Error('通知组件已关闭');
@@ -6929,6 +6982,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     function usageTrendGroups(days, records, dimension, names) {
       var groups = new Map();
       (records || []).forEach(function (row) {
+        // 积分趋势里「账号合计」与「模型明细」共享同一份记录数组；不含当前维度的行
+        // 属于另一个视图，不能变成一个凭空的「未识别模型」/「未关联账号」分组。
+        if (!Object.prototype.hasOwnProperty.call(row, dimension)) return;
         var key = String(row[dimension] || '');
         var group = groups.get(key);
         if (!group) {
@@ -8736,12 +8792,45 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       body.innerHTML = html;
     }
 
+    // 复制当前会话为 Markdown：走官方消息 store（不是 DOM —— 列表会虚拟化）。
+    // 取会话控制器复用本地既有 acFindConversationController（与成本卡同一个「当前会话」口径）。
+    function copyCurrentConversation() {
+      var btn = sessionsPane && sessionsPane.querySelector('#wbs-cost-copy');
+      var controller = null;
+      try { controller = acFindConversationController(); } catch (_) { controller = null; }
+      if (!controller || !controller.messageStore) {
+        toast('没找到当前会话（先随意发一条消息再试）', true, sessionsPane);
+        return;
+      }
+      var markdown = "";
+      try { markdown = conversationMessagesToMarkdown(controller.messageStore.getState().messages); }
+      catch (_) { markdown = ""; }
+      if (!markdown) {
+        toast('这个会话还没有可复制的内容', true, sessionsPane);
+        return;
+      }
+      var finish = function () { if (btn) { btn.disabled = false; btn.classList.remove("is-loading"); } };
+      if (btn) { btn.disabled = true; btn.classList.add("is-loading"); }
+      copyPlainText(markdown).then(function () {
+        toast('会话已复制到剪贴板', false, null, 'success');
+        finish();
+      }, function (e) {
+        toast('复制失败: ' + ((e && e.message) || e), true, sessionsPane);
+        finish();
+      });
+    }
+
     function refreshSessionCost() {
       if (!sessionsPane || !sessionsPane.dataset.built) return;
       var btn = sessionsPane.querySelector('#wbs-cost-refresh');
       if (btn && !btn.__wbsBound) {
         btn.__wbsBound = 1;
         btn.addEventListener('click', function () { refreshSessionCost(); });
+      }
+      var copyBtn = sessionsPane.querySelector('#wbs-cost-copy');
+      if (copyBtn && !copyBtn.__wbsBound) {
+        copyBtn.__wbsBound = 1;
+        copyBtn.addEventListener('click', function () { copyCurrentConversation(); });
       }
       if (sessionCostState.fetching) return;
       var sid = '';
@@ -8785,6 +8874,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<div class="wbs-cost-head">' +
         '<span class="wbs-cost-title">单会话成本</span>' +
         '<span class="wbs-cost-badge" id="wbs-cost-badge">读取中…</span>' +
+        '<button class="wbs-cost-copy" type="button" id="wbs-cost-copy" title="复制整个会话为 Markdown">\u29c9</button>' +
         '<button class="wbs-cost-refresh" type="button" id="wbs-cost-refresh" title="重新读取">\u21bb</button>' +
         '</div>' +
         '<div class="wbs-cost-body" id="wbs-cost-body"></div>' +
@@ -9977,6 +10067,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         }
         pending = true;
         okBtn.disabled = true;
+        var pendingLabel = okBtn.textContent;
+        okBtn.textContent = '删除中…';
+        okBtn.classList.add('is-loading');
+        okBtn.setAttribute('aria-busy', 'true');
         api('/api/sessions/delete', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -9991,7 +10085,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           toast('删除失败: ' + (e.message || e), true, root);
         }).finally(function () {
           pending = false;
-          if (okBtn.onclick === submit) okBtn.disabled = false;
+          if (okBtn.onclick === submit) {
+            okBtn.disabled = false;
+            okBtn.textContent = pendingLabel;
+            okBtn.classList.remove('is-loading');
+            okBtn.removeAttribute('aria-busy');
+          }
         });
       };
       titleEl.textContent = '正在检查删除范围…';
@@ -18838,7 +18937,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-fab.is-dragging .button{cursor:grabbing}',
     '.wbs-fab.is-snapping{transition:right .56s cubic-bezier(.22,1.35,.36,1),bottom .56s cubic-bezier(.22,1.35,.36,1)}',
     /* 面板：毛玻璃主题（半透明 + 模糊，背景图透出） */
-    '.wbs-panel{position:absolute;right:0;bottom:0;width:720px;max-width:94vw;height:650px;max-height:650px;background:color-mix(in srgb,var(--wb-bg-popover,#fff) 72%,transparent);border:1px solid var(--wb-border-subtle,#f0f0f0);border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.28);display:none;flex-direction:column;overflow:hidden;backdrop-filter:blur(28px) saturate(1.25);-webkit-backdrop-filter:blur(28px) saturate(1.25)}',
+    '.wbs-panel{position:absolute;right:0;bottom:0;width:720px;max-width:94vw;height:650px;max-height:calc(100vh - 110px);background:color-mix(in srgb,var(--wb-bg-popover,#fff) 72%,transparent);border:1px solid var(--wb-border-subtle,#f0f0f0);border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.28);display:none;flex-direction:column;overflow:hidden;backdrop-filter:blur(28px) saturate(1.25);-webkit-backdrop-filter:blur(28px) saturate(1.25)}',
     '.wbs-panel.show{display:flex}',
     // 英文文案更长：英文面板额外加宽，配合 label 自适应避免挤压
     'html[data-wbs-language="en"] .wbs-panel{width:880px}',
@@ -18860,7 +18959,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     /* 元素检查拾取按钮（隐藏入口，连点标题 5 次显示） */
     '.wbs-pick-btn{flex:0 0 auto;width:22px;height:22px;border:none;border-radius:7px;background:color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 14%,transparent);color:var(--wb-accent-blue,#4f86ff);font-size:12px;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:background .15s}',
     '.wbs-pick-btn:hover{background:color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 24%,transparent)}',
-    '.wbs-btn-close{border:none;background:none;color:var(--wb-icon-tertiary,#999);font-size:16px;cursor:pointer;padding:4px 6px;border-radius:6px;line-height:1}',
+    '.wbs-btn-close{position:relative;z-index:1;border:none;background:none;color:var(--wb-icon-tertiary,#999);font-size:16px;cursor:pointer;padding:4px 6px;border-radius:6px;line-height:1}',
     '.wbs-btn-close:hover{color:var(--wb-color-text-primary,#1f1f1f);background:var(--wb-bg-hover,#f5f5f5)}',
     '.wbs-body{overflow-y:auto;padding:10px 10px 6px;flex:1;min-height:0;height:calc(650px - 170px);max-height:none}',
     /* 账号卡片：头像 + 信息 + 右侧操作 */
@@ -19056,11 +19155,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-explore-inline.wbs-menu-closed .wbs-explore-pop{opacity:0;visibility:hidden;pointer-events:none;transform:translateX(-50%) translateY(6px)}',
     /* 弹窗卡片：适配插件主题的毛玻璃；面板整体为默认箭头，仅选项 hover 变点击手型 */
     '.wbs-explore-card{position:relative;padding:8px;border-radius:12px;background:color-mix(in srgb,var(--wb-bg-popover,#fff) 62%,transparent);backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);border:1px solid var(--wb-border-subtle,#ececec);box-shadow:0 12px 32px rgba(0,0,0,.18);color:var(--wb-color-text-primary,#1f1f1f);cursor:default}',
+    'html[data-wbs-theme-id="nebula"] .wbs-explore-card{background:color-mix(in srgb,var(--wb-bg-popover,#1a1729) 88%,transparent);background-color:color-mix(in srgb,var(--wb-bg-popover,#1a1729) 88%,transparent);box-shadow:0 14px 36px rgba(0,0,0,.38)}',
     '.wbs-explore-item{position:relative;display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:8px;font-size:12px;color:var(--wb-color-text-primary,#1f1f1f);line-height:1.4;cursor:pointer}',
     '.wbs-explore-it{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.wbs-explore-item:hover{background:color-mix(in srgb,var(--wb-bg-hover,#f3f3f3) 76%,transparent)}',
     /* 选项 hover：antd 风格 tooltip（半透明毛玻璃小气泡，出现在选项左侧，完全展示文字） */
     '.wbs-explore-tip{position:absolute;right:calc(100% + 10px);top:50%;transform:translateY(-50%);display:block;width:max-content;padding:5px 11px;border-radius:8px;font-size:11px;line-height:1.35;white-space:normal;word-break:break-word;max-width:240px;color:var(--wb-color-text-primary,#1f1f1f);background:var(--wb-bg-popover,#fff);border:1px solid color-mix(in srgb,var(--wb-border-subtle,#ececec) 65%,transparent);box-shadow:0 6px 20px rgba(0,0,0,.16);opacity:0;visibility:hidden;transition:opacity .15s ease;pointer-events:none;z-index:2}',
+    'html[data-wbs-theme-id="nebula"] .wbs-explore-tip{background:color-mix(in srgb,var(--wb-bg-popover,#1a1729) 94%,transparent);background-color:color-mix(in srgb,var(--wb-bg-popover,#1a1729) 94%,transparent);border-color:var(--wb-border-strong,#3a3160);box-shadow:0 8px 24px rgba(0,0,0,.4);backdrop-filter:blur(14px) saturate(1.12);-webkit-backdrop-filter:blur(14px) saturate(1.12)}',
     /* 滚动条默认透明，滚动/悬停时才出现（内容多时可上下滚动，内容少完全展示无滚动条） */
     '.wbs-explore-tip-body{display:block;max-height:240px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:transparent transparent;white-space:normal;word-break:break-word}',
     '.wbs-explore-tip-body::-webkit-scrollbar{width:6px}',
@@ -19204,6 +19305,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-cost-badge.is-off{background:rgba(150,150,150,.16);color:var(--wb-icon-secondary,#666)}',
     '.wbs-cost-refresh{margin-left:auto;width:22px;height:22px;line-height:1;border:1px solid var(--wb-border-subtle,#ececec);border-radius:8px;background:transparent;color:var(--wb-icon-secondary,#666);font-size:13px;cursor:pointer}',
     '.wbs-cost-refresh:hover{background:var(--wb-bg-hover,#f5f5f5)}',
+    '.wbs-cost-copy{margin-left:auto;width:22px;height:22px;line-height:1;border:1px solid var(--wb-border-subtle,#ececec);border-radius:8px;background:transparent;color:var(--wb-icon-secondary,#666);font-size:13px;cursor:pointer}',
+    '.wbs-cost-copy:hover{background:var(--wb-bg-hover,#f5f5f5)}',
+    '.wbs-cost-copy.is-loading{opacity:.5;cursor:wait}',
     '.wbs-cost-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}',
     '.wbs-cost-cell{display:flex;flex-direction:column;gap:1px;padding:7px 9px;border-radius:10px;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 40%,transparent);border:1px solid var(--wb-border-subtle,#f2f2f2)}',
     '.wbs-cost-k{font-size:10px;color:var(--wb-icon-tertiary,#999);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
@@ -19477,6 +19581,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-modal-btn:hover{background:var(--wb-bg-hover,#f5f5f5);color:var(--wb-color-text-primary,#1f1f1f);border-color:var(--wb-border-strong,#bbb)}',
     '.wbs-modal-btn.wbs-modal-ok{color:#fff;background:#141416;border-color:#141416}',
     '.wbs-modal-btn.wbs-modal-ok:hover{background:#2a2a2e;color:#fff}',
+    '.wbs-modal-btn.is-loading{display:inline-flex;align-items:center;justify-content:center;gap:6px;cursor:wait}',
+    '.wbs-modal-btn.is-loading::before{content:"";width:11px;height:11px;box-sizing:border-box;border:1.5px solid currentColor;border-top-color:transparent;border-radius:50%;animation:wbs-modal-btn-spin .72s linear infinite}',
+    '@keyframes wbs-modal-btn-spin{to{transform:rotate(360deg)}}',
     /* 免打扰确认弹窗：红字确认按钮（高危操作，用红色警示） */
     '.wbs-modal-btn.wbs-modal-danger{color:#fff;background:#c62828;border-color:#c62828}',
     '.wbs-modal-btn.wbs-modal-danger:hover{background:#b71c1c}',

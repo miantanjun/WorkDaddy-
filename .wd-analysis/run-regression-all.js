@@ -59,6 +59,7 @@ const SUITES = [
   ['test-structured-error.js', 102],  // F2 第二期（渲染层结构化错误）+ A3（模型级冷却）：形状无关扫描（多字段容错/不误报/循环与深度安全）+ 合成观测「无信号时与 F2 之前逐字相同」+ CDP 表达式自包含且伪页面真跑（幂等/抗 adapter 重建/sink 不外抛/环上限）+ isUsableForFailover 第 4 参 modelId（不传零变化）+ pickFailoverTarget 透传 + 切片反向守卫 + mac 白名单
   ['test-usage-unified-credit.js', 52],  // 2026-09-23 统一用量看板积分口径：同 id 只计一次（含旧实现 3× 对照）+ 权威源 credit_usage_records 三维聚合 + 兜底去重 + 窗口过滤 + 看板模板占位符/转义/内联脚本可解析 + daemon queryCredit 接线与「分子分母同区间」守卫；同日补 F 组（会话排行标题装配）：来源标注不留空白 + 第三方已给标题**也要脱敏**（官方自动标题＝首条提问截断）+ 血缘接回原始 id（缺 sessionIndex 就接不回）+ 查不到留空计 unresolved 不编造 + 快照只收非空真标题
   ['test-session-titles.js', 18],  // 2026-09-23 会话排行标题多源解析（修「未命名会话」）：解析优先级不许乱序（db→血缘→快照→正文 aiTitle→客户端缓存→首条提问）+ 两套 id 桥接（副本 jsonl 文件名 ↔ 内容 sessionId 互为别名，正反双向）+ 脱敏（凭据/手机号一律打码，含官方标题）+ 纪律（查不到返回空不编造 / 快照只增不减 / root 缺失只砍正文桥接不抛）
+  ['test-upstream-127.js', 95],  // 上游 1.2.7 吸纳/批次 1+2+3：theme-patches 3 条新补丁（patch-102/103/104 逐条 CSS 片段 + 老条目未丢）+ usageModel 行为级四形状（旧代码是 [object Object]）+ 缓存版本 1→2（常量 + **行为级**：v1 忽略/v2 采纳）+ inject.js 六处定点 10 落点与 4 处旧形态消失 + toast 第四参向后兼容 + [F] Linux 三段（11 落点 + 上游 open-url 行为规范的 vm 真跑：三平台命令/参数/unref、非 http(s) 拒且不 spawn、缺 xdg-open 时 500 且**错误不回流 URL**）；含三条边界登记（数字 0 被 String(0) 采用 / usageModel(null) 抛 TypeError 但生产不可达 / 第二处 IS_WIN||IS_LINUX 属本地既有 CDP 路径）
 ];
 
 const out = [];
