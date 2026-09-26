@@ -544,10 +544,11 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //           + `refreshAccountBackupToken` 的「加密备份不回写」纪律），并已在客户端升到 5.6.2 后
 //           用**真信封**验收通过（账号列表 / 积分 / 切号 / 成长 全绿，账号备份仍全为密文、零明文副本）。
 //        全量回归 51 套件 / 3511 断言全绿。
-const DAEMON_VERSION = '1.8.0';
+// 1.2.7 吸纳（v1.9.0）：批次 1 零冲突套用 + 批次 2 自研「复制整个会话」+ 批次 3 Linux 三段。
+const DAEMON_VERSION = '1.9.0';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
-const UPSTREAM_VERSION = '1.2.6';
+const UPSTREAM_VERSION = '1.2.7';
 // 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.5）。
 // 本机 fork 用自己的修改版版本号（当前 1.8.x = 上游 1.2.6 基线 + 本地增强），否则更新检查会误判。
 // 1.5.0-b：省 token 专项批次 —— 账号页通用折叠卡片（自动切换 / 换号续跑 / 上下文体检三卡默认收起，
@@ -567,7 +568,7 @@ const UPSTREAM_VERSION = '1.2.6';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.8.0-20260924-upstream-126-absorbed-r1';
+const DAEMON_BUILD_ID = 'release-1.9.0-20260926-upstream-127-absorbed-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
