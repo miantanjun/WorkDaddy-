@@ -58,6 +58,40 @@
 - 技能 `workdaddy-maintain` → `references/02-补丁与上游同步.md` **§52** 固化 9 条经验（整份套用的四步动作 / 缓存版本号必须同批 / 锚点必须从本地取 / 未守卫的已导出函数只钉契约 / 有意语义偏差要登记 / 自研替代整块搬运的判据 / 测试日期口径 / 免费继承项要显式量 / 交接断层先找上一会话工作区）。
 - 边界登记 3 条（**非缺陷**，照上游语义保留、仅在测试中钉契约）：① `usageModel` 的数字形状 `0` 会被 `String(0)` 成 `"0"` 并采用；② `usageModel(null / undefined)` 抛 `TypeError`（上游未做入参守卫，生产路径不可达 —— 调用方 `normalizeUsageRow` 已先校验入参是对象）；③ `daemon.js` 里 `if (IS_WIN || IS_LINUX) {` 的第二处属**本地既有**的 CDP 启动路径，与本版无关。
 
+### 发布
+
+- tag `v1.9.0`（annotated）→ `c5dafc8`；CI run `36252710508` —— **19 步全绿 / 3 分 27 秒**；
+  Release [WorkBuddy 助手 1.9.0](https://github.com/miantanjun/WorkDaddy-/releases/tag/v1.9.0)（id `397293057`）。
+- 4 资产（`assets[].digest` 原值）：
+
+  | 资产 | 大小 | SHA-256 |
+  |---|---|---|
+  | `WorkDaddy-Setup-1.9.0.exe` | 27.7 MB | `7b6dbfa5eea0d0ef7e803bd0ad54caef80abff43c7b93321819507825449e891` |
+  | `WorkDaddy-AI-Setup-1.9.0.exe` | 27.7 MB | `7630765ef614b276d5560ef825b08aa90ad8e6441fe08db4b22bd828797f10e3` |
+  | `WorkDaddy-Portable-1.9.0.zip` | 39.0 MB | `4c6b21409d39df96206800f1a8b106b2fa2d0c9a947cad1afeeba8c349b3a5f9` |
+  | `WorkDaddy-AI-Portable-1.9.0.zip` | 39.0 MB | `e7a638858e3a15cbe269bdde78ad8d50bda87a2d507907f21b8a35c732a85d74` |
+
+- **实包复验**（下便携版 → 比 digest → **真解压读正文**，脚本 `.wd-tmp/verify-zip-190.py`）：**全部通过**。
+  **176 条目**；本地 SHA-256 与 Release `digest` **逐字节一致**；包内 `package.json` / `package-lock.json`
+  三处均为 `1.9.0`（`ws` 依赖仍 `8.21.3`，未被误改）；包内 `daemon.js` = `1.9.0` /
+  `release-1.9.0-20260926-upstream-127-absorbed-r1` / `UPSTREAM_VERSION = 1.2.7`；
+  **本版 5 个改动文件的 1.2.7 特征串都能在包内源码正文里读到**（主题补丁 `patch-102/103/104`、
+  `modelText`+`usageModel`、`CREDIT_HISTORY_CACHE_VERSION = 2`、`conversationMessagesToMarkdown`+`wbs-cost-copy`、
+  `sleepInhibit`+`systemd-inhibit`+`xdg-open`），且本仓自有特征（`wbs-mdp-dock` 等）未被上游版覆盖。
+- ⚠️ **首次 CI 在「生成 Windows 安装暂存包」一步失败**（28 秒处中止，19 步只过 8 步）；
+  但对照上一版同一步的**正常耗时是 90 秒**（两遍 profile 各约 45s）⇒ 判定为 runner 上的**瞬时失败**。
+  本地逐项排除了与本次改动相关的可能：`npm ci` 用**同一份** manifest+lock 本地 `rc=0`、
+  Node 运行时镜像文件 SHA 与脚本钉死值**一致**、`scripts/` 下**无非 ASCII 路径**、版本解析与 builtin 校验均通过。
+  **重推 tag 后 19/19 全绿** ⇒ 结论：**不是代码问题**。
+- 本轮踩到并已记入技能的两条运维事实：
+  ① **构建日志匿名 403 拿不到**（`/actions/jobs/<id>/logs`）⇒ 只能用 `jobs` API 的**逐步时间戳**反推失败相位（本次正是靠与上一版耗时对照定的性）；
+  ② **Release 资产 CDN（`release-assets.githubusercontent.com`）直连只有 0.06 MB/s**（39 MB 需约 15 分钟）
+  ⇒ 走镜像（`gh-proxy.com` 实测 1.2–2.6 MB/s，11 秒下完）；因为要与 Release `digest` 比对 SHA-256，
+  **镜像不影响完整性判定**（改不了字节）。
+- ⚠️ **复验脚本自身的一个假红已修**：Windows 包顶层**按设计不带 `README.md`**（只有 `Start/Stop .cmd` +
+  `WorkDaddy.portable` + `WorkDaddyLauncher.exe` + `scripts/`），用 `endswith('README.md')` 会匹配到
+  `scripts/node_modules/ws/README.md` ⇒ 改为**按精确条目名**判（没有就记为「不适用」而不是失败）。
+
 ---
 
 ## v1.8.0 —— 2026-09-24
