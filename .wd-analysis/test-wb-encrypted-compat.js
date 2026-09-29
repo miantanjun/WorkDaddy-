@@ -296,10 +296,13 @@ section('[F] 接线账本：lib 层 + daemon 层均已接线（防「假装做�
 /* ==================================================================== */
 
 // lib 层：三个「读账号文件」入口已解密
+// ⚠️ 窗口 900 → 1600：1.2.8 的 `setAccountNote` 与 `listAccounts` 新增的 `note:` 行
+//    把 listAccounts 内 `wdCompatDecryptAuthJson` 的偏移从 +874 推到 +981，
+//    刚好越过原来的 900 字符窗口（**不是接线丢了**，见 2026-09-27 吸纳复盘）。
 const libEntries = ['function parseAuthFile(', 'function parseAuthJson(', 'function listAccounts('];
 ok(libEntries.every((fn) => {
   const i = LIB_SRC.indexOf(fn);
-  return i >= 0 && LIB_SRC.slice(i, i + 900).includes('wdCompatDecryptAuthJson');
+  return i >= 0 && LIB_SRC.slice(i, i + 1600).includes('wdCompatDecryptAuthJson');
 }), 'F1 lib 层三个读入口（parseAuthFile / parseAuthJson / listAccounts）都已接解密');
 
 // daemon 层：裸 token 直读模式必须**全部清零**（接线前这里是 16，现应为 0）

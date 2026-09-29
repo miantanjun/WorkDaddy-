@@ -161,8 +161,12 @@ section('[A] 纪律 1：数字错比报错糟糕（宁缺勿猜）');
     'A15 undated 记录的 input **没有**被算进总量（旧实现会漏算；回落到 now 则总量对得上、位置错，更糟）');
   eq(stats.totals.output, 100, 'A16 undated 记录的 output 同样不进总量');
   const datedDays = (stats.daily || []).map((row) => row.day);
-  ok(datedDays.length === 1 && datedDays[0] === new Date(tAgo(1)).toISOString().slice(0, 10),
-    'A17 日期维度只出现有真实时间戳的那一天（undated 不落任何日期桶）', datedDays);
+  // ⚠️ 口径必须与模块一致：日期桶用的是**本地**日期（`tokenStats.localDayString`），
+  //    不是 `toISOString().slice(0,10)`。在 +08:00 下两者会差一天，而这个套件跑在
+  //    本地 00:00–08:00 时 UTC 还停在前一天 ⇒ 旧写法每天有一段时间必红。
+  //    详见 references/02-补丁与上游同步.md §52.7。
+  ok(datedDays.length === 1 && datedDays[0] === tokenStats.localDayString(tAgo(1)),
+    'A17 日期维度只出现有真实时间戳的那一天（undated 不落任何日期桶）—— 日期口径用本地日期，与模块一致', datedDays);
 }
 
 /* ==================================================================== */

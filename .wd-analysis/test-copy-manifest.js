@@ -312,7 +312,14 @@ function makeFixture() {
     console.log('      真实分布（扫描版本 v' + rm.scanVersion + '，payloadSplit=' + rm.payloadSplit + '）：'
       + JSON.stringify(tiers));
     ok(tiers[0] >= rm.entries.length * 0.5, 'H2 大多数普通会话落在 0 档（不会被无谓重排）', tiers);
-    ok(tiers[3] === 0, 'H3 本机没有「文件洪水」型会话（这类要靠阈值兜底，不是靠本机数据）', tiers);
+    // H3 原为「本机没有『文件洪水』型会话」—— 那是**环境状态**，不是产品不变量：
+    // 用户的会话文件数会自然增长（2026-09-29 实测本机 3 档已出现 3 条），断言环境等于
+    // 让数据变化去红套件。改成断言「归类确定」（同输入两次同结果）：本机有多少条落在
+    // 3 档都能通过，而 tierOf 一旦变成随机/有状态仍会立刻被抓。
+    const tiersAgain = { 0: 0, 1: 0, 2: 0, 3: 0 };
+    rm.entries.forEach((x) => { tiersAgain[cm.tierOf(x)] += 1; });
+    ok(JSON.stringify(tiers) === JSON.stringify(tiersAgain),
+      'H3 tierOf 归类确定（同输入同输出）；本机落在 3 档的条数随数据变化，不作为断言', tiers);
     const realIndex = cm.indexManifest(rm);
     // 复制任务一次只处理**一个源账号**，所以按 uid 取一个子集来跑（uid 是索引键的一部分）。
     const firstUid = (rm.entries[0] || {}).uid || '';

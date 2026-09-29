@@ -4,7 +4,7 @@
  *
  * 为什么要有这张表：
  *   我们与上游的差异必须可机器校验，否则「唯一差异」这类注释会随时间说谎。
- *   本表是唯一真相：`fixtures/session-sync.upstream-1.2.6.js` + 依次应用本表 == `scripts/session-sync.js`。
+ *   本表是唯一真相：`fixtures/session-sync.upstream-1.2.8.js` + 依次应用本表 == `scripts/session-sync.js`。
  *   test-session-sync-124.js 的 [A] 段就在校验这个等式。
  *
  * 维护方式：改 scripts/session-sync.js 时，**先改本表再重生成**（不要直接改工作副本），
@@ -38,6 +38,18 @@
  *   1.2.5 那份 fixture（sha256 `e93ea36390515d40…`）已退休，副本留在
  *   `_backup/scripts-20260924-151509/session-sync.upstream-1.2.5.js`。
  *
+ * 2026-09-27 基线从上游 1.2.6 → **1.2.8**（见 WorkDaddy-上游1.2.8吸纳建议报告-2026-09-27.md §4 批 2）：
+ *   上游 1.2.8 把 session-sync.js 从 46 826 B 扩到 51 098 B（937 → 1 037 行），新增：
+ *     · `SYNC_BACKUP_DIR`（`/^sync-[A-Za-z0-9_-]+$/`）与 `DEFAULT_SYNC_BACKUP_MAX_AGE_MS`（30 天）
+ *     · `pruneSyncBackups(root, { now, maxAgeMs })` —— `committed`/`rolled-back` 立即删、
+ *       `recovery-needed` **永久保留**、`prepared`/无状态超期清；daemon 启动时跑一次 + 两个新路由
+ *     · `inspectSyncBackups(root)` —— 只读目录项 + stat 元数据，**绝不回内容**（占用摘要给面板）
+ *     · `changedTargetFiles(changes, target)` —— 回滚副本**只为会被覆盖/删除的文件**做，
+ *       新文件没有旧字节可还原（`applySnapshot` / `applySnapshotAsync` 两侧都改用它）
+ *     · `applySnapshot*` 成功/完整回滚后 `removeSyncBackup*` 立即清理临时快照目录
+ *   这五项**全部是上游原生能力**，本地**零定制** ⇒ 无新 delta，7 条旧 delta 逐条仍恰好命中 1 次。
+ * ⚠️ 1.2.6 那份 fixture（sha256 `d8274ce4eb91f0ad…`）已退休，副本留在 `_backup/scripts-20260927160903/`。
+ *
  * ⚠️ 已知边界（有意为之，不是遗漏）：delta-2 系列**只加在同步版 `readSnapshot` 上**。
  *   1.2.6 新增的异步孪生 `readSnapshotAsync` 没有 skipPrefixes 支持。本地 daemon 目前只用同步版
  *   （D2 事务写入器 + 快照域），故无行为差异；**将来若切到异步版必须先补这组 delta**，否则产物会被
@@ -55,8 +67,8 @@
  *   `'会话文件过大，未自动同步'` 文案一并删除。**只删上限不加惰性读 = 内存无界，是真回归。**
  */
 
-const UPSTREAM_VERSION = '1.2.6';
-const UPSTREAM_SHA256 = 'd8274ce4eb91f0ad30e0e8de1a28706b85907875099f658662f8859b52caa73f';
+const UPSTREAM_VERSION = '1.2.8';
+const UPSTREAM_SHA256 = '19d3262f23fb3e55f541e48c7f951e55947a4528999f6690ffdc76c05eeae46d';
 
 const DELTAS = [
   {
@@ -66,10 +78,10 @@ const DELTAS = [
     to: [
       '\'use strict\';',
       '',
-      '// ⚠️ 本文件是**产物**，由 .wd-analysis/fixtures/session-sync.upstream-1.2.6.js + session-sync.deltas.js',
+      '// ⚠️ 本文件是**产物**，由 .wd-analysis/fixtures/session-sync.upstream-1.2.8.js + session-sync.deltas.js',
       '//   经 regen-session-sync.js 生成。要改行为 ⇒ **先改 deltas 表再重生成**；直接改本文件会让',
       '//   test-session-sync-124.js 的 [A] 组「上游原文 + delta 表 == 工作副本」逐字节锁立刻翻红。',
-      '//   本地与上游的**全部**差异都在 deltas 表里登记，其余逐字节一致，便于日后 diff 上游 1.2.6+。',
+      '//   本地与上游的**全部**差异都在 deltas 表里登记，其余逐字节一致，便于日后 diff 上游 1.2.8+。',
       '//   （1.2.6 的 `session-meta` 排除、`SKIP_LOCAL_DIR`、异步读取族都是**上游原生**能力，不是本地 delta。）',
       '//   [delta-2] readSnapshot 第 4 参 options.skipPrefixes：允许调用方把体积可达数百 MB 的',
       '//     workspace/sessions/<id>/ 排除在内容快照之外（交回 daemon 的产物二阶段推进）。不传 ⇒ 与上游等价；',

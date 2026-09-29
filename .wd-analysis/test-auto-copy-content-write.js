@@ -186,21 +186,75 @@ let verifyCalls = 0;
   ok(fs.existsSync(path.join(SB, 'workspace', 'sessions', T, 'payload.bin')),
     'C11 产物目录里的文件**一点没动**（快照域外，交二阶段复制）');
 
-  const backups = fs.readdirSync(BACKUP_ROOT).filter((n) => /^sync-[A-Za-z0-9]{6}$/.test(n));
-  ok(backups.length === 1, 'C12 产生且只产生一份事务备份（回滚凭据）', backups);
-  const journal = JSON.parse(fs.readFileSync(path.join(BACKUP_ROOT, backups[0], 'journal.json'), 'utf8'));
-  ok(journal.status === 'committed' && journal.sourceId === S && journal.targetId === T,
-    'C13 journal 记 committed 且带源/目标 id（可审计）', { s: journal.status, src: journal.sourceId, tgt: journal.targetId });
-  // ⚠️ 备份内路径用的是**逻辑键**（projects/<proj>/__session__.jsonl），不是目标 id ——
-  //    与 readSnapshot 的 key 一致，所以这里断言逻辑键。
-  ok(fs.existsSync(path.join(BACKUP_ROOT, backups[0], 'files', 'projects', 'p-one', '__session__.jsonl')),
-    'C14 备份里存着**目标旧字节**（这是能回滚的前提）');
+  // ⚠️ 语义变更（上游 1.2.8）：`applySnapshot*` 在**成功提交后立即删除**自己的回滚备份
+  //    （journal 记 committed 之后 `removeSyncBackup(backup)`）。所以「提交后还剩一份备份」
+  //    不再是正确行为 —— 1.2.8 起只有 `recovery-needed`（写到一半失败）的备份才留存。
+  const leftovers = fs.readdirSync(BACKUP_ROOT).filter((n) => /^sync-[A-Za-z0-9_-]+$/.test(n));
+  ok(leftovers.length === 0,
+    'C12 ⭐ 1.2.8 起「提交即清理」：成功提交后**不残留**事务备份（旧断言是 length===1）', leftovers);
+  const inspected = sync.inspectSyncBackups(BACKUP_ROOT);
+  ok(inspected.count === 0 && inspected.totalBytes === 0 && inspected.recoveryCount === 0,
+    'C13 空备份目录下 inspectSyncBackups 返回全 0（面板读到的占用数不会骗人）', inspected);
+
+  // 回滚凭据仍然可达：只读备份内容这件事由 inspectSyncBackups **明确不做**（绝不回内容）。
+  // 这里反向确认它的返回体里没有任何文件内容字段。
+  ok(!JSON.stringify(inspected).includes('__session__') && !JSON.stringify(inspected).includes('bytes:'),
+    'C14 inspectSyncBackups 只回占用与状态摘要，**绝不**回备份内容（跨机泄漏面为 0）', inspected);
 
   // 为什么「源自复制」必须保留 copySessionFiles：applySnapshot 明确拒绝自复制
   let selfRejected = false;
   try { await judge.applySnapshot(srcSnap, judge.readWritableSnapshot(SB, S, aliases), { backupRoot: BACKUP_ROOT }); }
   catch (_) { selfRejected = true; }
   ok(selfRejected, 'C15 反证：applySnapshot 拒绝 source.id === target.id ⇒ 源自身只能靠 copySessionFiles 自复制');
+
+  /* ================================================================== */
+  section('[C2] 1.2.8 回滚备份生命周期：pruneSyncBackups / inspectSyncBackups');
+  /* ================================================================== */
+  {
+    const root2 = path.join(SB, 'prune-root');
+    const mk = (name, status, ageMs) => {
+      const dir = path.join(root2, name);
+      fs.mkdirSync(path.join(dir, 'files'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'files', 'blob.bin'), Buffer.alloc(1024, 7));
+      fs.writeFileSync(path.join(dir, 'journal.json'), JSON.stringify({ version: 1, status }));
+      if (ageMs) {
+        const t = (Date.now() - ageMs) / 1000;
+        fs.utimesSync(dir, t, t);
+      }
+      return dir;
+    };
+    mk('sync-committed1', 'committed');
+    mk('sync-rolledback1', 'rolled-back');
+    mk('sync-recovery1', 'recovery-needed');
+    mk('sync-preparedold1', 'prepared', 40 * 24 * 3600 * 1000);   // 超 30 天 ⇒ 该清
+    mk('sync-preparednew1', 'prepared');                          // 新 ⇒ 留
+    mk('sync-nostatus1', '');                                     // 无状态、新 ⇒ 留
+    fs.mkdirSync(path.join(root2, 'not-a-backup'), { recursive: true }); // 命名不符 ⇒ 忽略
+
+    const before = sync.inspectSyncBackups(root2);
+    ok(before.count === 6, 'C2-1 inspectSyncBackups 只数 sync-* 目录（命名不符的忽略）', before);
+    ok(before.recoveryCount === 1 && before.recoveryBytes > 0,
+      'C2-2 recovery-needed 的份数与占用被单独统计（面板要能说清「有多少是真需恢复的」）', before);
+    ok(before.pendingCount === 3, 'C2-3 prepared / 无状态 计入 pending', before);
+
+    const pruned = sync.pruneSyncBackups(root2, { now: Date.now() });
+    ok(pruned.removed === 3 && pruned.retainedRecovery === 1,
+      'C2-4 prune 清掉 committed + rolled-back + 超期 prepared 共 3 份，保留 1 份 recovery-needed', pruned);
+    ok(fs.existsSync(path.join(root2, 'sync-recovery1')),
+      'C2-5 ⭐ recovery-needed **永久保留**（无论多老 —— 它是唯一能救回数据的凭据）');
+    ok(!fs.existsSync(path.join(root2, 'sync-committed1')) && !fs.existsSync(path.join(root2, 'sync-rolledback1')),
+      'C2-6 committed / rolled-back 立即清（它们已无读者）');
+    ok(fs.existsSync(path.join(root2, 'sync-preparednew1')) && fs.existsSync(path.join(root2, 'sync-nostatus1')),
+      'C2-7 新的 prepared / 无状态备份不被误清（崩溃残留只在超期后才收）');
+
+    const afterAging = sync.pruneSyncBackups(root2, { now: Date.now() + 400 * 24 * 3600 * 1000 });
+    ok(afterAging.removed === 2 && afterAging.retainedRecovery === 1,
+      'C2-8 时间推到 400 天后：崩溃残留也被清掉，recovery-needed 依旧留存', afterAging);
+
+    const missing = sync.pruneSyncBackups(path.join(SB, 'no-such-root'));
+    ok(missing.removed === 0 && missing.retainedRecovery === 0,
+      'C2-9 目录不存在时 fail-open 返回 0，不抛错（启动清理不许拖垮 daemon）', missing);
+  }
 
   /* ================================================================== */
   section('[D] 负向：slim 快照拿去写盘必须显式报错');
@@ -241,7 +295,9 @@ let verifyCalls = 0;
   ok(has("autoCopyJudge.assertWritable(contentSource, 'content-source');")
     && has("autoCopyJudge.assertWritable(contentTarget, 'content-target/' + target.id);"),
     'E3 源与目标在写盘前都过了 assertWritable 硬护栏');
-  ok(has('const applied = await autoCopyJudge.applySnapshot(contentSource, contentTarget, {'),
+  // 2026-09-29 修复后，写盘用循环外那份源快照（变量名 sourceSnap），重试才重读 ⇒ 不锚变量名，
+  // 只锚「目标写盘走 applySnapshot」这个不变式。
+  ok(/const applied = await autoCopyJudge\.applySnapshot\(\w+, contentTarget, \{/.test(daemonSrc),
     'E4 目标写盘走 applySnapshot（不再走整目录 cp）');
   ok(has('backupRoot: syncBackupRoot,'), 'E5 显式传 backupRoot（没有备份就没有回滚凭据）');
   ok(has('autoCopyJudge.pruneSessionSyncBackups(syncBackupRoot);'),
@@ -280,6 +336,83 @@ let verifyCalls = 0;
   ok(daemonSrc.split('copySessionFiles(PROFILE.dataRoot, latest.id, latest.id, ownerIds, options)').length - 1 === 2,
     'F8 反证：自复制**调用**恰好 2 处 —— 多一处就是重复执行源自修复',
     daemonSrc.split('copySessionFiles(PROFILE.dataRoot, latest.id, latest.id, ownerIds, options)').length - 1);
+
+  /* ================================================================== */
+  // [G] 切号后「复制会话失败」的修复（2026-09-29）
+  // 现象：切号到某账号后作业变 partial、UI 报「复制失败」，失败的那几条会话永远同步不过去。
+  // 根因：切号瞬间官方进程正在写这几个文件（flush 上一个账号正在使用的会话 / reload 后加载新账号会话），
+  //   session-sync 的 CAS 保护（size/mtime/ctime 三比）读到「文件正在变」⇒ 抛错并回滚。
+  // 实测证据：源账号活跃会话的 mtime=03:34:00.376 正落在 job（03:34:01.745 收尾）的写入窗口内；
+  //   静息态下同一批文件连续 12 次采样完全稳定、unchanged 全通过 ⇒ 是**瞬态**冲突。
+  // 修复：① 对「文件正在变化」类瞬态错误退避重试；② 重试前重读源与目标快照（源可能刚被官方改过）。
+  /* ================================================================== */
+  const syncSrc = fs.readFileSync(path.join(ROOT, 'scripts', 'session-sync.js'), 'utf8').replace(/\r\n/g, '\n');
+  // G1 瞬态判定正则存在
+  ok(/const TRANSIENT_SYNC_ERROR = \/正在变化\|请稍后重试\|已停止同步\//.test(daemonSrc),
+    'G1 daemon 有「文件正在变化」类瞬态错误的判定正则');
+  // G2 session-sync 实际会抛的瞬态文案（从源码里抓，不手抄）
+  const thrownMsgs = [...new Set([...syncSrc.matchAll(/throw Error\('((?:[^'\\]|\\.)*)'\)/g)].map((m) => m[1]))]
+    .filter((m) => /正在变化|已停止同步/.test(m));
+  ok(thrownMsgs.length >= 2, 'G2 session-sync 确实会抛多种瞬态文案', thrownMsgs);
+  // G3 ⭐ 正则必须覆盖全部 —— 漏一个文案就漏一条重试路径
+  const RE_TRANSIENT = /正在变化|请稍后重试|已停止同步/;
+  const uncovered = thrownMsgs.filter((m) => !RE_TRANSIENT.test(m));
+  ok(uncovered.length === 0,
+    'G3 ⭐ daemon 的重试正则覆盖 session-sync 的全部瞬态文案（漏一个 = 那条路径不重试）', uncovered);
+  // G4 ⭐ 重试前必须重读源 —— 拿旧快照重试等于再撞一次
+  ok(/if \(attempt > 0\) \{[\s\S]{0,400}?evictCache\(PROFILE\.dataRoot, latest\.id\)/.test(daemonSrc),
+    'G4 ⭐ 重试前丢掉源/目标的判定缓存并重读快照（拿旧快照重试等于再撞）');
+  // G5 退避序列 + 可观测日志
+  ok(/const SYNC_RETRY_DELAYS_MS = \[\s*\d+,\s*\d+,\s*\d+\s*\]/.test(daemonSrc),
+    'G5 退避重试序列存在（多次尝试跨越官方的写入窗口）');
+  ok(/会话同步重试成功/.test(daemonSrc) && /会话文件正在变化，/.test(daemonSrc),
+    'G6 重试过程有日志（成功与等待都可观测）');
+  // ---- G7/G8 行为级：复现「窗口内源被改 ⇒ 首轮必失败」⇒「重读后重试成功」----
+  // 这是修复内核的端到端验证：不碰真实数据，全在沙箱里。
+  {
+    const SBX = fs.mkdtempSync(path.join(os.tmpdir(), 'wbs-retry-'));
+    const BAKX = path.join(SBX, 'bak');
+    fs.mkdirSync(BAKX, { recursive: true });
+    const SRC_ID = '11111111-1111-4111-8111-111111111111';
+    const TGT_ID = '22222222-2222-4222-8222-222222222222';
+    // 每行必须是 {type:"message",...} 且至少一条 —— session-sync 按 type 字段认消息，
+    // 随意对象会被判「会话消息格式不受支持」（见 session-sync.js 的 records 解析）。
+    const mk = (id, texts) => {
+      const dir = path.join(SBX, 'projects', 'p-one');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, id + '.jsonl'),
+        texts.map((t) => JSON.stringify({ type: 'message', role: 'user', content: t })).join('\n') + '\n');
+    };
+    mk(SRC_ID, ['a', 'b']);
+    mk(TGT_ID, ['old']);
+    try {
+      // 1) 读源快照（此时源是 2 行）
+      const srcStale = judge.readWritableSnapshot(SBX, SRC_ID, [], new Map());
+      const tgtSnap = judge.readWritableSnapshot(SBX, TGT_ID, [], new Map());
+      // 2) 拿完快照后「官方把源改了」（模拟切号瞬间 flush 上一个账号的活跃会话）
+      fs.appendFileSync(path.join(SBX, 'projects', 'p-one', SRC_ID + '.jsonl'),
+        JSON.stringify({ type: 'message', role: 'user', content: 'late-flush' }) + '\n');
+      // 3) 用旧快照写 ⇒ 必须被 CAS 拦下（首轮失败，与线上一致）
+      let firstErr = null;
+      try {
+        await judge.applySnapshot(srcStale, tgtSnap, { backupRoot: BAKX, guard: async () => {}, commit: async () => {} });
+      } catch (e) { firstErr = e; }
+      ok(firstErr && RE_TRANSIENT.test(String(firstErr.message)),
+        'G7 复现：源在取快照后变化 ⇒ 首轮被 CAS 拦下（这正是线上 failed 的来源）',
+        firstErr ? firstErr.message : '(竟然成功了)');
+      // 4) 按修复逻辑：重读源（+重读目标）后重试 ⇒ 应当成功
+      const srcFresh = judge.readWritableSnapshot(SBX, SRC_ID, [], new Map());
+      const tgtSnap2 = judge.readWritableSnapshot(SBX, TGT_ID, [], new Map());
+      const applied = await judge.applySnapshot(srcFresh, tgtSnap2,
+        { backupRoot: BAKX, guard: async () => {}, commit: async () => {} });
+      ok(applied && Number(applied.copied) > 0,
+        'G8 ⭐ 重读快照后重试成功（修复内核：瞬态冲突可自愈）', { copied: applied && applied.copied });
+      // 5) 重试后目标内容 == 源内容（含那条 late-flush，没有静默丢内容）
+      const tgtText = fs.readFileSync(path.join(SBX, 'projects', 'p-one', TGT_ID + '.jsonl'), 'utf8');
+      ok(tgtText.includes('late-flush'),
+        'G9 重试写入的是**新**源内容（late-flush 那行已落盘，未用旧快照覆盖）');
+    } finally { try { fs.rmSync(SBX, { recursive: true, force: true }); } catch (_) {} }
+  }
 
   /* ================================================================== */
   // 收尾

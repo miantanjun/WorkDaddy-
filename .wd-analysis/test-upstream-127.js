@@ -52,12 +52,16 @@ function section(t) { console.log(t); }
 section('[A] theme-patches.js —— P1 主体：3 条新补丁登记 + 旧条目未丢');
 /* ==================================================================== */
 
-ok(Array.isArray(patches) && patches.length === 99,
-  'A1 条目数 = 99（1.2.6 的 96 + patch-102/103/104）', Array.isArray(patches) ? patches.length : typeof patches);
+ok(Array.isArray(patches) && patches.length === 100,
+  'A1 条目数 = 100（1.2.6 的 96 + 1.2.7 的 patch-102/103/104 + 1.2.8 的 patch-105/106 − 1.2.8 删除的 patch-41）', Array.isArray(patches) ? patches.length : typeof patches);
 
 const byId = new Map(patches.map((p) => [p && p.id, p]));
 ok(byId.has('patch-83') && byId.has('patch-99') && byId.has('patch-101'),
   'A2 ⭐ 整份套用未丢老条目（patch-83 / patch-99 / patch-101 仍在）');
+// 1.2.8 起 patch-41（.wbs-stash-inline 毛玻璃）被上游删除 —— 改由 theme-vars.js 的 nebula
+// 透明变量统一接管。这条断言把「删对了」钉住：若哪天有人把它加回来，这里会红。
+ok(!byId.has('patch-41'),
+  'A2b ⭐ 1.2.8 已删除 patch-41（毛玻璃改由 theme-vars.js 的 nebula 变量接管，不许回填）');
 
 const p102 = byId.get('patch-102');
 ok(!!p102 && p102.themeId === 'nebula', 'A3 patch-102 存在且 themeId=nebula');

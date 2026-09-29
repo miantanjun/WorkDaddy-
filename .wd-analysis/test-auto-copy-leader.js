@@ -346,8 +346,14 @@ section('[G] daemon 接线守卫（静态形态断言，防「改回去也不知
     'G7 旧的「没变化就跳过」同样让路（否则会抢在判主之前误判 unchanged）；同样只允许 force 旁路');
   ok(has("{ aliases: live.map((member) => member.id), preferredId: String(targetUid || '').trim(), cache: getSessionSyncCache() }"),
     'G8 判主传入的 alias 是**全成员 id**（含自身）、preferredId 只用于等价时代表，且第 3 项透传 A3 文件级指纹缓存');
-  ok(has("if (contentLead.kind === 'divergent' || contentLead.kind === 'insufficient') {"),
-    'G9 分叉/可读不足走同一个「一份都不覆盖」出口');
+  // 2026-09-29 BUG3 修复：只有**真分叉**（divergent = 两边都读得到且内容不同）才走「一份都不覆盖」出口。
+  //   insufficient（可读成员不足两个 = 内容读不出来）旧实现也当冲突，于是用户会看到
+  //   「同步处报冲突、点『处理冲突』又说没有」—— 读不出来不是分叉，是数据缺失。
+  //   现在 insufficient 落到下面的 !contentLatest 安全返回（不写盘、不报冲突）。
+  ok(has("if (contentLead.kind === 'divergent') {"),
+    'G9 ⭐ 只有真分叉 divergent 走「一份都不覆盖」出口；insufficient 不再算冲突（BUG3 修复）');
+  ok(has("if (!contentLatest) return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent, judge: 'content' };"),
+    'G9b ⭐ insufficient 的收口：contentLatest 为 null ⇒ 安全返回（不写盘、不报冲突）');
   ok(has('detail.branch = result.branch || null;'),
     'G10 分叉明细已透到 job 明细（用户通知的数据通道）');
   ok(has('if (result.divergent) job.divergences += 1;'), 'G11 分叉计数已累加');

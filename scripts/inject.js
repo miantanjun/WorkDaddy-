@@ -100,8 +100,8 @@ function createBrandClickAction(options) {
 }
 
 function createFabAppearance(options) {
-  var styles = ['white', 'black', 'glass'];
-  var current = 'black';
+  var styles = ['theme', 'white', 'black', 'glass'];
+  var current = 'theme';
   try {
     var saved = options.storage.getItem(options.key);
     if (styles.indexOf(saved) >= 0) current = saved;
@@ -223,14 +223,84 @@ function classifyAutoContinueReply(snapshot) {
   if (!s.observed || s.busy || s.manualStop) {
     return { trigger: false, reason: s.manualStop ? 'manual-stop' : 'not-idle' };
   }
+  // WorkBuddy reports a terminal assistant message together with a renderer
+  // error/fallback marker for quota and provider failures. Terminal evidence
+  // wins so a finished request can never cause another automatic send.
+  if (s.completionMarker || s.hasCompletionActions || s.terminal || s.complete) {
+    return { trigger: false, reason: s.completionMarker ? 'completion-marker' : 'completion-actions' };
+  }
+  if (s.serviceErrorFallback) {
+    return { trigger: false, reason: 'service-error-fallback' };
+  }
+  if (s.nonRetryableError || s.quotaExhausted || s.rateLimited || s.authFailure) {
+    return { trigger: false, reason: s.rateLimited ? 'model-rate-limited' : (s.quotaExhausted ? 'quota-exhausted' : 'non-retryable-error') };
+  }
   if (s.error || s.networkFailure) {
     return { trigger: true, reason: s.networkFailure ? 'network-failure' : 'error-ui' };
   }
-  if (s.completionMarker || s.hasCompletionActions) {
-    return { trigger: false, reason: s.completionMarker ? 'completion-marker' : 'completion-actions' };
-  }
   if (s.looksTruncated) return { trigger: true, reason: 'truncated-reply' };
   return { trigger: false, reason: 'no-incomplete-evidence' };
+}
+
+var AUTO_CONTINUE_QUOTA_CODES = { 14012: true, 14014: true, 14018: true, 14019: true, 6004: true };
+
+function normalizeAutoContinueError(error) {
+  if (!error || typeof error !== 'object') return null;
+  var terminal = error.terminal && typeof error.terminal === 'object' ? error.terminal : {};
+  var details = terminal.details && typeof terminal.details === 'object' ? terminal.details : {};
+  function numberValue() {
+    for (var i = 0; i < arguments.length; i++) {
+      var n = Number(arguments[i]);
+      if (Number.isSafeInteger(n)) return n;
+    }
+    return null;
+  }
+  var code = numberValue(error.code, error.bizCode, terminal.bizCode, details.code);
+  var statusCode = numberValue(error.statusCode, error.status, error.httpStatus);
+  var requestModelId = String(error.requestModelId || error.modelId || details.requestModelId || '').slice(0, 160);
+  var category = String(error.category || error.type || details.category || '').slice(0, 80).toLowerCase();
+  var message = String(error.message || terminal.message || details.message || '').slice(0, 240);
+  var rateLimited = code === 6004 || statusCode === 429 || /rate.?limit|频率|限流/i.test(category + ' ' + message);
+  var quotaExhausted = code === 14018 || code === 14012 || code === 14014 || code === 14019 || /quota|credit|额度|积分|余额/i.test(category + ' ' + message);
+  var authFailure = statusCode === 401 || statusCode === 403 || /auth|credential|登录|认证/i.test(category + ' ' + message);
+  var resetAt = null;
+  var resetSource = details.resetAt || details.reset_at || terminal.resetAt || error.resetAt;
+  if (resetSource === undefined || resetSource === null || resetSource === '') {
+    var resetMatch = /(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+UTC[+-]\d{1,2})?)/i.exec(message);
+    if (resetMatch) resetSource = resetMatch[1];
+  }
+  if (resetSource !== undefined && resetSource !== null && resetSource !== '') {
+    var resetNumber = Number(resetSource);
+    if (Number.isFinite(resetNumber)) resetAt = resetNumber < 1e12 ? Math.round(resetNumber * 1000) : Math.round(resetNumber);
+    else {
+      var resetText = String(resetSource).trim();
+      var parsed = Date.parse(resetText.replace(' UTC+8', '+08:00').replace(' UTC+0800', '+08:00').replace(' ', 'T'));
+      if (Number.isFinite(parsed)) resetAt = parsed;
+    }
+  }
+  return {
+    code: code,
+    statusCode: statusCode,
+    category: category,
+    requestModelId: requestModelId,
+    resetAt: resetAt,
+    rateLimited: rateLimited,
+    quotaExhausted: quotaExhausted,
+    authFailure: authFailure,
+    nonRetryable: rateLimited || quotaExhausted || authFailure || AUTO_CONTINUE_QUOTA_CODES[code] === true,
+    terminal: terminal === error.terminal || terminal.isTerminal === true,
+  };
+}
+
+function classifyAutoContinueError(error) {
+  var normalized = normalizeAutoContinueError(error) || {};
+  return {
+    quotaExhausted: !!normalized.quotaExhausted,
+    rateLimited: !!normalized.rateLimited,
+    authFailure: !!normalized.authFailure,
+    nonRetryable: !!normalized.nonRetryable,
+    code: normalized.code == null ? null : normalized.code,
+  };
 }
 
 // WorkBuddy 新版 ConversationController 把会话运行态与消息时间线放在 store 中。
@@ -246,6 +316,13 @@ function classifyAutoContinueControllerSnapshot(snapshot) {
     networkFailure: !!s.networkFailure,
     completionMarker: !!s.completionMarker,
     hasCompletionActions: !!(s.complete || s.terminal),
+    complete: !!s.complete,
+    terminal: !!s.terminal,
+    serviceErrorFallback: !!s.serviceErrorFallback,
+    quotaExhausted: !!s.quotaExhausted,
+    rateLimited: !!s.rateLimited,
+    authFailure: !!s.authFailure,
+    nonRetryableError: !!s.nonRetryableError,
     looksTruncated: !!s.assistantId && !s.busy && !s.complete && !s.terminal,
   });
 }
@@ -275,6 +352,11 @@ function controllerAutoContinueDecision(snapshot) {
     error: s.error,
     networkFailure: s.networkFailure,
     completionMarker: s.completionMarker,
+    serviceErrorFallback: s.serviceErrorFallback,
+    quotaExhausted: s.quotaExhausted,
+    rateLimited: s.rateLimited,
+    authFailure: s.authFailure,
+    nonRetryableError: s.nonRetryableError,
     // 新版明确暴露 isRequestTerminal 时只认该字段；旧版没有该字段才退回 complete。
     complete: s.terminalKnown ? false : s.complete,
     terminal: s.terminal,
@@ -520,6 +602,10 @@ function isSessionMonitorInProgress(snapshot) {
 function isSessionMonitorInterrupted(snapshot) {
   var s = snapshot || {};
   if (!s || s.busy || s.blocked || s.hydrating) return false; // 运行/等决策/恢复中：交给 in-progress 分支
+  // 额度/限频错误通常同时带有 terminal=true 和 serviceErrorFallback=true。
+  // 它们必须进入一次监控判定，先落盘模型限频记录并刷新账号标签；
+  // controllerAutoContinueDecision 仍会因终局证据返回 trigger=false，因此不会自动重试。
+  if (s.rateLimited || s.quotaExhausted) return true;
   return controllerAutoContinueDecision(s).trigger === true;
 }
 
@@ -818,6 +904,8 @@ if (typeof module !== 'undefined' && module.exports) {
     createFabAppearance: createFabAppearance,
     classifySessionHealth: classifySessionHealth,
     classifyAutoContinueReply: classifyAutoContinueReply,
+    normalizeAutoContinueError: normalizeAutoContinueError,
+    classifyAutoContinueError: classifyAutoContinueError,
     classifyAutoContinueControllerSnapshot: classifyAutoContinueControllerSnapshot,
     autoContinueMessageText: autoContinueMessageText,
     autoContinueControllerCompleted: autoContinueControllerCompleted,
@@ -853,7 +941,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var n;
     if ((n = document.querySelector('.wbs-root'))) n.remove();
     if ((n = document.getElementById('wbs-window-logo'))) n.remove();
-    var st = document.querySelectorAll('.wbs-stash-inline, .wbs-stash-btn, .wbs-explore-inline, .wbs-selection-quote-btn, .wbs-fork-button');
+    var st = document.querySelectorAll('.wbs-stash-inline, .wbs-stash-btn, .wbs-explore-inline, .wbs-selection-quote-btn, .wbs-explore-pop, .wbs-fork-button');
     for (var i = 0; i < st.length; i++) st[i].remove();
     var nav = document.querySelectorAll('.wbs-message-nav-root');
     for (var ni = 0; ni < nav.length; ni++) nav[ni].remove();
@@ -906,6 +994,73 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   var WBS_LANGUAGE_KEY = 'workdaddy.ui.language';
   var WBS_ACCOUNT_MASK_KEY = 'workdaddy.account.mask.' + PROFILE_ID;
   var WBS_I18N_EN = {
+    '账号备注': 'Account note',
+    '查看或编辑账号备注': 'View or edit account note',
+    '暂无备注，点击添加…': 'No note yet. Click to add…',
+    '未保存 ·': 'Unsaved ·',
+    '已保存': 'Saved',
+    '无效的账号': 'Invalid account',
+    '备注不能超过 2000 个字符': 'Notes must be text and no longer than 2000 characters',
+    '账号不存在或已删除': 'Account not found or deleted',
+
+    '导出会话会在后台完成，文件保存到下载目录。': 'Export runs in the background and saves to Downloads.',
+    '正在准备导出…': 'Preparing export…', '正在导出会话…': 'Exporting sessions…',
+    '正在取消导出…': 'Cancelling export…', '会话导出已取消': 'Session export cancelled',
+    '正在导出会话，请等待完成或取消': 'An export is already running. Wait or cancel it.',
+    '下载目录空间不足，请释放空间后重试': 'Downloads is out of space. Free up space and retry.',
+    '会话导出完成': 'Session export complete', '会话导出失败': 'Session export failed',
+    '导出进度暂时无法读取，正在重试…': 'Could not read export progress. Retrying…',
+    '取消导出': 'Cancel export', '打开导出目录': 'Open export folder',
+    '导出进度': 'Export progress', '导出任务不存在': 'Export job not found', '导出尚未完成': 'Export is not finished',
+    '无法打开导出目录': 'Could not open export folder',
+    '接管主题': 'Manage theme',
+    '关闭后，加载和切换账号时保留 WorkBuddy 的主题': 'When off, keep the WorkBuddy theme on load and account switches',
+    '无效的开关状态': 'Invalid switch state',
+    '释放主题接管失败': 'Could not release theme control',
+    '总大小': 'Total size',
+    '初始化设置': 'Initial setup',
+    '切换账号自动同步所有会话': 'Automatically sync all sessions when switching accounts',
+    '开启后，切换账号时会自动同步当前账号的全部会话，包括之后新增的会话。': 'When enabled, switching accounts automatically syncs all sessions for the current account, including new sessions added later.',
+    '选择切换账号时是否自动同步会话。此设置之后也可以在「会话」页面修改。': 'Choose whether to sync sessions automatically when switching accounts. You can change this later on the “Sessions” page.',
+    '保存失败，请重试': 'Save failed, please try again',
+    '所选账号全部会话的大小，不受时间和大小筛选影响': 'Total size of all sessions for the selected account, regardless of time and size filters',
+    '会话大小（消息和附件）': 'Session size (messages and attachments)',
+    '筛选会话大小': 'Filter session size',
+    '大小': 'Size',
+    '未同步': 'Not synced', '分叉会话尚未同步，请重试': 'The branched session has not been synced. Try again',
+    '已复制分叉副本，原会话已保留': 'Branch copied as a separate session; the original was preserved',
+    '账号正在切换，请稍后重试': 'Account switching is in progress. Try again later',
+    '无法确认会话状态，请连接 WorkBuddy 后重试': 'Cannot check session status. Connect WorkBuddy and try again',
+    '无法确认会话状态，请等待面板加载后重试': 'Cannot check session status. Wait for the panel to load and try again',
+    '当前账号有会话仍在运行，请等待完成或停止后再同步': 'This account has running sessions. Wait for them to finish or stop them before syncing',
+    '会话同步尚未完成，请稍后切换账号': 'Session sync is still in progress. Switch accounts after it finishes',
+    '源会话已变化，请重试': 'The source session changed. Try again',
+    '目标账号存在多个同源副本，已保留全部内容': 'The target account has multiple copies of this session. All content was preserved',
+    '会话记录正在变化，请稍后重试': 'Session records are changing. Try again later',
+    '会话已分叉，已保留双方内容；不再支持重置后覆盖': 'Both branches were preserved. Resetting to overwrite is no longer supported',
+    '无效的会话文件路径': 'Invalid session file path',
+    '会话文件包含符号链接，未同步': 'Session files contain a symbolic link. Sync was skipped',
+    '无效的会话标识': 'Invalid session identifier',
+    '会话目录包含符号链接，未同步': 'The session directory is a symbolic link. Sync was skipped',
+    '会话目录无法读取': 'Cannot read the session directory',
+    '会话文件无法读取': 'Cannot read session files',
+    '会话文件类型不受支持': 'Unsupported session file type',
+    '会话超过 100 MB，同步可能较慢': 'Session exceeds 100 MB; syncing may take longer',
+    '会话文件正在变化，请稍后重试': 'Session files are changing. Try again later',
+    '会话产物索引损坏，未同步': 'The session artifact index is corrupt. Sync was skipped',
+    '会话消息文件不唯一，未同步': 'Multiple message files found for this session. Sync was skipped',
+    '会话消息文件为空，未同步': 'The session message file is empty. Sync was skipped',
+    '会话消息文件未写完或已损坏，未同步': 'The session message file is incomplete or corrupt. Sync was skipped',
+    '会话消息格式不受支持，未同步': 'Unsupported session message format. Sync was skipped',
+    '会话消息文件没有消息，未同步': 'No messages found in the session file. Sync was skipped',
+    '双方会话消息文件均缺失，未同步': 'Both session message files are missing. Sync was skipped',
+    '会话消息缺失且附属文件不一致，未覆盖': 'Messages are missing and supporting files differ. No content was overwritten',
+    '无效的会话同步目标': 'Invalid session sync target',
+    '目标会话正在变化，已停止同步': 'The target session is changing. Sync was stopped',
+    '源会话正在变化，已停止同步': 'The source session is changing. Sync was stopped',
+    '会话文件校验失败': 'Session file verification failed',
+    '收起': 'Collapse',
+    '输入框仍有内容，未确认发送；不会自动重发': 'The composer still contains text, so sending was not confirmed. It will not be retried automatically',
     '派猫猫旅行': 'Send Buddy traveling',
     '自动选择已拥有的 Buddy，派出旅行并领取旅行礼物。未领养 Buddy 的账号需先在官网同意协议并解锁，此任务会跳过。需要 WorkDaddy 1.2.66 或更新版本。': 'Select an owned Buddy, send it traveling, and claim travel gifts. Accounts without an adopted Buddy are skipped until the agreement is accepted and Buddy is unlocked on the official site. Requires WorkDaddy 1.2.66 or later.',
     '账号 {account}：开始检查猫猫旅行': 'Account {account}: Checking Buddy travel', '当前 Buddy 查询失败': 'Could not load current Buddy', 'Buddy 列表查询失败': 'Could not load Buddy list',
@@ -921,7 +1076,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '查询已中断，请重新选择时间重试': 'Query interrupted. Select a time range to retry.',
     '无法读取查询进度，请重新选择时间重试': 'Could not read progress. Select a time range to retry.',
     '趋势分组': 'Trend grouping', '筛选折线': 'Filter lines', '统计时间': 'Statistics period',
-    '总览': 'Overview', '按账号': 'By account', '按模型': 'By model', '总量': 'Total',
+    '总览': 'Overview', '按账号': 'By account', '按模型': 'By model', '总量': 'Total', '模型用量': 'Model usage', '其他': 'Other', 'Token（输入 + 输出）': 'Tokens (input + output)', '输入 + 输出': 'Input + output',
     '未识别模型': 'Unknown model', '未关联账号': 'Unassigned account', '暂无分组数据': 'No breakdown data',
     '解锁后未读取到最新状态': 'Could not load the latest status after unlocking',
     'Buddy 已解锁': 'Buddy unlocked', 'Buddy 解锁成功': 'Buddy unlocked', '解锁 Buddy 失败': 'Could not unlock Buddy',
@@ -1337,7 +1492,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '将永久删除所选会话，以及已关联到其他账号的所有同步副本、消息文件和本地缓存。此操作不可恢复。': 'Permanently deletes the selected sessions and all synced copies, message files and local cache across accounts. This cannot be undone.',
     '消息文字阴影': 'Message text shadow', '增强壁纸上的消息文字辨识度': 'Improve message readability over wallpaper',
     '文字阴影设置失败: ': 'Could not set text shadow: ', '读取文字阴影失败: ': 'Could not load text shadow: ',
-    '悬浮机器人': 'Floating robot', '机器人外观': 'Robot appearance', '白色': 'White', '黑色': 'Black',
+    '主题色': 'Theme color', '跟随发送按钮的主题色': 'Follow the send button theme color', '悬浮机器人': 'Floating robot', '机器人外观': 'Robot appearance', '白色': 'White', '黑色': 'Black',
     '白底黑眼': 'White shell, black eyes', '黑底白眼': 'Black shell, white eyes', '毛玻璃底与镂空眼睛': 'Frosted shell, transparent eyes',
     '自动贴边': 'Auto dock', '闲置 5 秒后收起，鼠标靠近即展开': 'Tuck away after 5 seconds idle; move nearby to reveal',
     '打开官网；连续点击 5 次开启调试': 'Open website; click five times to enable debug', '点击打开官网': 'Click to open website', '打开官网失败: ': 'Could not open website: ',
@@ -1412,6 +1567,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '开启后 WorkBuddy 需要你决策时会用弹窗提问（写入全局自定义指令，所有会话生效）': 'When enabled, WorkBuddy asks with a dialog when your decision is needed (written to the global custom prompt; affects all sessions)',
     '当前没有进行中的会话，无法开启「所有会话结束允许休眠」': 'No active sessions; cannot enable “Allow sleep when all sessions end”',
     '进行中的会话': 'active session(s)', '预计剩余': 'Estimated remaining', ' 秒': ' seconds ', ' 分': ' min ',
+    '预计解封：': 'Reset estimate: ', '预计解封：时间未知': 'Reset estimate: unknown', '预计解封': 'Reset estimate', '时间未知': 'Time unknown', '模型限流': 'Model rate limited', '模型限流·': 'Model rate limited ·', '模型频率限制': 'Model rate limit', '账号状态': 'Account status', '当前没有有效的模型限流记录': 'No active model rate-limit records',
+    '当前模型已触发频率限制，已停止自动发送': 'This model is rate limited; automatic sending stopped', '当前账号积分已耗尽': 'This account has no credits left', '模型：': 'Model: ',
     '无法打开安装程序': 'Could not open the installer',
     '安装程序已打开，请按提示退出 WorkBuddy 并完成安装。': 'The installer is open. Please quit WorkBuddy as prompted and finish installing.',
     '停止旧服务…': 'Stopping old service…', '发现新版本，准备更新…': 'New version available; preparing to update…',
@@ -1597,7 +1754,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '面板入口：': 'Panel entry:', '右下角机器人按钮': 'Bottom-right robot button', '已连接': 'Connected', '未连接': 'Not connected',
     'Token 用量': 'Token usage', '正在读取统计…': 'Loading statistics…', '搜索': 'Search', '重置': 'Reset', '调用': 'Calls', '输入': 'Input', '输出': 'Output', '导入方式': 'Import method', '复制提示词': 'Copy prompt', '导入 WorkDaddy 加密文件': 'Import WorkDaddy encrypted file', '导入 WorkDaddy 导出的账号备份，选择文件后输入导出密码。': 'Import an account backup exported by WorkDaddy, then enter its export password.', '导入 JSON 文件': 'Import JSON file', '可以导入其他工具导出的明文账号。请先让 WorkBuddy 按指定格式整理，再选择生成的 JSON 文件。': 'Import plain-text accounts exported by another tool. Ask WorkBuddy to convert them to the required format, then choose the generated JSON file.', '把其他工具导出的账号文本发给 WorkBuddy，让它只输出符合 WorkDaddy 格式的 JSON，然后复制保存为文件。': 'Send the account text exported by another tool to WorkBuddy. Ask it to output only WorkDaddy-compatible JSON, then save it as a file.', '提示词已复制': 'Prompt copied', '选择文件': 'Choose file',
     '缓存读取': 'Cache read', '缓存写入': 'Cache write',
-    ' 个文件，解析失败': ' files, parse failures', ' 行': ' lines', '暂无可统计的 Token 用量': 'No Token usage found',
+    ' 个文件，解析失败': ' files, parse failures', ' 行': ' lines', '暂无可统计的 Token 用量': 'No Token usage found', '会话用量': 'Conversation usage', '本会话用量': 'This conversation usage', '本会话用量明细': 'Conversation usage details', '暂无已完成用量': 'No completed usage yet', '等待会话完成': 'Waiting for the session to finish', '读取中…': 'Loading…', '未知模型': 'Unknown model', '总计': 'Total', '在会话底部显示 Token、积分和模型汇总': 'Show Token, credits and model summary at the bottom of conversations',
     '当前积分段已用完': 'The current credit segment is used up', '积分将在': ' credits expire in', '到期': ' expires', '要切换账号吗？': 'Switch account?', '可以切换到账号': 'Can switch to account', '检测到积分到期时间最临近的账号': 'The account with the nearest credit expiry is', '积分将于': ' credits expire within', '内过期': '', '较长时间': 'a long time', ' 小时 ': ' hr ', ' 分': ' min ',
     '切换到此账号': 'Switch to this account', '今天不再提醒': 'Do not remind me again today', '关闭': 'Close',
     '切换中…': 'Switching…', 'Token 用量统计': 'Token usage statistics', ' 分钟后': ' minutes', ' 小时后': ' hours', ' 天后': ' days',
@@ -1942,7 +2099,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
     '<polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
-  var CREDIT_SUMMARY_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 20h16M7 16V9m5 7V4m5 12v-5"/></svg>';
+  var CREDIT_SUMMARY_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2c1.2 4.1 2.9 5.8 7 7-4.1 1.2-5.8 2.9-7 7-1.2-4.1-2.9-5.8-7-7 4.1-1.2 5.8-2.9 7-7Z"/><path d="M13 21h9M15 18v-3m3 3v-6m3 6V9"/></svg>';
+  var MODEL_RATE_LIMIT_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2c1.2 4.1 2.9 5.8 7 7-4.1 1.2-5.8 2.9-7 7-1.2-4.1-2.9-5.8-7-7 4.1-1.2 5.8-2.9 7-7Z"/><path d="m19 13.4 3.6 6.2a1.1 1.1 0 0 1-1 1.6h-7.2a1.1 1.1 0 0 1-1-1.6l3.6-6.2a1.15 1.15 0 0 1 2 0ZM18 16v1.5"/><circle cx="18" cy="19.2" r=".45" fill="currentColor" stroke="none"/></svg>';
   var TOKEN_STATS_ICON =
     '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M4 19V5M4 19h16"/><path d="m7 15 3-4 3 2 5-7"/></svg>';
@@ -2952,7 +3110,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       '</div>' +
       '</div>';
     applyI18n(exploreBtn);
-    var exploreSendTxt = exploreBtn.querySelector('.wbs-explore-send-txt');
+    var explorePopover = exploreBtn.querySelector('.wbs-explore-pop');
+    var exploreMenu = mountExplorePopover(exploreBtn, explorePopover);
+    registerDisposer(exploreMenu.destroy);
+    var exploreSendTxt = explorePopover.querySelector('.wbs-explore-send-txt');
     if (exploreSendTxt) {
       exploreSendTxt.addEventListener('click', function (e) {
         e.stopPropagation();
@@ -2966,7 +3127,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         }).catch(function (e2) { toast('发送失败: ' + (e2.message || e2), true, root); });
       });
     }
-    var exploreEditBtn = exploreBtn.querySelector('.wbs-explore-edit');
+    var exploreEditBtn = explorePopover.querySelector('.wbs-explore-edit');
     if (exploreEditBtn) {
       exploreEditBtn.addEventListener('click', function (e) {
         e.stopPropagation();
@@ -2999,13 +3160,56 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         fetch(API + '/api/breadcrumb', { method: 'POST', headers: { 'content-type': 'application/json', 'X-WorkDaddy-Token': WBS_API_TOKEN }, body: JSON.stringify({ msg: '[quick-phrase-diagnostics] ' + JSON.stringify(payload) }) }).catch(function () {});
       } catch (_) {}
     }
+    // Only the popup leaves the official toolbar. Its body-level stacking context
+    // keeps it above the usage summary even when the composer creates its own layer.
+    function mountExplorePopover(button, popup) {
+      document.body.appendChild(popup);
+      var timer = null;
+      var listeners = [];
+      function listen(target, name, handler, options) {
+        target.addEventListener(name, handler, options);
+        listeners.push(function () { target.removeEventListener(name, handler, options); });
+      }
+      function cancelClose() { if (timer) { clearTimeout(timer); timer = null; } }
+      function close() { cancelClose(); popup.classList.remove('is-open'); button.setAttribute('aria-expanded', 'false'); }
+      function open() {
+        cancelClose();
+        var rect = button.getBoundingClientRect();
+        if (!button.isConnected || !rect.width || !rect.height) return close();
+        var width = popup.getBoundingClientRect().width;
+        popup.style.left = Math.max(8, Math.min(window.innerWidth - width - 8, rect.left + rect.width / 2 - width / 2)) + 'px';
+        popup.style.bottom = Math.max(8, window.innerHeight - rect.top + 10) + 'px';
+        popup.classList.add('is-open');
+        button.setAttribute('aria-expanded', 'true');
+      }
+      function delayedClose() { cancelClose(); timer = setTimeout(close, 120); }
+      button.setAttribute('aria-expanded', 'false');
+      listen(button, 'mouseenter', open);
+      listen(button, 'mouseleave', delayedClose);
+      listen(button, 'keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault(); event.stopPropagation();
+          if (popup.classList.contains('is-open')) close(); else open();
+        }
+        if (event.key === 'Escape') { event.stopPropagation(); close(); }
+      });
+      listen(popup, 'mouseenter', cancelClose);
+      listen(popup, 'mouseleave', delayedClose);
+      listen(popup, 'mousedown', function (event) { event.preventDefault(); event.stopPropagation(); });
+      ['click', 'pointerdown', 'pointerup', 'keyup', 'keypress'].forEach(function (name) {
+        listen(popup, name, function (event) { event.stopPropagation(); });
+      });
+      listen(popup, 'keydown', function (event) { event.stopPropagation(); if (event.key === 'Escape') { close(); button.focus(); } });
+      listen(window, 'resize', close);
+      listen(document, 'scroll', function (event) { if (!popup.contains(event.target)) close(); }, true);
+      listen(document, 'pointerdown', function (event) { if (!button.contains(event.target) && !popup.contains(event.target)) close(); }, true);
+      return { close: close, open: open, destroy: function () { close(); listeners.forEach(function (remove) { remove(); }); popup.remove(); } };
+    }
     function acMenuClose() {
       qpDiag('menu:close:before', { menuClass: exploreBtn.className });
-      exploreBtn.classList.add('wbs-menu-closed');
+      exploreMenu.close();
       qpDiag('menu:close:after', { menuClass: exploreBtn.className });
     }
-    exploreBtn.addEventListener('mouseenter', function () { exploreBtn.classList.remove('wbs-menu-closed'); });
-    exploreBtn.addEventListener('mouseleave', function () { exploreBtn.classList.remove('wbs-menu-closed'); });
     exploreBtn.style.display = 'none'; // 找到可见会话输入区并完成定位后才显示，避免登录页出现悬空按钮。
 
     /* ———— 会话模块（session）：暂存提示词、会话消息索引、选中文字引用 & 快捷短语 ————
@@ -3039,6 +3243,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       selectionQuote: readSelectionQuoteEnabled(),
       fork: readForkEnabled(),
       phrase: true,
+      themeTakeover: true,
       phrases: [],
       qpBatch: false,
       qpSel: {},
@@ -3049,6 +3254,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (!d || !d.ok) return;
       sessState.stash = !!d.stashEnabled;
       sessState.phrase = !!d.phraseEnabled;
+      sessState.themeTakeover = d.themeTakeoverEnabled !== false;
       sessState.phrases = Array.isArray(d.phrases) ? d.phrases : [];
       // 同步 UI：会话开关 + 快捷短语列表区显隐
       var pane0 = enhancePane;
@@ -3063,6 +3269,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (swQ) swQ.checked = !!sessState.selectionQuote;
       if (swF) swF.checked = !!sessState.fork;
       if (swP) swP.checked = !!sessState.phrase;
+      var themeSwitch = themePane && themePane.querySelector('#wbs-theme-takeover');
+      if (themeSwitch) themeSwitch.checked = sessState.themeTakeover;
+      syncThemeTakeoverVisibility(sessState.themeTakeover);
+      // 开关确认和异步设置回填也要启动图库加载，不能只在切换主题页时加载。
+      syncWallpaperCardVisibility('nebula');
       if (area) area.style.display = sessState.phrase ? '' : 'none';
       renderQpList();
       renderExploreOptions();
@@ -3076,7 +3287,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     /** 开关切换：写 daemon 并回应用户界（设置失败回滚 UI 状态） */
     function setSessionSwitchWire(name, el) {
       var v = !!el.checked;
-      api('/api/session-module-set', {
+      el.disabled = true;
+      return api('/api/session-module-set', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ name: name, enabled: v }),
@@ -3086,7 +3298,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }).catch(function (e) {
         toast('设置失败: ' + (e.message || e), true, root);
         syncSessionModule();
-      });
+      }).finally(function () { el.disabled = false; });
     }
 
     // 轻量选区引用：只保存当前选中的文字，通过 WorkBuddy 官方 content-block 请求插入输入框。
@@ -3289,7 +3501,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
     /** 发送按钮面板选项 = 快捷短语列表；点击项经 CDP 发送该短语（替换式，发完默认关面板） */
     function renderExploreOptions() {
-      var listHost = exploreBtn && exploreBtn.querySelector('#wbs-explore-list');
+      var listHost = explorePopover && explorePopover.querySelector('#wbs-explore-list');
       if (!listHost) return;
       var phrases = sessState.phrases || [];
       // 渲染签名去重：短语内容无变化则不重建 DOM（syncStash 高频调用会摧毁 tooltip 的显示状态/绑定 → 闪烁）
@@ -3548,35 +3760,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       exploreBtn.style.right = (wr - 38) + 'px'; // 32=按钮宽，6=gutter（贴暂存按钮右侧）
       exploreBtn.style.top = stashBtn.style.top || '0px';
     }
-    // 跟随主题设置按钮颜色（放弃跟随官方按钮）：浅色主题=黑底白图标；深色/WorkDaddy 主题=白底黑图标
-    var acThemeObserver = null;
-    function acIsDarkTheme() {
-      try {
-        var de = document.documentElement;
-        if (de.classList && de.classList.contains('cb-dark')) return true;
-        if (de.getAttribute && de.getAttribute('data-theme') === 'dark') return true;
-        var bd = document.body;
-        if (bd && bd.getAttribute('data-vscode-theme-name') && /dark/i.test(bd.getAttribute('data-vscode-theme-name') || '')) return true;
-        return false;
-      } catch (e) { return false; }
-    }
+    // 使用实时主题变量，颜色变化由 CSS 继承处理，无需监听深浅色属性。
     function applyThemeButtonColors() {
-      try {
-        var useWhite = acIsDarkTheme(); // 深色主题 → 白底；浅色 → 黑底
-        var bg = useWhite ? '#ffffff' : '#111111';
-        var fg = useWhite ? '#111111' : '#ffffff';
-        stashBtn.style.background = bg;
-        stashBtn.style.color = fg;
-        exploreBtn.style.background = bg;
-        exploreBtn.style.color = fg;
-      } catch (e) {}
-    }
-    function watchThemeForButtons() {
-      if (acThemeObserver || typeof MutationObserver === 'undefined') return;
-      try {
-        acThemeObserver = new MutationObserver(function () { applyThemeButtonColors(); });
-        acThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] });
-      } catch (e) {}
+      stashBtn.style.background = 'var(--wb-button-primary-bg)';
+      stashBtn.style.color = 'var(--wb-button-primary-fg)';
+      exploreBtn.style.background = 'var(--wb-button-primary-bg)';
+      exploreBtn.style.color = 'var(--wb-button-primary-fg)';
     }
     function positionStash() {
       // 新版布局没有 voice-mic-wrap：操作栏按钮行位于输入框正下方（与输入框同祖先容器）。
@@ -3674,12 +3863,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         if (isWelcomePage() || !insertStash()) {
           stashBtn.style.display = 'none';
           exploreBtn.style.display = 'none';
+          exploreMenu.close();
           exploreBtn.classList.add('wbs-menu-closed');
           return;
         }
         // 探索按钮常驻（若「快捷短语」开关开着）：不等输入框有内容，只要定位到操作栏就常显
         exploreBtn.style.display = sessState.phrase ? 'flex' : 'none';
-        applyThemeButtonColors(); // 主题色按钮（浅色黑底白图 / 深色白底黑图）
+        if (!sessState.phrase) exploreMenu.close();
+        applyThemeButtonColors(); // 与发送按钮共享主题色
         renderExploreOptions(); // 面板选项 = 快捷短语列表（增删改后同步刷新）
         // 暂存按钮：仍按输入框是否有内容显隐，且「暂存提示词」开关需开着
         if (shouldShowStash() && sessState.stash) {
@@ -5039,6 +5230,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
               if (isStashQueueItem(it, ids, arr)) hasStashPending = true;
               else hasNormalPending = true;
             }
+            // 【BUG1 修复】只要队列里存在「发送中」的项，就必须解除暂停 —— 不看顺序、不看它是不是暂存项。
+            // 官方「引导会话（消息将被发出但模型不会中断）」的实现是：把该项标为 sending + immediateItemId，
+            // 然后走 sendNow→continueAfterPrompt→activate。而 paused=true 会**拦停**这条链 ⇒ 引导消息发不出去。
+            // ⚠️ 不能把 stashOrderValid（顺序合规）当条件：排序守护 watchQueueOrder 是 no-op
+            //    （reorder 私有 RPC 在切会话时会让渲染进程崩溃，见其上注释），顺序一旦不合规就永远修不好
+            //    ⇒ 旧实现在这种情况下**永不 resume**，队列被永久暂停 = 引导会话稳定失效。
+            if (sendingItemId && q.runtime && q.runtime.paused) {
+              try { adapter.resumeConversationMessageQueue(sid); crumb('guard:sending-resume'); } catch (e) {}
+            }
             if (hasStashSending) {
               // 用户点了发送按钮（官方 sendQueueItemNow 把该条标为 sending + immediateItemId）：
               // 官方真正发送走 sendNow→continueAfterPrompt→activate 链路，若 paused=true 会拦停 → 卡 loading。
@@ -5525,6 +5725,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var statusPopover = null;
     var statusPopoverOwner = null;
     var closeDailyProgressPopover = null;
+    var closeAccountNotePopover = null;
     var refreshDailyProgressPopover = null;
     var dailyProgressRefreshPromises = {};
     var creditTooltipSegment = null;
@@ -5572,6 +5773,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         left = rect.left - tipRect.width - gap;
         if (left < 8) left = rect.right + gap;
         top = rect.top - 8;
+      } else if (placement === 'below') {
+        left = rect.left + rect.width / 2 - tipRect.width / 2;
+        top = rect.bottom + gap;
       } else {
         top = rect.top - tipRect.height - gap;
         if (top < 8) top = rect.bottom + gap;
@@ -5647,6 +5851,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<span class="wbs-acct-stat-divider"></span>' +
         '<div class="wbs-acct-stat"><span>总积分</span><strong id="wbs-acct-total">-</strong></div>' +
         '<button class="wbs-acct-eye" type="button" data-act="credit-summary" title="汇总" aria-label="积分汇总" aria-expanded="false">' + CREDIT_SUMMARY_ICON + '</button>' +
+        '<button class="wbs-acct-eye" type="button" data-act="model-rate-limit-summary" title="模型限流" aria-label="模型限流" aria-expanded="false">' + MODEL_RATE_LIMIT_ICON + '</button>' +
         '</div>' +
         '<div class="wbs-acct-actions">' +
         '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="usage-board" title="用量看板（统一版：按账号/模型/日期统计 token 与积分）" aria-label="用量看板">' + USAGE_BOARD_ICON + '</button>' +
@@ -5685,6 +5890,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       root.querySelector('[data-act="account-more"]').addEventListener('click', openAccountOrderModal);
       setupCreditSummary();
       setupDailyProgressPopover();
+      setupAccountNotePopover();
+      setupModelRateLimitPopover();
       logoutBtn = root.querySelector('[data-act="logout"]');
       var eyeBtn = root.querySelector('.wbs-acct-eye');
       if (eyeBtn) eyeBtn.addEventListener('click', toggleAccountMask);
@@ -6488,6 +6695,160 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       });
     }
 
+    function setupAccountNotePopover() {
+      if (!accountsPane) return;
+      var popup = el('div', 'wbs-account-note-popover');
+      popup.id = 'wbs-account-note-popover';
+      popup.hidden = true;
+      popup.setAttribute('role', 'dialog');
+      popup.setAttribute('aria-label', '账号备注');
+      popup.innerHTML = '<div class="wbs-account-note-head"><label for="wbs-account-note-input">账号备注</label><button type="button" class="wbs-icon-btn" data-note-close title="关闭" aria-label="关闭"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4 4 8 8m0-8-8 8"/></svg></button></div>' +
+        '<textarea id="wbs-account-note-input" maxlength="2000" placeholder="暂无备注，点击添加…" rows="4"></textarea>' +
+        '<div class="wbs-account-note-footer"><span role="status" aria-live="polite"></span><button type="button" class="wbs-modal-btn" data-note-cancel>取消</button><button type="button" class="wbs-modal-btn primary" data-note-save>保存</button></div>';
+      document.body.appendChild(popup);
+      var input = popup.querySelector('textarea');
+      var save = popup.querySelector('[data-note-save]');
+      var cancel = popup.querySelector('[data-note-cancel]');
+      var status = popup.querySelector('[role="status"]');
+      var owner = null, uid = '', saved = '', saving = false, hideTimer = null, restoringFocus = false;
+      var drafts = Object.create(null);
+      function trigger(target) { return target && target.closest ? target.closest('.wbs-account-name') : null; }
+      function dirty() { return input.value !== saved; }
+      function update() {
+        save.disabled = saving || !dirty();
+        cancel.disabled = saving;
+        input.readOnly = saving;
+        save.textContent = saving ? '保存中…' : '保存';
+        status.textContent = saving ? '正在保存' : dirty() ? '未保存 · ' + input.value.length + '/2000' : '';
+      }
+      function hide(returnFocus) {
+        clearTimeout(hideTimer);
+        if (!owner) return;
+        if (dirty()) drafts[uid] = input.value;
+        else delete drafts[uid];
+        var previous = owner;
+        previous.setAttribute('aria-expanded', 'false');
+        owner = null;
+        popup.hidden = true;
+        if (returnFocus && previous.isConnected) {
+          restoringFocus = true;
+          previous.focus();
+          restoringFocus = false;
+        }
+      }
+      function position() {
+        if (!owner) return;
+        var rect = owner.getBoundingClientRect();
+        var bounds = accountsPane.getBoundingClientRect();
+        if (!owner.isConnected || !rect.width || rect.bottom < bounds.top || rect.top > bounds.bottom) { hide(false); return; }
+        var box = popup.getBoundingClientRect();
+        var left = Math.max(8, Math.min(rect.left - 5, window.innerWidth - box.width - 8));
+        var top = rect.bottom + 8;
+        if (top + box.height > window.innerHeight - 8) top = rect.top - box.height - 8;
+        popup.style.left = Math.round(left) + 'px';
+        popup.style.top = Math.round(Math.max(8, top)) + 'px';
+      }
+      function show(button, edit) {
+        clearTimeout(hideTimer);
+        if (restoringFocus) return;
+        if (owner !== button) {
+          // Hovering a different name must not replace an in-progress edit.
+          if (owner && (saving || dirty() || popup.contains(document.activeElement)) && !edit) return;
+          if (saving) return;
+          hide(false);
+          uid = button.getAttribute('data-uid');
+          var account = state.accounts.filter(function (a) { return String(a.uid) === uid; })[0];
+          if (!account) return;
+          saved = account.note || '';
+          input.value = Object.prototype.hasOwnProperty.call(drafts, uid) ? drafts[uid] : saved;
+          owner = button;
+          owner.setAttribute('aria-expanded', 'true');
+          popup.hidden = false;
+          update();
+          position();
+        }
+        if (edit && owner) input.focus();
+      }
+      function deferHide() {
+        clearTimeout(hideTimer);
+        hideTimer = setBuildTimeout(function () {
+          if (saving || dirty() || popup.matches(':hover') || popup.contains(document.activeElement) ||
+              (owner && (owner.matches(':hover') || owner === document.activeElement))) return;
+          hide(false);
+        }, 220);
+      }
+      function submit() {
+        if (!owner || saving || !dirty()) return;
+        var savingUid = uid, value = input.value;
+        saving = true;
+        update();
+        api('/api/accounts/note', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: savingUid, note: value }) })
+          .then(function () {
+            if (!alive) return;
+            state.accounts.forEach(function (a) { if (String(a.uid) === savingUid) a.note = value; });
+            delete drafts[savingUid];
+            saved = value;
+            saving = false;
+            update();
+            status.textContent = '已保存';
+          }).catch(function () {
+            if (!alive) return;
+            saving = false;
+            update();
+            status.textContent = '保存失败，请重试';
+          });
+      }
+      listen(accountsPane, 'mouseover', function (event) {
+        var button = trigger(event.target);
+        if (button && !button.contains(event.relatedTarget)) show(button, false);
+      });
+      listen(accountsPane, 'mouseout', function (event) {
+        var button = trigger(event.target);
+        if (button && !button.contains(event.relatedTarget)) deferHide();
+      });
+      listen(accountsPane, 'focusin', function (event) { var button = trigger(event.target); if (button) show(button, false); });
+      listen(accountsPane, 'focusout', deferHide);
+      listen(accountsPane, 'click', function (event) {
+        var button = trigger(event.target);
+        if (!button) return;
+        event.stopPropagation();
+        show(button, true);
+      });
+      listen(accountsPane, 'keydown', function (event) {
+        var button = trigger(event.target);
+        if (!button) return;
+        if (event.key === 'ArrowDown' || (event.key === 'Tab' && !event.shiftKey && owner === button)) {
+          event.preventDefault(); event.stopPropagation(); show(button, true);
+        }
+      });
+      listen(popup, 'mouseenter', function () { clearTimeout(hideTimer); });
+      listen(popup, 'mouseleave', deferHide);
+      listen(popup, 'focusout', deferHide);
+      ['pointerdown', 'mousedown', 'mouseup', 'dblclick', 'keyup', 'keypress', 'wheel'].forEach(function (type) {
+        listen(popup, type, function (event) { event.stopPropagation(); });
+      });
+      listen(popup, 'input', function (event) { event.stopPropagation(); update(); });
+      listen(popup, 'keydown', function (event) {
+        event.stopPropagation();
+        if (event.key === 'Escape') { event.preventDefault(); hide(true); }
+        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); submit(); }
+      });
+      listen(popup, 'click', function (event) {
+        event.stopPropagation();
+        if (event.target.closest('[data-note-save]')) submit();
+        if (event.target.closest('[data-note-cancel]') && !saving) { input.value = saved; hide(true); }
+        if (event.target.closest('[data-note-close]')) hide(true);
+      });
+      listen(document, 'pointerdown', function (event) {
+        if (owner && !popup.contains(event.target) && !owner.contains(event.target)) hide(false);
+      }, true);
+      listen(document, 'keydown', function (event) { if (owner && event.key === 'Escape') { event.stopPropagation(); hide(true); } });
+      listen(panel, 'scroll', position, true);
+      listen(window, 'resize', position);
+      closeAccountNotePopover = function () { hide(false); };
+      registerDisposer(function () { hide(false); popup.remove(); closeAccountNotePopover = null; });
+    }
+
     function setupDailyProgressPopover() {
       if (!accountsPane || !CAPS.growthDaily || WBS_PROFILE_IS_AI) return;
       var popup = ensureStatusPopover();
@@ -6648,6 +7009,124 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         closeDailyProgressPopover = null;
         refreshDailyProgressPopover = null;
       });
+    }
+
+    function setupModelRateLimitPopover() {
+      if (!accountsPane) return;
+      var popup = ensureStatusPopover();
+      var activeBadge = null;
+      var pinned = false;
+      var popoverHovered = false;
+      var hideTimer = null;
+      function findBadge(target) {
+        var node = target;
+        while (node && node !== accountsPane) {
+          if (node.nodeType === 1 && node.classList && node.classList.contains('wbs-model-rate-limit')) return node;
+          node = node.parentNode;
+        }
+        return null;
+      }
+      function hide(force) {
+        clearTimeout(hideTimer);
+        if ((pinned || popoverHovered) && !force) return;
+        var previous = activeBadge;
+        if (previous) previous.setAttribute('aria-expanded', 'false');
+        activeBadge = null;
+        pinned = false;
+        popoverHovered = false;
+        hideStatusPopover(previous);
+      }
+      function deferHide() {
+        clearTimeout(hideTimer);
+        hideTimer = setBuildTimeout(function () {
+          if (popup && popup.matches && popup.matches(':hover')) {
+            popoverHovered = true;
+            return;
+          }
+          hide(false);
+        }, 220);
+      }
+      function show(badge, shouldPin) {
+        clearTimeout(hideTimer);
+        if (!badge) return;
+        if (activeBadge && activeBadge !== badge) activeBadge.setAttribute('aria-expanded', 'false');
+        activeBadge = badge;
+        pinned = !!shouldPin;
+        badge.setAttribute('aria-expanded', 'true');
+        var uid = badge.getAttribute('data-uid');
+        var account = state.accounts.filter(function (item) { return String(item.uid) === String(uid); })[0];
+        popup = showStatusPopover(badge, modelRateLimitPopoverHtml(account), 'rate-limit', 'side');
+      }
+      var summaryButton = accountsPane.querySelector('[data-act="model-rate-limit-summary"]');
+      function showSummary(shouldPin) {
+        if (!summaryButton) return;
+        clearTimeout(hideTimer);
+        if (activeBadge && activeBadge !== summaryButton) activeBadge.setAttribute('aria-expanded', 'false');
+        activeBadge = summaryButton;
+        pinned = !!shouldPin;
+        summaryButton.setAttribute('aria-expanded', 'true');
+        popup = showStatusPopover(summaryButton, modelRateLimitSummaryPopoverHtml(state.accounts), 'rate-limit-summary', 'below');
+      }
+      listen(accountsPane, 'mouseover', function (event) {
+        var badge = findBadge(event.target);
+        if (!badge || badge === activeBadge) return;
+        show(badge, false);
+      });
+      listen(accountsPane, 'mouseout', function (event) {
+        var from = findBadge(event.target);
+        var to = findBadge(event.relatedTarget);
+        if (from && from !== to) deferHide();
+      });
+      listen(accountsPane, 'focusin', function (event) {
+        var badge = findBadge(event.target);
+        if (badge) show(badge, false);
+      });
+      listen(accountsPane, 'focusout', function (event) {
+        if (findBadge(event.target)) deferHide();
+      });
+      listen(accountsPane, 'click', function (event) {
+        var badge = findBadge(event.target);
+        if (!badge) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (activeBadge === badge && pinned) hide(true);
+        else show(badge, true);
+      });
+      listen(accountsPane, 'keydown', function (event) {
+        var badge = findBadge(event.target);
+        if (badge && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          if (activeBadge === badge && pinned) hide(true);
+          else show(badge, true);
+        }
+        if (event.key === 'Escape') hide(true);
+      });
+      if (summaryButton) {
+        listen(summaryButton, 'mouseenter', function () { showSummary(false); });
+        listen(summaryButton, 'mouseleave', deferHide);
+        listen(summaryButton, 'focus', function () { showSummary(false); });
+        listen(summaryButton, 'blur', deferHide);
+        listen(summaryButton, 'click', function (event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (activeBadge === summaryButton && pinned) hide(true);
+          else showSummary(true);
+        });
+        listen(summaryButton, 'keydown', function (event) {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            if (activeBadge === summaryButton && pinned) hide(true);
+            else showSummary(true);
+          }
+        });
+      }
+      listen(popup, 'mouseenter', function () { popoverHovered = true; clearTimeout(hideTimer); });
+      listen(popup, 'mouseleave', function () { popoverHovered = false; deferHide(); });
+      listen(popup, 'pointerdown', function (event) { event.stopPropagation(); });
+      listen(window, 'resize', function () { hide(true); });
+      listen(accountsPane, 'scroll', function () { hide(true); }, true);
+      listen(document, 'keydown', function (event) { if (event.key === 'Escape') hide(true); });
+      registerDisposer(function () { hide(true); });
     }
 
     function closeSecureTransferModal(mask) {
@@ -6979,6 +7458,106 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         'var(--wbs-trend-series-10)', 'var(--wbs-trend-series-11)', 'var(--wbs-trend-series-12)'];
     }
 
+    function resolveUsageColor(value, owner) {
+      if (!value) return '';
+      var probe = document.createElement('span');
+      probe.style.position = 'absolute';
+      probe.style.width = '0';
+      probe.style.height = '0';
+      probe.style.color = value;
+      (owner || document.body).appendChild(probe);
+      var resolved = getComputedStyle(probe).color;
+      probe.remove();
+      return resolved;
+    }
+
+    function usagePieData(rows) {
+      var sorted = (rows || []).map(function (row) {
+        return { label: String(row.label || '未知'), value: Number(row.value), calls: Math.max(0, Number(row.calls) || 0) };
+      }).filter(function (row) { return Number.isFinite(row.value) && row.value > 0; })
+        .sort(function (a, b) { return b.value - a.value || a.label.localeCompare(b.label); });
+      var total = sorted.reduce(function (sum, row) { return sum + row.value; }, 0);
+      var segments = sorted.slice(0, 7);
+      if (sorted.length > 8) {
+        var rest = sorted.slice(7);
+        segments.push({ label: '其他', value: rest.reduce(function (sum, row) { return sum + row.value; }, 0),
+          calls: rest.reduce(function (sum, row) { return sum + row.calls; }, 0), children: rest });
+      } else segments = sorted;
+      return { total: total, segments: segments };
+    }
+
+    function usagePieHtml(rows, title, unit, formatValue, emptyText) {
+      var data = usagePieData(rows);
+      var heading = '<div class="wbs-token-stats-section wbs-usage-pie-section"><div class="wbs-token-stats-section-title">' + esc(title) + '</div>';
+      if (!data.total) return heading + '<div class="wbs-token-stats-empty">' + esc(emptyText) + '</div></div>';
+      var colors = usageTrendColors(), offset = -Math.PI / 2;
+      function percent(value) { var p = value / data.total * 100; return p < 0.1 ? '<0.1%' : p.toFixed(1) + '%'; }
+      function description(row) { return row.label + ' · ' + formatValue(row.value) + ' ' + unit + ' · ' + percent(row.value); }
+      function legendRow(row, color, index) {
+        return '<div class="wbs-pie-row" data-pie-index="' + index + '" title="' + escAttr(description(row)) + '"><i style="background:' + color + '" aria-hidden="true"></i>' +
+          '<span class="wbs-pie-name">' + esc(row.label) + '<small>' + esc(formatTokenCount(row.calls)) + ' 次</small></span>' +
+          '<b>' + esc(formatValue(row.value)) + '</b><span class="wbs-pie-percent">' + esc(percent(row.value)) + '</span></div>';
+      }
+      var arcs = data.segments.map(function (row, index) {
+        var angle = row.value / data.total * Math.PI * 2;
+        var end = offset + angle;
+        var startX = 64 + 58 * Math.cos(offset), startY = 64 + 58 * Math.sin(offset);
+        var endX = 64 + 58 * Math.cos(end), endY = 64 + 58 * Math.sin(end);
+        var shape = data.segments.length === 1 ? '<circle cx="64" cy="64" r="58"' :
+          '<path d="M64 64 L' + startX + ' ' + startY + ' A58 58 0 ' + (angle > Math.PI ? 1 : 0) + ' 1 ' + endX + ' ' + endY + ' Z"';
+        offset = end;
+        return shape + ' class="wbs-pie-slice" data-pie-index="' + index + '" tabindex="0" role="img" aria-label="' + escAttr(description(row)) + '"' +
+          ' data-pie-label="' + escAttr(row.label) + '" data-pie-value="' + escAttr(formatValue(row.value) + ' ' + unit) + '" data-pie-percent="' + escAttr(percent(row.value)) + '" data-pie-calls="' + escAttr(formatTokenCount(row.calls)) + '"' +
+          ' style="--wbs-pie-color:' + colors[index] + '"></' + (data.segments.length === 1 ? 'circle' : 'path') + '>';
+      }).join('');
+      var legend = data.segments.map(function (row, index) {
+        var line = legendRow(row, colors[index], index);
+        return row.children ? '<details class="wbs-pie-other"><summary>' + line + '</summary><div class="wbs-pie-details">' + row.children.map(function (child) { return legendRow(child, colors[index], index); }).join('') + '</div></details>' : line;
+      }).join('');
+      return heading + '<div class="wbs-pie-subtitle"><strong>' + esc(formatValue(data.total)) + '</strong><span>' + esc(unit) + '</span></div>' +
+        '<div class="wbs-usage-pie"><div class="wbs-pie-plot"><svg viewBox="0 0 128 128" aria-label="' + escAttr(title) + '">' + arcs + '</svg></div>' +
+        '<div class="wbs-pie-legend">' + legend + '</div></div>' +
+        '<div class="wbs-pie-tooltip" role="tooltip" hidden><strong></strong><div data-pie-tip-value></div><div data-pie-tip-detail></div></div></div>';
+    }
+
+    function wireUsagePies(container) {
+      container.querySelectorAll('.wbs-usage-pie-section').forEach(function (section) {
+        var tooltip = section.querySelector('.wbs-pie-tooltip');
+        if (!tooltip) return;
+        function clear() {
+          section.classList.remove('has-pie-preview');
+          section.querySelectorAll('[data-pie-index]').forEach(function (el) { el.classList.remove('is-preview'); });
+          tooltip.hidden = true;
+        }
+        function preview(target, event) {
+          var item = target && target.closest && target.closest('[data-pie-index]');
+          if (!item) { clear(); return; }
+          var index = item.getAttribute('data-pie-index');
+          var slice = section.querySelector('.wbs-pie-slice[data-pie-index="' + index + '"]');
+          if (!slice) return;
+          section.classList.add('has-pie-preview');
+          section.querySelectorAll('[data-pie-index]').forEach(function (el) { el.classList.toggle('is-preview', el.getAttribute('data-pie-index') === index); });
+          tooltip.querySelector('strong').textContent = slice.getAttribute('data-pie-label');
+          tooltip.querySelector('[data-pie-tip-value]').textContent = slice.getAttribute('data-pie-value');
+          tooltip.querySelector('[data-pie-tip-detail]').textContent = slice.getAttribute('data-pie-percent') + ' · ' + slice.getAttribute('data-pie-calls') + ' 次';
+          tooltip.hidden = false;
+          var bounds = item.getBoundingClientRect();
+          var x = event && Number.isFinite(event.clientX) ? event.clientX : bounds.left + bounds.width / 2;
+          var y = event && Number.isFinite(event.clientY) ? event.clientY : bounds.bottom;
+          var tip = tooltip.getBoundingClientRect();
+          tooltip.style.left = Math.max(8, Math.min(window.innerWidth - tip.width - 8, x + 12)) + 'px';
+          tooltip.style.top = Math.max(8, y + tip.height + 20 > window.innerHeight ? y - tip.height - 12 : y + 12) + 'px';
+        }
+        section.addEventListener('pointermove', function (event) { preview(event.target, event); });
+        section.addEventListener('pointerleave', clear);
+        section.addEventListener('focusin', function (event) { preview(event.target); });
+        section.addEventListener('focusout', clear);
+        section.addEventListener('keydown', function (event) { if (event.key === 'Escape' && !tooltip.hidden) { clear(); event.stopPropagation(); } });
+        section.addEventListener('scroll', clear, true);
+      });
+    }
+
+
     function usageTrendGroups(days, records, dimension, names) {
       var groups = new Map();
       (records || []).forEach(function (row) {
@@ -7043,7 +7622,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           renderUsageBreakdown(panel, days, records, modes, state, formatValue);
         };
       });
-      var series = mode === 'total' ? [{ label: '总量', values: days.map(function (day) { return day.value; }), color: getComputedStyle(panel).getPropertyValue('--wbs-primary').trim() }] :
+      var series = mode === 'total' ? [{ label: '总量', values: days.map(function (day) { return day.value; }), color: getComputedStyle(panel).getPropertyValue('--wbs-trend-series-1').trim() || colors[0] }] :
         groups.filter(function (group) { return selected.has(group.key); }).map(function (group, index) {
           var dot = Array.from(legend.querySelectorAll('[data-trend-series]')).find(function (button) { return button.dataset.trendSeries === group.key; }).querySelector('i');
           return { label: group.label, values: group.values, color: getComputedStyle(dot).color, dash: index % 3 };
@@ -7063,7 +7642,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var values = (Array.isArray(points) ? points : []).map(function (point) {
         return { label: String(point && point.label || ''), value: Math.max(0, Number(point && point.value) || 0), title: String(point && point.title || '') };
       });
-      series = Array.isArray(series) ? series : [{ label: '总量', values: values.map(function (point) { return point.value; }), color: 'var(--wbs-primary)' }];
+      series = Array.isArray(series) ? series : [{ label: '总量', values: values.map(function (point) { return point.value; }), color: '' }];
       var cssWidth = Math.max(container.clientWidth - 24, values.length * 42, 320);
       var cssHeight = 166;
       var ratio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
@@ -7091,7 +7670,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       });
       if (values.length && series.length === 1) {
         var area = context.createLinearGradient(0, chartTop, 0, chartBottom);
-        area.addColorStop(0, series[0].color || 'rgb(' + primaryRgb + ')');
+        area.addColorStop(0, series[0].color || primary);
         area.addColorStop(1, 'transparent');
         context.beginPath();
         series[0].values.forEach(function (value, index) { var px = x(index), py = y(value); if (!index) context.moveTo(px, py); else context.lineTo(px, py); });
@@ -7101,7 +7680,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       series.forEach(function (line) {
         context.beginPath();
         line.values.forEach(function (value, index) { var px = x(index), py = y(value); if (!index) context.moveTo(px, py); else context.lineTo(px, py); });
-        context.strokeStyle = line.color || 'rgb(' + primaryRgb + ')';
+        context.strokeStyle = line.color || primary;
         context.lineWidth = 2; context.lineJoin = 'round'; context.lineCap = 'round';
         context.setLineDash(line.dash === 1 ? [6, 3] : line.dash === 2 ? [2, 3] : []); context.stroke(); context.setLineDash([]);
         line.values.forEach(function (value, index) {
@@ -7196,12 +7775,20 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var creditPollTimer = null;
       var focusBefore = document.activeElement;
       function closeStats() {
+        if (!mask.isConnected) return;
         if (creditPollTimer) clearTimeout(creditPollTimer);
+        if (firstLoadTimer) clearTimeout(firstLoadTimer);
+        tokenReadSerial++;
         mask.remove();
         if (focusBefore && focusBefore.isConnected) focusBefore.focus();
       }
       mask.__wbsClose = closeStats;
-      registerDisposer(function () { if (creditPollTimer) clearTimeout(creditPollTimer); mask.remove(); });
+      mask.addEventListener('scroll', function () {
+        mask.querySelectorAll('.wbs-pie-tooltip').forEach(function (tooltip) { tooltip.hidden = true; });
+        mask.querySelectorAll('.has-pie-preview').forEach(function (section) { section.classList.remove('has-pie-preview'); });
+        mask.querySelectorAll('.is-preview[data-pie-index]').forEach(function (item) { item.classList.remove('is-preview'); });
+      }, true);
+      registerDisposer(closeStats);
       mask.querySelector('[data-token-close]').addEventListener('click', closeStats);
       mask.addEventListener('click', function (event) { event.stopPropagation(); if (event.target === mask) closeStats(); });
       ['pointerdown', 'pointerup', 'keyup', 'keypress'].forEach(function (name) { mask.addEventListener(name, function (event) { event.stopPropagation(); }); });
@@ -7209,7 +7796,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         event.stopPropagation();
         if (event.key === 'Escape') { event.preventDefault(); closeStats(); }
         if (event.key === 'Tab') {
-          var controls = Array.from(mask.querySelectorAll('button,select,input')).filter(function (el) { return !el.disabled && el.getClientRects().length; });
+          var controls = Array.from(mask.querySelectorAll('button,select,input,summary,[tabindex="0"]')).filter(function (el) { return !el.disabled && el.getClientRects().length; });
           var first = controls[0], last = controls[controls.length - 1];
           if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
           if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
@@ -7219,6 +7806,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       function usageDays(kind) { return Number(mask.querySelector('[data-' + kind + '-days][aria-pressed="true"]').dataset[kind + 'Days']); }
       var overlay = mask.querySelector('.wbs-token-stats-overlay');
       var hasStats = false;
+      var tokenBusy = false;
       var firstLoadTimer = null;
       var tokenReadSerial = 0;
       var tokenTrendState = { mode: 'total', selected: {} };
@@ -7255,21 +7843,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         }
         creditBody.innerHTML = '<div class="wbs-token-stats-grid wbs-credit-stats-grid"><div><span>积分消耗</span><strong>' + (creditData.daily.length ? esc(fmtCredits(total)) : '—') + '</strong></div><div><span>调用</span><strong>' + (creditData.daily.length ? esc(formatTokenCount(calls)) : '—') + '</strong></div></div>' +
           '<div class="wbs-token-stats-section"><div class="wbs-token-stats-section-title">每日趋势</div>' + usageTrendChartHtml('每日积分趋势', false) + ((creditData.failures || []).length ? '<div class="wbs-credit-stats-note">* 表示部分账号查询失败；— 表示查询失败，暂无数据。</div>' : '') + '</div>' +
-          '<div class="wbs-token-stats-section"><div class="wbs-token-stats-section-title">账号用量</div><div class="wbs-token-model-scroll"><div class="wbs-token-stats-table">' + (selected.slice().filter(function (a) { return (byAccount[a.uid] || 0) > 0; }).sort(function (a,b) { return (byAccount[b.uid] || 0) - (byAccount[a.uid] || 0); }).map(function (a) { return '<div><span title="' + escAttr(a.nickname || a.uid) + '">' + esc(a.nickname || a.uid) + '</span><b>' + esc(fmtCredits(byAccount[a.uid])) + '</b><em>' + esc(formatTokenCount(accountCalls[a.uid] || 0)) + ' 次</em></div>'; }).join('') || '<div class="wbs-token-stats-empty">没有匹配的账号</div>') + '</div></div></div>';
+          '<div class="wbs-usage-columns">' +
+          usagePieHtml(selected.map(function (a) { return { label: a.nickname || a.uid, value: byAccount[a.uid] || 0, calls: accountCalls[a.uid] || 0 }; }), '账号用量', '积分', fmtCredits, '暂无账号数据') +
+          usagePieHtml(Object.keys(byModel).map(function (model) { return { label: model, value: byModel[model].used, calls: byModel[model].count }; }), '模型用量', '积分', fmtCredits, '暂无模型数据') + '</div>';
+        wireUsagePies(creditBody);
         var creditNames = Object.create(null);
         creditAccounts.forEach(function (account) { creditNames[account.uid] = account.nickname || account.uid; });
         renderUsageBreakdown(creditBody.querySelector('.wbs-trend-panel'), days, (creditData.daily || []).map(function (row) {
           return { day: row.date, account: row.uid, value: Number(row.used) || 0 };
-        }), { account: creditNames }, creditTrendState, fmtCredits);
-        var accountScroll = creditBody.querySelector('.wbs-token-model-scroll');
-        if (accountScroll) {
-          var syncAccountFade = function () {
-            accountScroll.classList.toggle('no-overflow', accountScroll.scrollHeight <= accountScroll.clientHeight + 1);
-            accountScroll.classList.toggle('at-end', accountScroll.scrollTop + accountScroll.clientHeight >= accountScroll.scrollHeight - 1);
-          };
-          accountScroll.addEventListener('scroll', syncAccountFade, { passive: true });
-          syncAccountFade();
-        }
+        }).concat(modelRecords), { account: creditNames, model: Object.keys(byModel).reduce(function (out, model) { out[model] = model; return out; }, {}) }, creditTrendState, fmtCredits);
+
       }
       function setCreditBusy(busy, showOverlay) {
         creditBusy = busy;
@@ -7349,6 +7932,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           mask.querySelectorAll('[data-usage-pane]').forEach(function (pane) { pane.hidden = pane.getAttribute('data-usage-pane') !== tab; });
           mask.querySelector('.wbs-usage-scroll').scrollTop = 0;
           if (tab === 'credit' && (changed || !creditLoaded)) loadCredits();
+          if (tab === 'token' && !hasStats && !tokenBusy) load();
         });
       });
       ['token', 'credit'].forEach(function (kind) {
@@ -7368,6 +7952,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       // 这里原来挂了一份渲染副本，但本函数（onTokenStats）在 2026-09-23 融合进「用量看板」时
       // 就失去了入口 ⇒ 死代码里的副本永远看不到，只会与真实现漂移，故摘掉。
       function load() {
+        if (tokenBusy) return;
+        tokenBusy = true;
         var serial = ++tokenReadSerial;
         mask.querySelectorAll('[data-token-days]').forEach(function (button) { button.disabled = true; });
         overlay.hidden = false;
@@ -7405,21 +7991,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             '<div><span>缓存读取</span><strong>' + esc(formatTokenCount(totals.cacheRead)) + '</strong></div>' +
             '<div><span>缓存写入</span><strong>' + esc(formatTokenCount(totals.cacheWrite)) + '</strong></div>' +
             '</div><div class="wbs-token-stats-section"><div class="wbs-token-stats-section-title">每日趋势</div>' + usageTrendChartHtml('每日 Token 趋势', true) + '</div>' +
-            '<div class="wbs-usage-columns"><div class="wbs-token-stats-section"><div class="wbs-token-stats-section-title">模型排行</div><div class="wbs-token-model-scroll"><div class="wbs-token-stats-table">' + ((stats.models || []).slice(0, 12).map(function (item) { return '<div><span>' + esc(item.model) + '</span><b>' + esc(formatTokenCount((item.input || 0) + (item.output || 0))) + '</b><em>' + esc(formatTokenCount(item.calls || 0)) + ' 次</em></div>'; }).join('') || '<div class="wbs-token-stats-empty wbs-token-empty-model">暂无模型数据</div>') + '</div></div></div>' +
-            '<div class="wbs-token-stats-section"><div class="wbs-token-stats-section-title">账号用量</div><div class="wbs-token-model-scroll"><div class="wbs-token-stats-table">' + (accountRows.map(function (item) { var label = item.nickname || item.account; var value = (item.input || 0) + (item.output || 0); return '<div><span title="' + escAttr(label) + '">' + esc(label) + '</span><b>' + esc(formatTokenCount(value)) + '</b><em>' + esc(formatTokenCount(item.calls || 0)) + ' 次</em></div>'; }).join('') || '<div class="wbs-token-stats-empty">暂无账号数据</div>') + '</div></div></div></div>';
+            '<div class="wbs-usage-columns">' +
+            usagePieHtml((stats.models || []).map(function (item) { return { label: item.model, value: (item.input || 0) + (item.output || 0), calls: item.calls }; }), '模型用量', 'Token（输入 + 输出）', formatTokenCount, '暂无模型数据') +
+            usagePieHtml(accountRows.map(function (item) { return { label: item.nickname || item.account, value: (item.input || 0) + (item.output || 0), calls: item.calls }; }), '账号用量', 'Token（输入 + 输出）', formatTokenCount, '暂无账号数据') + '</div>';
+          wireUsagePies(body);
           var tokenNames = Object.create(null);
           ((result && result.accounts) || []).forEach(function (item) { tokenNames[item.uid] = item.nickname || item.uid; });
           renderUsageBreakdown(body.querySelector('.wbs-trend-panel'), tokenDays, (stats.dailyBreakdown || []).map(function (row) {
             return { day: row.day, account: row.account, model: row.model, value: (row.input || 0) + (row.output || 0) };
           }), { account: tokenNames, model: Object.create(null) }, tokenTrendState, formatTokenCount);
-          var modelScroll = mask.querySelector('.wbs-token-model-scroll');
-          if (modelScroll) {
-            var syncModelFade = function () { modelScroll.classList.toggle('at-end', modelScroll.scrollTop + modelScroll.clientHeight >= modelScroll.scrollHeight - 1); modelScroll.classList.toggle('no-overflow', modelScroll.scrollHeight <= modelScroll.clientHeight + 1); };
-            modelScroll.addEventListener('scroll', syncModelFade, { passive: true });
-            syncModelFade();
-          }
+
           hasStats = true;
-        }).catch(function (error) { if (!mask.isConnected || serial !== tokenReadSerial) return; if (hasStats) toast('读取失败：' + (error.message || error), true, root); else body.innerHTML = '<div class="wbs-token-stats-empty">读取失败：' + esc(error.message || error) + '</div>'; }).finally(function () { if (!mask.isConnected || serial !== tokenReadSerial) return; if (firstLoadTimer) { clearTimeout(firstLoadTimer); firstLoadTimer = null; } mask.querySelectorAll('[data-token-days]').forEach(function (button) { button.disabled = false; }); overlay.hidden = true; });
+        }).catch(function (error) { if (!mask.isConnected || serial !== tokenReadSerial) return; if (hasStats) toast('读取失败：' + (error.message || error), true, root); else body.innerHTML = '<div class="wbs-token-stats-empty">读取失败：' + esc(error.message || error) + '</div>'; }).finally(function () { if (!mask.isConnected || serial !== tokenReadSerial) return; tokenBusy = false; if (firstLoadTimer) { clearTimeout(firstLoadTimer); firstLoadTimer = null; } mask.querySelectorAll('[data-token-days]').forEach(function (button) { button.disabled = false; }); overlay.hidden = true; });
       }
       load();
     }
@@ -7663,14 +8246,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
     // ===== Tab 切换 =====
     function switchTab(name) {
+      if (typeof closeAccountNotePopover === 'function') closeAccountNotePopover();
       var tabs = root.querySelectorAll('.wbs-tab');
       var panes = root.querySelectorAll('.wbs-pane');
       for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle('active', tabs[i].getAttribute('data-tab') === name);
       for (var j = 0; j < panes.length; j++) panes[j].classList.toggle('active', panes[j].getAttribute('data-pane') === name);
       if (name === 'theme') {
         if (themePane && !themePane.dataset.built) buildThemePane();
-        var themeBtn = themePane && themePane.querySelector('#wbs-theme-seg .wbs-theme-opt.active');
-        syncWallpaperCardVisibility(themeBtn ? themeBtn.getAttribute('data-wbs-theme-option') : 'default');
+        syncWallpaperCardVisibility('nebula');
       }
       if (name === 'sessions' && sessionsPane && !sessionsPane.dataset.built) buildSessionsPane();
       if (name === 'spaces' && spacesPane && !spacesPane.dataset.built) buildSpacesPane();
@@ -8930,6 +9513,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<button class="wbs-sess-bbtn wbs-sess-done" type="button" id="wbs-sess-done">取消</button>' +
         '</div>' +
         '</div>' +
+        '<div class="wbs-sess-export-progress" id="wbs-sess-export-progress" role="status" aria-live="polite" hidden>' +
+        '<div class="wbs-sess-export-head"><strong data-export-title></strong><button type="button" class="wbs-sess-bbtn" data-export-cancel>取消导出</button><button type="button" class="wbs-sess-bbtn" data-export-open hidden>打开导出目录</button></div>' +
+        '<progress data-export-progress max="100" aria-label="导出进度"></progress><div data-export-detail></div></div>' +
         '<div class="wbs-sess-copy-progress" id="wbs-sess-copy-progress" role="status" aria-live="polite" hidden>' +
         '<div class="wbs-sess-copy-head"><span class="wbs-sess-copy-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><strong class="wbs-sess-copy-title">正在同步会话</strong><span class="wbs-sess-copy-count">0 / 0</span></div>' +
         '<div class="wbs-sess-copy-detail"></div><div class="wbs-sess-copy-track" role="progressbar" aria-label="会话同步进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="wbs-sess-copy-fill"></span></div>' +
@@ -8969,7 +9555,45 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       loadSessionAccounts();
       loadSessions();
       pollActiveSessionCopyJob();
+      pollSessionExport();
       registerDisposer(function () { if (sessionsState.autoCopyPollTimer) clearTimeout(sessionsState.autoCopyPollTimer); });
+      registerDisposer(function () { if (sessionsState.exportPollTimer) clearTimeout(sessionsState.exportPollTimer); });
+    }
+
+    function renderSessionExport(job) {
+      var card = sessionsPane && sessionsPane.querySelector('#wbs-sess-export-progress');
+      if (!card) return;
+      sessionsState.exportJob = job;
+      card.hidden = !job;
+      var button = sessionsPane.querySelector('#wbs-sess-export');
+      if (button) button.disabled = !!(job && job.running);
+      if (!job) return;
+      card.querySelector('[data-export-title]').textContent = ({ preparing: '正在准备导出…', writing: '正在导出会话…', cancelling: '正在取消导出…', cancelled: '会话导出已取消', completed: '会话导出完成', failed: '会话导出失败' })[job.status] || '正在准备导出…';
+      var progress = card.querySelector('[data-export-progress]');
+      progress.hidden = !job.running;
+      if (job.status === 'preparing') progress.removeAttribute('value'); else progress.value = job.percent || 0;
+      card.querySelector('[data-export-detail]').textContent = job.file || job.error ||
+        (job.totalBytes ? sessionCopySizeText(job.processedBytes) + ' / ' + sessionCopySizeText(job.totalBytes) + ' · ' + job.percent + '%' : '');
+      card.querySelector('[data-export-cancel]').hidden = !job.running;
+      card.querySelector('[data-export-cancel]').disabled = job.status === 'cancelling';
+      card.querySelector('[data-export-open]').hidden = job.status !== 'completed';
+    }
+
+    function pollSessionExport(id) {
+      if (sessionsState.exportPollTimer) clearTimeout(sessionsState.exportPollTimer);
+      sessionsState.exportPollTimer = null;
+      var serial = sessionsState.exportReadSerial = (sessionsState.exportReadSerial || 0) + 1;
+      return api('/api/sessions/export' + (id ? '?id=' + encodeURIComponent(id) : '')).then(function (result) {
+        if (!alive || serial !== sessionsState.exportReadSerial) return;
+        renderSessionExport(result.job);
+        if (result.job && result.job.running) sessionsState.exportPollTimer = setBuildTimeout(function () { pollSessionExport(result.job.id); }, 800);
+      }).catch(function (error) {
+        if (!alive || serial !== sessionsState.exportReadSerial) return;
+        if (error.payload && error.payload.code === 'EXPORT_JOB_NOT_FOUND') return pollSessionExport();
+        var detail = sessionsPane && sessionsPane.querySelector('[data-export-detail]');
+        if (detail && sessionsState.exportJob) detail.textContent = '导出进度暂时无法读取，正在重试…';
+        sessionsState.exportPollTimer = setBuildTimeout(function () { pollSessionExport(id); }, 2500);
+      });
     }
 
     // ===== 云端残留卡片：检测 + 清理 =====
@@ -9172,7 +9796,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (!sessionsPane) return;
       var listEl = sessionsPane.querySelector('#wbs-sess-list');
       if (!listEl) return;
-      listEl.innerHTML = '<div class="wbs-empty">加载中…</div>';
+      // 【BUG5 修复】已有列表时不再整块替换成「加载中…」——那会让所有分组先视觉收起、数据回来再展开，
+      //   自动刷新（切号后同步收尾）时就表现为连续多次「收起又展开」。只有首次（列表为空）才给占位。
+      if (!listEl.children.length) listEl.innerHTML = '<div class="wbs-empty">加载中…</div>';
       // uid: undefined=当前账号(不传)，''=全部账号，具体值=指定账号
       var url = '/api/sessions?range=' + (sessionsState.range || '7d');
       if (sessionsState.uid !== undefined) url += '&uid=' + encodeURIComponent(sessionsState.uid);
@@ -9185,7 +9811,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         sessionsState.autoCopy = (d && d.autoCopy) || null;
         sessionsState.autoCopyAll = !!(d && d.autoCopyAll);
         sessionsState.selected = {};
-        sessionsState.wsExpanded = {};
+        // 【BUG5 修复】不再清空 wsExpanded。切号后台同步收尾时 watchAutoCopyProgress 会自动调
+        //   loadSessions()，而旧实现每次都把「任务 / 空间」分组的展开条数重置回默认 2 条 ⇒ 用户看到
+        //   「一直收起又展开、连续多次」。wsExpanded 的 key 是 workspace 路径 / __TASKS__，与账号无关，
+        //   保留它对任何一次刷新都更符合预期。
         renderSessions();
         // 筛选变化后退出批量模式（勾选框隐藏 + 恢复工具栏右侧按钮）
         if (sessionsState.batchMode) {
@@ -9514,6 +10143,22 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
 
     function wireSessionsPane() {
+      var exportCard = sessionsPane.querySelector('#wbs-sess-export-progress');
+      if (exportCard) {
+        exportCard.querySelector('[data-export-cancel]').addEventListener('click', function () {
+          var job = sessionsState.exportJob;
+          if (!job || !job.running) return;
+          api('/api/sessions/export/cancel', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: job.id }) })
+            .then(function (result) { renderSessionExport(result.job); pollSessionExport(job.id); })
+            .catch(function (error) { toast(error.message, true, root); });
+        });
+        exportCard.querySelector('[data-export-open]').addEventListener('click', function () {
+          var job = sessionsState.exportJob;
+          if (!job || job.status !== 'completed') return;
+          api('/api/sessions/export/open', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: job.id }) })
+            .catch(function (error) { toast(error.message, true, root); });
+        });
+      }
       var autoCopyAllBtn = sessionsPane.querySelector('#wbs-sess-auto-all');
       if (autoCopyAllBtn) {
         autoCopyAllBtn.addEventListener('click', function () {
@@ -9606,15 +10251,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           title: '导出会话',
           requirePassword: true,
           confirmText: '导出',
-          hint: '将加密导出 ' + ids.length + ' 个会话及其本地消息附件。',
+          hint: '导出会话会在后台完成，文件保存到下载目录。',
           onConfirm: function (password) { return api('/api/sessions/export', {
-            responseType: 'blob',
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ ids: ids, password: password }),
+            body: JSON.stringify({ ids: ids, password: password, background: true }),
           }).then(function (result) {
-            downloadTransfer(result, 'WorkDaddy-sessions-' + new Date().toISOString().slice(0, 10) + '.wds');
-            toast('已导出 ' + result.count + ' 个会话（已加密）', false, root);
+            sessionsState.exportReadSerial = (sessionsState.exportReadSerial || 0) + 1;
+            renderSessionExport(result.job);
+            pollSessionExport(result.job.id);
           }); },
         });
       });
@@ -10626,21 +11271,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       };
     }
 
-    // ===== 主题 pane（构建：主题选择 + 头像 + WorkDaddy 壁纸）=====
+    // ===== 主题 pane（构建：头像 + 悬浮机器人 + 主题选择 + WorkDaddy 壁纸）=====
     function buildThemePane() {
       if (!themePane) return;
       themePane.dataset.built = '1';
       themePane.innerHTML =
-        '<div class="wbs-pcard">' +
-        '<div class="wbs-pcard-title">主题外观</div>' +
-        '<div class="wbs-theme-seg" id="wbs-theme-seg">' +
-        '<button class="wbs-theme-opt active" type="button" data-wbs-theme-option="default">浅色</button>' +
-        '<button class="wbs-theme-opt" type="button" data-wbs-theme-option="dark">深色</button>' +
-        '<button class="wbs-theme-opt" type="button" data-wbs-theme-option="eye-care">护眼绿</button>' +
-        '<button class="wbs-theme-opt" type="button" data-wbs-theme-option="cyber-purple">赛博紫</button>' +
-        '<button class="wbs-theme-opt" type="button" data-wbs-theme-option="nebula">毛玻璃</button>' +
-        '</div>' +
-        '</div>' +
         '<div class="wbs-pcard wbs-avatar-card">' +
         '<div class="wbs-pcard-title">头像</div>' +
         '<div class="wbs-avatar-row">' +
@@ -10654,6 +11289,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<div class="wbs-pcard wbs-fab-settings">' +
         '<div class="wbs-pcard-title">悬浮机器人</div>' +
         '<div class="wbs-theme-seg wbs-robot-seg" role="radiogroup" aria-label="机器人外观">' +
+        '<label class="wbs-theme-opt wbs-robot-option" title="跟随发送按钮的主题色"><input type="radio" name="wbs-robot-style" value="theme"><span>主题色</span></label>' +
         '<label class="wbs-theme-opt wbs-robot-option" title="白底黑眼"><input type="radio" name="wbs-robot-style" value="white"><span>白色</span></label>' +
         '<label class="wbs-theme-opt wbs-robot-option" title="黑底白眼"><input type="radio" name="wbs-robot-style" value="black"><span>黑色</span></label>' +
         '<label class="wbs-theme-opt wbs-robot-option" title="毛玻璃底与镂空眼睛"><input type="radio" name="wbs-robot-style" value="glass"><span>毛玻璃</span></label>' +
@@ -10662,7 +11298,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<label class="wbs-ask-label" for="wbs-fab-auto-dock">自动贴边<span class="wbs-ask-hint">闲置 5 秒后收起，鼠标靠近即展开</span></label>' +
         '<label class="wbs-switch"><input type="checkbox" id="wbs-fab-auto-dock"><span class="wbs-switch-slider"></span></label>' +
         '</div></div>' +
-        '<div class="wbs-pcard wbs-wallpaper-card" id="wbs-wallpaper-card" style="display:none">' +
+        '<div class="wbs-pcard">' +
+        '<div class="wbs-theme-takeover-row">' +
+        '<div class="wbs-pcard-title">毛玻璃主题</div>' +
+        '<label class="wbs-switch"><input type="checkbox" id="wbs-theme-takeover" checked><span class="wbs-switch-slider"></span></label></div>' +
+        '</div>' +
+        '<div class="wbs-pcard wbs-wallpaper-card wbs-theme-managed" id="wbs-wallpaper-card" style="display:none">' +
         '<div class="wbs-pcard-title">壁纸</div>' +
         '<div class="wbs-bg-source">' +
         '<button class="wbs-bg-src active" type="button" data-src="official">' + WBS_BRAND + ' 壁纸</button>' +
@@ -10687,7 +11328,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<span class="wbs-mask-val" id="wbs-bg-blur-val">0%</span>' +
         '</div>' +
         '</div>' +
-        '<div class="wbs-pcard" id="wbs-text-shadow-card" style="display:none">' +
+        '<div class="wbs-pcard wbs-theme-managed" id="wbs-text-shadow-card" style="display:none">' +
         '<div class="wbs-ask-row">' +
         '<label class="wbs-ask-label" for="wbs-text-shadow">消息文字阴影<span class="wbs-ask-hint">增强壁纸上的消息文字辨识度</span></label>' +
         '<label class="wbs-switch"><input type="checkbox" id="wbs-text-shadow" checked disabled><span class="wbs-switch-slider"></span></label>' +
@@ -10781,6 +11422,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<span class="wbs-nd-title">快捷短语</span>' +
         '<span class="wbs-nd-hint">发送后不会自动删除</span>' +
         '<label class="wbs-switch"><input type="checkbox" id="wbs-sess-phrase"><span class="wbs-switch-slider"></span></label>' +
+        '</div>' +
+        '<div class="wbs-nd-row">' +
+        '<span class="wbs-nd-title">中文思考</span>' +
+        '<span class="wbs-nd-hint">默认关闭。开启后把「思考链用简体中文」写入全局自定义指令，所有会话生效；代码、命令、路径、API 名仍保留英文原文</span>' +
+        '<label class="wbs-switch" title="开启后模型用简体中文思考（写入全局自定义指令）"><input type="checkbox" id="wbs-sess-zh-reasoning"><span class="wbs-switch-slider"></span></label>' +
         '</div>' +
         '<div class="wbs-qp-area" id="wbs-qp-area" style="display:none">' +
         '<div class="wbs-qp-toolbar">' +
@@ -11428,15 +12074,36 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (!themePane) return;
       var card = themePane.querySelector('#wbs-wallpaper-card');
       if (!card) return;
-      var visible = themeId === 'nebula';
+      // 主题页固定使用毛玻璃；开关只控制这组玻璃主题设置是否可见。
+      var visible = sessState.themeTakeover;
       card.style.display = visible ? '' : 'none';
       var textCard = themePane.querySelector('#wbs-text-shadow-card');
       if (textCard) textCard.style.display = visible ? '' : 'none';
       if (visible) loadWallpapers();
     }
 
+    // 关闭接管后只隐藏主题外观选项；头像和悬浮机器人独立于主题接管。
+    function syncThemeTakeoverVisibility(enabled) {
+      var visible = enabled !== false;
+      if (themePane) {
+        themePane.querySelectorAll('.wbs-theme-managed').forEach(function (node) {
+          node.style.display = visible ? '' : 'none';
+        });
+      }
+    }
+
     // 主题 pane 事件绑定（元素在 buildThemePane 之后才存在，延迟到首次切换时绑定）
     function wireThemePane() {
+      var themeSwitch = themePane.querySelector('#wbs-theme-takeover');
+      if (themeSwitch) {
+        themeSwitch.checked = sessState.themeTakeover;
+        if (!themeSwitch.dataset.wbsWired) {
+          themeSwitch.dataset.wbsWired = '1';
+          themeSwitch.addEventListener('change', function () { setSessionSwitchWire('themeTakeoverEnabled', this); });
+        }
+        syncThemeTakeoverVisibility(sessState.themeTakeover);
+        syncSessionModule();
+      }
       themePane.querySelectorAll('input[name="wbs-robot-style"]').forEach(function (input) {
         input.checked = input.value === fabAppearance.get();
         input.closest('.wbs-theme-opt').classList.toggle('active', input.checked);
@@ -11468,26 +12135,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         dockSwitch.checked = fabQuietMode.isEnabled();
         dockSwitch.addEventListener('change', function () { fabQuietMode.setEnabled(this.checked); });
       }
-      // 主题选择：segmented 按钮直接切换
+      // 主题页只提供毛玻璃主题开关；壁纸仍通过下方来源按钮管理。
       themePane.addEventListener('click', function (e) {
         var t = e.target;
-        var segBtn = t.closest ? t.closest('#wbs-theme-seg .wbs-theme-opt') : null;
-        if (segBtn) {
-          var id = segBtn.getAttribute('data-wbs-theme-option');
-          // 不做 active 拦截：即使当前已是该主题也强制重新应用（保证「切换到默认主题=强制浅色 / 切换到 WorkDaddy 主题=强制深色」始终生效，面板状态与真实主题不一致时也能纠正）
-          var previous = themePane.querySelector('#wbs-theme-seg .wbs-theme-opt.active');
-          themePane.querySelectorAll('#wbs-theme-seg .wbs-theme-opt').forEach(function (b) { b.classList.toggle('active', b === segBtn); });
-          syncWallpaperCardVisibility(id);
-          applyTheme(id).then(function () {
-            var names = { 'default': '浅色', 'dark': '深色', 'nebula': WBS_BRAND + ' 主题', 'eye-care': '护眼绿', 'cyber-purple': '赛博紫' };
-            toast('已应用主题「' + (names[id] || id) + '」', false, root);
-          }).catch(function (er) {
-            themePane.querySelectorAll('#wbs-theme-seg .wbs-theme-opt').forEach(function (b) { b.classList.toggle('active', b === previous); });
-            syncWallpaperCardVisibility(previous ? previous.getAttribute('data-wbs-theme-option') : 'default');
-            toast('应用主题失败: ' + (er.message || er), true, root);
-          });
-          return;
-        }
         var srcBtn = t.closest ? t.closest('.wbs-bg-src') : null;
         if (srcBtn) {
           themePane.querySelectorAll('.wbs-bg-src').forEach(function (b) { b.classList.toggle('active', b === srcBtn); });
@@ -11674,7 +12324,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (grid && grid.dataset.loaded && !force) return;
       if (grid) grid.dataset.loaded = '1';
       var base = API.replace(/\/api\/?$/, '');
-      api('/api/wallpapers').then(function (d) {
+      var wallpaperRequest = api('/api/wallpapers');
+      var wallpaperTimeout = new Promise(function (_, reject) {
+        setTimeout(function () { reject(new Error('壁纸请求超时')); }, 8000);
+      });
+      Promise.race([wallpaperRequest, wallpaperTimeout]).then(function (d) {
         var list = d.wallpapers || [];
         var customList = d.customWallpapers || [];
         var current = d.currentWallpaper || null;
@@ -11765,6 +12419,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           });
         }
       }).catch(function () {
+        if (grid) grid.dataset.loaded = '';
         if (grid) grid.innerHTML = '<div class="wbs-wp-loading">壁纸加载失败（daemon 不可达）</div>';
         if (cgrid) cgrid.innerHTML = '<div class="wbs-wp-loading">壁纸加载失败（daemon 不可达）</div>';
       });
@@ -11783,6 +12438,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         sortAccountsByCreditExpiry();
         reorderAccountCards();
       }
+      if (!open && typeof closeAccountNotePopover === 'function') closeAccountNotePopover();
       state.open = open;
       panel.classList.toggle('show', open);
       fab.classList.toggle('hidden', open); // 打开时隐藏按钮
@@ -12113,14 +12769,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     function loadThemes() {
       api('/api/themes')
         .then(function (d) {
-          var seg = root.querySelector('.wbs-theme-seg');
-          if (!seg) return;
-          var cur = d.current && ALLOWED_THEMES.indexOf(d.current) >= 0 ? d.current : 'default';
-          seg.querySelectorAll('.wbs-theme-opt').forEach(function (b) {
-            b.classList.toggle('active', b.getAttribute('data-wbs-theme-option') === cur);
-          });
-          syncWallpaperCardVisibility(cur);
-          // 列表展示不能更改已保存的主题；主题只能由用户明确选择。
+          syncWallpaperCardVisibility('nebula');
         })
         .catch(function () {});
     }
@@ -12133,7 +12782,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
     // 当前主题 id（壁纸切换目标）：segmented 激活项；无则 nebula
     function themeSelectValue() {
-      var seg = root.querySelector('.wbs-theme-seg');
+      var seg = root.querySelector('#wbs-theme-seg');
       var act = seg ? seg.querySelector('.wbs-theme-opt.active') : null;
       var id = act ? act.getAttribute('data-wbs-theme-option') : null;
       return id && id !== 'default' && id !== 'dark' ? id : 'nebula';
@@ -12731,6 +13380,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       baselineAssistantKey: '', // 当前会话「切换后/开启后」最后一条已有助手消息的稳定 key（baseline，绝不判定）
       awaitingNewReply: false,  // 是否仍在等待新回复：为 true 时 baseline 消息的 feedback/文本变化/重排均不解除判定，不安排 settle
     };
+    // sessionStore 在 terminal 状态落地后会清空 error。短暂保留结构化白名单，
+    // 让同一轮 subscriber 回调仍能识别 6004/14018，而不保存原始错误正文。
+    var acErrorSnapshots = Object.create(null);
+    var acRateLimitRecorded = Object.create(null);
+    var acCurrentUidPromise = null;
     var acRunning = false;
     var acStatusTimer = null;
     var acMonitorRegistry = createSessionMonitorRegistry({ maxLogs: 180 });
@@ -12828,6 +13482,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
     /* 监控状态常驻展示：开关开启期间卡片标题右侧固定显示「监控激活会话中」 */
     var acStatusVisible = false;
+    var acLimitToastSeen = Object.create(null);
     function acShowStatus() {
       acStatusVisible = true;
       if (acStatusTimer) { clearTimeout(acStatusTimer); acStatusTimer = null; } // 清掉弱提示残留定时
@@ -12854,6 +13509,26 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         if (s && s.textContent === msg) s.textContent = '';
         if (acRunning && restore) acShowStatus(); // 弱提示结束恢复状态常驻
       }, 4000);
+    }
+
+    function acNotifyLimit(snapshot) {
+      if (!snapshot || (!snapshot.rateLimited && !snapshot.quotaExhausted)) return;
+      var reason = snapshot.rateLimited ? 'model-rate-limited' : 'quota-exhausted';
+      var key = [snapshot.conversationId || '', snapshot.assistantId || '', reason, snapshot.errorResetAt || ''].join('|');
+      if (acLimitToastSeen[key]) return;
+      acLimitToastSeen[key] = true;
+      var message = wbsTranslateString(
+        snapshot.rateLimited ? '当前模型已触发频率限制，已停止自动发送' : '当前账号积分已耗尽',
+        WBS_LANGUAGE
+      );
+      if (snapshot.rateLimited) {
+        var model = String(snapshot.errorModelName || snapshot.errorRequestModelId || '').trim();
+        if (model) message += '，' + wbsTranslateString('模型：', WBS_LANGUAGE) + model;
+        if (snapshot.errorResetAt) {
+          message += '，' + wbsTranslateString('预计解封：', WBS_LANGUAGE) + fmtDateTime(snapshot.errorResetAt);
+        }
+      }
+      toast(message, true, root);
     }
 
     /** 取正文块：内容容器直接子块中排除 widget/推理/元信息折叠，优先最后一段文本内容块（_assistantTextContent/markdown） */
@@ -13286,11 +13961,21 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
               var cur = el[key], seen = 0;
               while (cur && seen++ < 650) {
                 var props = cur.memoizedProps;
-                var controller = props && props.value;
-                if (controller && controller.conversationId && controller.messageStore && controller.sessionStore &&
-                    typeof controller.getSessionViewState === 'function' && typeof controller.getMessagesViewState === 'function') {
-                  if (!fallback) fallback = controller;
-                  if (!activeId || String(controller.conversationId) === String(activeId)) return controller;
+                // WorkBuddy classic stores the controller in props.value, while
+                // the AI/new-teams renderer exposes the same capability-shaped
+                // object as props.controller or props.adapter. Inspect all three
+                // so the structured error monitor is actually started in both
+                // clients; this does not depend on composer button state.
+                var candidates = props && [props.value, props.controller, props.adapter];
+                for (var candi = 0; candidates && candi < candidates.length; candi++) {
+                  var controller = candidates[candi];
+                  if (controller && controller.conversationId && controller.messageStore && controller.sessionStore &&
+                      typeof controller.messageStore.getState === 'function' &&
+                      typeof controller.sessionStore.getState === 'function' &&
+                      typeof controller.getSessionViewState === 'function') {
+                    if (!fallback) fallback = controller;
+                    if (!activeId || String(controller.conversationId) === String(activeId)) return controller;
+                  }
                 }
                 cur = cur.return;
               }
@@ -13305,6 +13990,47 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       } catch (e) { return null; }
     }
 
+    function acCaptureControllerError(controller) {
+      if (!controller || !controller.conversationId || !controller.sessionStore || typeof controller.sessionStore.getState !== 'function') return null;
+      try {
+        var state = controller.sessionStore.getState() || {};
+        var normalized = normalizeAutoContinueError(state.error || state.warning);
+        if (!normalized) return null;
+        var key = String(controller.conversationId);
+        var messageState = controller.messageStore && controller.messageStore.getState ? controller.messageStore.getState() : {};
+        var latest = selectAutoContinueAssistant(messageState);
+        acErrorSnapshots[key] = { error: normalized, assistantId: latest && String(latest.id || latest.requestId || '') };
+        return normalized;
+      } catch (_) { return null; }
+    }
+
+    function acRecordModelRateLimit(snapshot) {
+      if (!snapshot || !snapshot.rateLimited) return;
+      var modelId = String(snapshot.errorRequestModelId || 'unknown-model').slice(0, 160);
+      var code = Number(snapshot.errorCode);
+      var signature = [snapshot.conversationId, snapshot.assistantId, modelId, code, snapshot.errorResetAt || ''].join('|');
+      if (acRateLimitRecorded[signature]) return;
+      acRateLimitRecorded[signature] = true;
+      if (!acCurrentUidPromise) acCurrentUidPromise = api('/api/current').then(function (current) { return String(current && current.uid || '').trim(); }).catch(function () { return ''; });
+      acCurrentUidPromise.then(function (uid) {
+        if (!uid) return;
+        return api('/api/model-rate-limit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            uid: uid,
+            modelId: modelId,
+            modelName: snapshot.errorModelName || modelId,
+            resetAt: snapshot.errorResetAt || null,
+            reasonCode: Number.isSafeInteger(code) ? code : 6004,
+            source: 'renderer-error',
+          }),
+        }).then(function () {
+          try { window.dispatchEvent(new Event('workdaddy:accounts-updated')); } catch (_) {}
+        }).catch(function () {});
+      });
+    }
+
     function acControllerSnapshot(controller) {
       if (!controller) return null;
       try {
@@ -13315,9 +14041,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var sessionState = controller.sessionStore.getState();
         var error = sessionState && sessionState.error;
         var warning = sessionState && sessionState.warning;
-        var errText = [error && error.code, error && error.message, warning && warning.code, warning && warning.message].filter(Boolean).join(' ');
+        var liveError = normalizeAutoContinueError(error || warning);
+        if (liveError) acErrorSnapshots[String(controller.conversationId)] = { error: liveError, assistantId: assistant && String(assistant.id || assistant.requestId || '') };
+        var rememberedRecord = acErrorSnapshots[String(controller.conversationId)] || null;
+        var currentAssistantId = assistant && String(assistant.id || assistant.requestId || '');
+        var rememberedError = rememberedRecord && (!rememberedRecord.assistantId || !currentAssistantId || rememberedRecord.assistantId === currentAssistantId)
+          ? rememberedRecord.error : null;
+        if (rememberedRecord && currentAssistantId && rememberedRecord.assistantId && rememberedRecord.assistantId !== currentAssistantId) delete acErrorSnapshots[String(controller.conversationId)];
+        var normalizedError = liveError || rememberedError;
+        var errText = [error && error.code, warning && warning.code].filter(Boolean).join(' ');
         var text = autoContinueMessageText(assistant);
         var extra = assistant && assistant.extra || {};
+        var modelId = String((extra && (extra.modelId || extra.model)) || (assistant && (assistant.modelId || assistant.model)) || (session && (session.model || session.modelId)) || '').slice(0, 160);
         return {
           conversationId: String(controller.conversationId || ''),
           version: Number(messageState.version || 0),
@@ -13329,8 +14064,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           terminalKnown: Object.prototype.hasOwnProperty.call(extra, 'isRequestTerminal'),
           terminal: !!(assistant && extra.isRequestTerminal === true),
           manualStop: !!extra.isCancelled,
-          error: !!error || !!(errorView && (errorView.error || errorView.hasError)),
+          error: !!error || !!(errorView && (errorView.error || errorView.hasError)) || !!normalizedError,
           networkFailure: /network|offline|timeout|connection|网络|离线|超时|连接/i.test(errText),
+          errorCode: normalizedError && normalizedError.code,
+          errorStatusCode: normalizedError && normalizedError.statusCode,
+          errorRequestModelId: normalizedError && normalizedError.requestModelId || modelId,
+          errorModelName: modelId,
+          errorResetAt: normalizedError && normalizedError.resetAt,
+          quotaExhausted: !!(normalizedError && normalizedError.quotaExhausted),
+          rateLimited: !!(normalizedError && normalizedError.rateLimited),
+          authFailure: !!(normalizedError && normalizedError.authFailure),
+          nonRetryableError: !!(normalizedError && normalizedError.nonRetryable),
+          serviceErrorFallback: !!(extra && extra.isServiceErrorFallback),
           blocked: !!(session && (session.isPending || session.state === 'pending')),
           busy: !!(session && (session.isBusy || session.isRunActive || session.isTurnActive || session.isSending || session.isPending)) ||
             !!messageState.streamingRequestId || !!messageState.streamingMessageId,
@@ -13381,6 +14126,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         acLogR('controller-blocked', 'controller-blocked', { id: snap.assistantId, state: snap.state }, 3000);
         return;
       }
+      acRecordModelRateLimit(snap);
+      acNotifyLimit(snap);
       if (c.awaitingNewReply) {
         if (!snap.assistantId || snap.assistantId === c.baselineAssistantKey) return;
         c.awaitingNewReply = false;
@@ -13437,7 +14184,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       c.controllerUnsubs = [];
       var notify = function () {
         if (!acRunning || controller !== acCtx.controller) return;
-        try { acControllerCheck(); } catch (e) {}
+        try { acCaptureControllerError(controller); acControllerCheck(); } catch (e) {}
       };
       try { c.controllerUnsubs.push(controller.sessionStore.subscribe(notify)); } catch (e) {}
       try { c.controllerUnsubs.push(controller.messageStore.subscribe(notify)); } catch (e) {}
@@ -14017,6 +14764,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }
       var snapshot = acControllerSnapshot(session.controller);
       if (!snapshot || !snapshot.conversationId) return;
+      acRecordModelRateLimit(snapshot);
+      acNotifyLimit(snapshot);
       session.lastSeen = Date.now();
       session.title = session.title || acSessionTitle(session.controller);
       acMonitorRegistry.ensure(session.id, { title: session.title });
@@ -14147,7 +14896,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           session.baselineAssistantKey = initialSnapshot.assistantId || '';
         }
       }
-      var notify = function () { acMultiCheckSession(session); };
+      var notify = function () { acCaptureControllerError(controller); acMultiCheckSession(session); };
       try { if (controller.sessionStore && typeof controller.sessionStore.subscribe === 'function') session.unsubs.push(controller.sessionStore.subscribe(notify)); } catch (_) {}
       try { if (controller.messageStore && typeof controller.messageStore.subscribe === 'function') session.unsubs.push(controller.messageStore.subscribe(notify)); } catch (_) {}
       if (initialSnapshot && (isSessionMonitorInProgress(initialSnapshot) || isSessionMonitorInterrupted(initialSnapshot) || !session.resourceActive)) acMultiCheckSession(session);
@@ -14730,6 +15479,32 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }
       var swP = pane2.querySelector('#wbs-sess-phrase');
       if (swP) swP.addEventListener('change', function () { setSessionSwitchWire('phraseEnabled', this); });
+      // 中文思考：走独立路由（注入的是官方「全局自定义指令」，不存 wbs.session 域）
+      var swZ = pane2.querySelector('#wbs-sess-zh-reasoning');
+      if (swZ) {
+        api('/api/zh-reasoning').then(function (d) {
+          if (d && typeof d.enabled === 'boolean') swZ.checked = d.enabled;
+        }).catch(function () {});
+        swZ.addEventListener('change', function () {
+          var el = this;
+          var enabled = !!el.checked;
+          el.disabled = true;
+          api('/api/zh-reasoning-set', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ enabled: enabled }),
+          }).then(function (d) {
+            if (!d || !d.ok) throw new Error((d && d.error) || 'daemon 未确认');
+            el.checked = !!d.enabled;
+            toast(enabled
+              ? '已开启中文思考（写入全局自定义指令，所有会话生效；新会话立即生效）'
+              : '已关闭中文思考', false, root);
+          }).catch(function (e) {
+            toast('设置失败: ' + (e.message || e), true, root);
+            el.checked = !enabled;
+          }).finally(function () { el.disabled = false; });
+        });
+      }
       var batchBtn = pane2.querySelector('#wbs-qp-batch');
       if (batchBtn) batchBtn.addEventListener('click', function () { sessState.qpBatch = true; sessState.qpSel = {}; renderQpList(); });
       var doneBtn = pane2.querySelector('#wbs-qp-done');
@@ -14860,7 +15635,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     registerDisposer(function () {
       closeRotationNotice();
       acRunning = false;
-      if (acThemeObserver) { try { acThemeObserver.disconnect(); } catch (e) {} acThemeObserver = null; }
       acStopMonitor();
       stopNoDisturbAutoApprove();
       stopUntilDoneCheck();
@@ -15220,6 +15994,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
     }
 
+    function fmtDateTimeSeconds(ts) {
+      if (!ts) return '-';
+      var d = new Date(ts);
+      var p = function (n) { return String(n).padStart(2, '0'); };
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+    }
+
     function fmtCredits(value) {
       if (value === null || value === undefined || value === '') return '-';
       var n = Number(value);
@@ -15305,6 +16086,66 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var minutes = Number(h.remainingMs) > 0 ? Math.max(1, Math.ceil(Number(h.remainingMs) / 60000)) : 0;
       var title = why + (minutes ? (why ? ' · ' : '') + '约 ' + minutes + ' 分钟后可重试' : '');
       return '<span class="wbs-badge wbs-health-' + String(state).replace(/_/g, '-') + '" title="' + escAttr(title) + '">' + esc(text) + '</span>';
+    }
+
+    function modelRateLimitTip(record) {
+      var name = String(record && (record.modelName || record.modelId) || '未知模型');
+      var reset = record && record.resetAt ? Number(record.resetAt) : 0;
+      var line = reset && isFinite(reset)
+        ? wbsTranslateString('预计解封：', WBS_LANGUAGE) + fmtDateTimeSeconds(reset) + '（' + wbsTranslateString(fmtCreditExpiry(reset), WBS_LANGUAGE) + '）'
+        : wbsTranslateString('预计解封：时间未知', WBS_LANGUAGE);
+      return name + '\n' + line;
+    }
+
+    function modelRateLimitBadgeHtml(a) {
+      var records = a && Array.isArray(a.modelRateLimits) ? a.modelRateLimits.filter(function (record) {
+        return record && record.modelId;
+      }) : [];
+      if (!records.length) return '';
+      var details = records.map(modelRateLimitTip).join('\n\n');
+      var label = records.length === 1 ? wbsTranslateString('模型限流', WBS_LANGUAGE) : wbsTranslateString('模型限流·', WBS_LANGUAGE) + records.length;
+      var attr = esc(details).replace(/"/g, '&quot;');
+      var uid = escAttr(a && a.uid || '');
+      return '<span class="wbs-model-rate-limit-slot"><button type="button" class="wbs-model-rate-limit wbs-ck wbs-checkin-tag ok" data-uid="' + uid + 'title="' + attr + '" aria-label="' + attr + '" aria-controls="wbs-status-popover" aria-expanded="false">' + esc(label) + '</button></span>';
+    }
+
+    function modelRateLimitPopoverHtml(account) {
+      var records = account && Array.isArray(account.modelRateLimits) ? account.modelRateLimits.filter(function (record) {
+        return record && record.modelId;
+      }) : [];
+      var rows = records.map(function (record) {
+        var name = String(record.modelName || record.modelId || '未知模型');
+        var reset = record.resetAt ? Number(record.resetAt) : 0;
+        var resetText = reset && isFinite(reset) ? fmtDateTimeSeconds(reset) : wbsTranslateString('时间未知', WBS_LANGUAGE);
+        var remaining = reset && isFinite(reset) ? '（' + wbsTranslateString(fmtCreditExpiry(reset), WBS_LANGUAGE) + '）' : '';
+        return '<div class="wbs-daily-detail wbs-model-rate-limit-detail"><i class="rate-limit"></i>' +
+          '<span>' + wbsTranslateString('模型限流', WBS_LANGUAGE) + '</span><b class="wbs-model-rate-limit-model">' + esc(name) + '</b>' +
+          '<span>' + wbsTranslateString('预计解封', WBS_LANGUAGE) + '</span><b class="wbs-model-rate-limit-reset">' + esc(resetText + remaining) + '</b></div>';
+      }).join('');
+      return '<div class="wbs-daily-popover-head"><strong>' + wbsTranslateString('模型频率限制', WBS_LANGUAGE) + '</strong><span>' + wbsTranslateString('账号状态', WBS_LANGUAGE) + '</span></div>' +
+        (rows || '<div class="wbs-daily-popover-empty">' + wbsTranslateString('当前没有有效的模型限流记录', WBS_LANGUAGE) + '</div>');
+    }
+
+    function modelRateLimitSummaryPopoverHtml(accounts) {
+      var groups = [];
+      (Array.isArray(accounts) ? accounts : []).forEach(function (account) {
+        var records = account && Array.isArray(account.modelRateLimits) ? account.modelRateLimits.filter(function (record) {
+          return record && record.modelId;
+        }) : [];
+        if (!records.length) return;
+        var rawAccountName = String(account.nickname || account.phone || account.uin || account.uid || '未命名账号');
+        var accountName = state.mask ? maskAccountName(rawAccountName) : rawAccountName;
+        var rows = records.map(function (record) {
+          var name = String(record.modelName || record.modelId || '未知模型');
+          var reset = record.resetAt ? Number(record.resetAt) : 0;
+          var resetText = reset && isFinite(reset) ? fmtDateTimeSeconds(reset) : wbsTranslateString('时间未知', WBS_LANGUAGE);
+          var remaining = reset && isFinite(reset) ? '（' + wbsTranslateString(fmtCreditExpiry(reset), WBS_LANGUAGE) + '）' : '';
+          return '<div class="wbs-model-rate-limit-summary-row"><b class="wbs-model-rate-limit-model">' + esc(name) + '</b><span class="wbs-model-rate-limit-reset-label">' + wbsTranslateString('预计解封', WBS_LANGUAGE) + '</span><b class="wbs-model-rate-limit-reset">' + esc(resetText + remaining) + '</b></div>';
+        }).join('');
+        groups.push('<section class="wbs-model-rate-limit-account-group"><div class="wbs-model-rate-limit-account-head"><strong>' + esc(accountName) + '</strong><span>' + records.length + wbsTranslateString(' 个模型', WBS_LANGUAGE) + '</span></div>' + rows + '</section>');
+      });
+      return '<div class="wbs-daily-popover-head"><strong>' + wbsTranslateString('模型频率限制', WBS_LANGUAGE) + '</strong><span>' + wbsTranslateString('{n} 个账号', WBS_LANGUAGE).replace('{n}', groups.length) + '</span></div>' +
+        (groups.join('') || '<div class="wbs-daily-popover-empty">' + wbsTranslateString('当前没有有效的模型限流记录', WBS_LANGUAGE) + '</div>');
     }
 
     function creditBlockHtml(credits, segments, account) {
@@ -16601,6 +17442,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       // 产物目录单条可达数百 MB（本机实测 710MB/5708 文件、512MB/321362 文件），
       // 给足 6 小时上限，仅作为「永不停摆」的兜底。
       autoCopyWatch.deadline = Date.now() + 6 * 60 * 60 * 1000;
+      // 【BUG2 修复】启动窗口：切号时 daemon 是「先 reload 页面、**再**建同步任务」，而本观察器
+      // 在注入完成的那一刻就查一次。若这一拍正好落在「页面已重载、任务还没建」的窗口里，
+      // 旧实现会直接停机 ⇒ 任务随后跑完也没人刷新列表，用户看到的仍是切号那一刻的旧列表
+      // ⇒ 表现成「切号后没同步，得再切一次」。窗口内改为慢轮询兜底。
+      autoCopyWatch.bootUntil = Date.now() + 60000;
       var tick = function () {
         autoCopyWatch.timer = null;
         api('/api/sessions/auto-copy/active').then(function (d) {
@@ -16609,6 +17455,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             if (autoCopyWatch.job) scheduleAutoCopyHide();
             autoCopyWatch.job = null;
             autoCopyWatch.accountName = '';
+            // 【BUG2 修复】启动窗口内不认「没有任务」为终态，慢轮询等任务出现（见上方 bootUntil 注释）。
+            if (autoCopyWatch.bootUntil && Date.now() < autoCopyWatch.bootUntil) {
+              autoCopyWatch.timer = setBuildTimeout(tick, 2000);
+            }
             return;
           }
           var previous = autoCopyWatch.job;
@@ -16696,6 +17546,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }
       state.accountLayoutKey = layoutKey;
       if (!list) { list = el('div', 'wbs-acct-list'); accountsPane.insertBefore(list, accountsPane.firstChild); }
+      if (typeof closeAccountNotePopover === 'function') closeAccountNotePopover();
       list.innerHTML = '';
       if (!state.accounts.length) {
         list.appendChild(el('div', 'wbs-empty', '还没有备份账号。打开/登录一次 WorkBuddy 后会自动备份，稍后再来查看。'));
@@ -16713,6 +17564,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         // 「当前使用中」角标紧贴昵称：这是用户最需要一眼看到的标识，优先于版本标签。
         var currentBadge = isCur ? '<span class="wbs-badge wbs-cur-badge">当前使用中</span>' : '';
         var checkinBadge = checkinBadgeHtml(a);
+        var modelRateLimitBadge = typeof modelRateLimitBadgeHtml === 'function' ? modelRateLimitBadgeHtml(a) : '';
         var invalidAuthBadge = a.authValid === false ? '<span class="wbs-badge wbs-auth-invalid">认证数据无效</span>' : '';
         var healthBadge = healthBadgeHtml(a);
         // 当前登录账号隐藏操作；认证已过期的账号保留删除，但隐藏切换，避免进入登录页。
@@ -16734,7 +17586,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var idVal = state.mask ? maskAccountId(rawId) : rawId;
         card.innerHTML =
           '<div class="wbs-info">' +
-          '<div class="wbs-row1"><div class="wbs-name-group"><span class="wbs-name">' + esc(nameVal) + '</span>' + currentBadge + badge + dailyRingsHtml(a) + checkinBadge + invalidAuthBadge + '<span class="wbs-health-cell">' + healthBadge + '</span></div>' + ops + '</div>' +
+          '<div class="wbs-row1"><div class="wbs-name-group"><button type="button" class="wbs-account-name" data-uid="' + escAttr(a.uid) + '" aria-label="查看或编辑账号备注" aria-haspopup="dialog" aria-controls="wbs-account-note-popover" aria-expanded="false"><span class="wbs-name">' + esc(nameVal) + '</span><span class="wbs-account-name-edit" aria-hidden="true">' + MODEL_EDIT_SVG + '</span></button>' + currentBadge + badge + dailyRingsHtml(a) + checkinBadge + modelRateLimitBadge + invalidAuthBadge + '<span class="wbs-health-cell">' + healthBadge + '</span></div>' + ops + '</div>' +
           '<div class="wbs-meta wbs-secondary-row">' +
           '<div class="wbs-mi wbs-phone-cell' + (isUinMode ? ' wbs-uin-cell' : '') + '"><span class="wbs-lbl">' + idLbl + '</span><span class="wbs-val">' + esc(idVal) + '</span></div>' +
           '<div class="wbs-mi wbs-token-cell"><span class="wbs-lbl">有效期至</span><span class="wbs-val' + (ts.warn ? ' wbs-warn' : '') + '">' + esc(ts.label) + '</span></div>' +
@@ -17088,6 +17940,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
               state.accounts[j].activityStreak = a.activityStreak;
             }
             if (Object.prototype.hasOwnProperty.call(a, 'todayUsage')) state.accounts[j].todayUsage = a.todayUsage;
+            state.accounts[j].modelRateLimits = Array.isArray(a.modelRateLimits) ? a.modelRateLimits : [];
             byUid[a.uid] = state.accounts[j];
             break;
           }
@@ -17108,6 +17961,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           else checkinSlot.remove();
         } else if (checkinBadge && nameGroup) {
           nameGroup.insertAdjacentHTML('beforeend', checkinBadge);
+        }
+        var modelLimitSlot = nameGroup && nameGroup.querySelector('.wbs-model-rate-limit-slot');
+        var modelLimitBadge = typeof modelRateLimitBadgeHtml === 'function' ? modelRateLimitBadgeHtml(account) : '';
+        if (modelLimitSlot) {
+          if (modelLimitBadge) modelLimitSlot.outerHTML = modelLimitBadge;
+          else modelLimitSlot.remove();
+        } else if (modelLimitBadge && nameGroup) {
+          nameGroup.insertAdjacentHTML('beforeend', modelLimitBadge);
         }
         if (cell) {
           var hidden = isIdentityExpired(account);
@@ -17849,8 +18710,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     try { setupSelectionQuote(); } catch (e) {}
     // 打开面板时校验指令块是否丢失，丢失则自动关闭开关（不弹 toast）
     try { acCheckPromptOnOpen(); } catch (e) {}
-    // 按钮主题色（浅色黑底白图 / 深色白底黑图）+ 监听主题切换
-    try { applyThemeButtonColors(); watchThemeForButtons(); } catch (e) {}
+    // 按钮背景和图标始终跟随发送按钮的主题变量
+    try { applyThemeButtonColors(); } catch (e) {}
     // 注入完成即探测是否有正在进行的自动复制：切号会走 CDP Page.reload，重新注入
     // 后内存里没有任何 jobId，必须靠这一步把进度条与 FAB 角标恢复回来。
     try { watchAutoCopyProgress(); } catch (e) {}
@@ -18866,6 +19727,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     'html[data-wbs-theme-id="nebula"] .wbs-message-nav-marker:not(:hover):not(:focus-visible){box-shadow:none}',
     '@media (prefers-reduced-motion:reduce){.wbs-message-nav-marker,.wbs-message-nav-dot,.wbs-message-nav-tooltip{transition:none!important}.wbs-message-nav-highlight{animation:none!important}}',
     /* 官网演示机器人：尺寸按 2 倍绘制，保留现有 0.5 缩放与停靠/拖动坐标。 */
+    '.wbs-fab[data-wbs-robot-style="theme"],.wbs-root[data-wbs-robot-style="theme"] .wbs-automation-stop{--wbs-robot-shell:var(--wb-button-primary-bg);--wbs-robot-eye:var(--wb-button-primary-fg);--wbs-robot-rim:var(--wb-border-subtle)}',
     '.wbs-fab[data-wbs-robot-style="black"]{--wbs-robot-shell:#111;--wbs-robot-eye:#fff;--wbs-robot-rim:rgba(255,255,255,.14)}',
     '.wbs-fab[data-wbs-robot-style="glass"]{--wbs-robot-shell:color-mix(in srgb,var(--wb-bg-popover,#fff) 42%,transparent);--wbs-robot-eye:transparent;--wbs-robot-blur:blur(14px) saturate(1.3);--wbs-robot-rim:color-mix(in srgb,var(--wb-color-text-primary,#222) 18%,transparent)}',
     '.wbs-fab[data-wbs-robot-style="white"]{--wbs-robot-shell:#fff;--wbs-robot-eye:#111;--wbs-robot-rim:rgba(255,255,255,.55)}',
@@ -18937,6 +19799,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-fab.is-dragging .button{cursor:grabbing}',
     '.wbs-fab.is-snapping{transition:right .56s cubic-bezier(.22,1.35,.36,1),bottom .56s cubic-bezier(.22,1.35,.36,1)}',
     /* 面板：毛玻璃主题（半透明 + 模糊，背景图透出） */
+    // 毛玻璃让官方按钮底色透明；面板内的选中态、开关和操作按钮仍需深色主题的对比色。
+    'html[data-wbs-theme-id="nebula"] .wbs-panel,html[data-wbs-theme-id="nebula"] .wbs-modal,html[data-wbs-theme-id="nebula"] .wbs-account-note-popover,html[data-wbs-theme-id="nebula"] .wbs-status-popover,html[data-wbs-theme-id="nebula"] .wbs-credit-rotation-notice{--wb-button-primary-bg:var(--wb-palette-white-90);--wb-button-primary-fg:var(--wb-bg-primary)}',
     '.wbs-panel{position:absolute;right:0;bottom:0;width:720px;max-width:94vw;height:650px;max-height:calc(100vh - 110px);background:color-mix(in srgb,var(--wb-bg-popover,#fff) 72%,transparent);border:1px solid var(--wb-border-subtle,#f0f0f0);border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.28);display:none;flex-direction:column;overflow:hidden;backdrop-filter:blur(28px) saturate(1.25);-webkit-backdrop-filter:blur(28px) saturate(1.25)}',
     '.wbs-panel.show{display:flex}',
     // 英文文案更长：英文面板额外加宽，配合 label 自适应避免挤压
@@ -18978,6 +19842,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-row1{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:7px;min-height:26px}',
     '.wbs-name-group{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0}.wbs-checkin-slot{display:inline-flex;align-items:center;flex-wrap:wrap;gap:5px}',
     '.wbs-name{font-size:14px;font-weight:600;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-account-name{position:relative;display:inline-flex;align-items:center;min-width:0;max-width:100%;margin:0;padding:0;border:0;background:transparent;font:inherit;text-align:left;cursor:pointer;isolation:isolate}.wbs-account-name .wbs-name{position:relative;z-index:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wbs-account-name:before{content:"";position:absolute;inset:-4px -5px;border:1px solid var(--wb-border-subtle,#e5e7eb);border-radius:7px;background:var(--wb-bg-popover,#fff);box-shadow:0 2px 7px rgba(0,0,0,.08);opacity:0;transition:opacity 200ms ease;pointer-events:none}.wbs-account-name-edit{position:absolute;right:0;top:50%;z-index:2;display:flex;align-items:center;justify-content:center;width:20px;max-width:100%;height:20px;border-radius:3px;background:var(--wb-bg-popover,#fff);color:var(--wb-icon-secondary,#666);opacity:0;transform:translateY(-50%);transition:opacity 200ms ease;pointer-events:none}.wbs-account-name-edit svg{width:13px;height:13px}.wbs-account-name:hover,.wbs-account-name:focus-visible,.wbs-account-name[aria-expanded="true"]{z-index:2}.wbs-account-name:hover:before,.wbs-account-name:focus-visible:before,.wbs-account-name[aria-expanded="true"]:before{opacity:1}.wbs-account-name:hover .wbs-account-name-edit,.wbs-account-name:focus-visible .wbs-account-name-edit,.wbs-account-name[aria-expanded="true"] .wbs-account-name-edit{opacity:1;pointer-events:auto}.wbs-account-name-edit:hover{color:var(--wb-color-text-primary,#1f1f1f)}.wbs-account-name:focus-visible{outline:2px solid var(--wb-accent-primary,var(--wb-color-text-primary,#1f1f1f));outline-offset:4px;border-radius:4px}',
+    '.wbs-account-note-popover{position:fixed;z-index:2147483647;box-sizing:border-box;width:280px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);overflow:auto;padding:10px;border:1px solid var(--wb-border-subtle,#e5e7eb);border-radius:12px;background:color-mix(in srgb,var(--wb-bg-popover,#fff) 94%,transparent);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);box-shadow:0 10px 30px rgba(0,0,0,.16);color:var(--wb-color-text-primary,#1f1f1f);font:12px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;overscroll-behavior:contain}.wbs-account-note-popover[hidden]{display:none}.wbs-account-note-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;font-weight:600}.wbs-account-note-head .wbs-icon-btn{width:22px;height:22px}.wbs-account-note-popover textarea{display:block;box-sizing:border-box;width:100%;min-height:86px;max-height:180px;resize:vertical;padding:8px;border:1px solid var(--wb-border-default,#ddd);border-radius:8px;background:var(--wb-bg-secondary,#f7f8fa);color:inherit;font:inherit;line-height:1.6;overflow-wrap:anywhere;user-select:text}.wbs-account-note-popover textarea::placeholder{color:var(--wb-color-text-secondary,#777)}.wbs-account-note-popover textarea:focus-visible,.wbs-account-note-popover button:focus-visible{outline:2px solid var(--wb-accent-primary,var(--wb-color-text-primary,#1f1f1f));outline-offset:2px}.wbs-account-note-footer{display:flex;align-items:center;gap:6px;margin-top:9px}.wbs-account-note-footer [role="status"]{flex:1;min-width:0;overflow-wrap:anywhere;font-size:11px;color:var(--wb-color-text-secondary,#666)}.wbs-account-note-footer .wbs-modal-btn{flex:none;padding:4px 9px;font-size:11px}.wbs-account-note-footer .primary{background:var(--wb-button-primary-bg,#1f1f1f);border-color:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff)}.wbs-account-note-footer .primary:hover:not(:disabled){background:var(--wb-button-primary-bg-hover,var(--wb-button-primary-bg,#333))}.wbs-account-note-footer button:disabled{opacity:.45;cursor:default}',
+    ':is(html.cb-dark,html[data-theme="dark"],body[data-vscode-theme-name*="dark" i]) .wbs-account-note-popover{background:color-mix(in srgb,var(--wb-bg-popover,#202126) 94%,transparent);border-color:var(--wb-border-subtle,#3c3e45);color:var(--wb-color-text-primary,#f2f3f5)}:is(html.cb-dark,html[data-theme="dark"],body[data-vscode-theme-name*="dark" i]) .wbs-account-name:before{background:var(--wb-bg-popover,#202126);border-color:var(--wb-border-subtle,#3c3e45)}:is(html.cb-dark,html[data-theme="dark"],body[data-vscode-theme-name*="dark" i]) .wbs-account-name-edit{background:var(--wb-bg-popover,#202126)}:is(html.cb-dark,html[data-theme="dark"],body[data-vscode-theme-name*="dark" i]) .wbs-account-note-popover textarea{background:var(--wb-bg-secondary,#292b31);border-color:var(--wb-border-default,#454750)}:is(html.cb-dark,html[data-theme="dark"],body[data-vscode-theme-name*="dark" i]) :is(.wbs-account-note-footer [role="status"],.wbs-account-name-edit){color:var(--wb-color-text-secondary,#b9bdc7)}',
+    '@media(prefers-reduced-motion:reduce){.wbs-account-name:before,.wbs-account-name-edit{transition:none}}',
     '.wbs-daily-rings{display:inline-flex;width:auto;height:22px;flex:0 0 auto;box-sizing:border-box;align-items:center;justify-content:center;gap:5px;padding:1px 7px 1px 2px;border:0;border-radius:999px;outline:none;cursor:pointer;transition:background-color .15s,box-shadow .15s,color .15s}',
     '.wbs-daily-rings:hover,.wbs-daily-rings[aria-expanded="true"]{background:var(--wbs-primary-soft-hover);box-shadow:0 2px 8px rgba(var(--wbs-primary-rgb),.13),inset 0 1px 0 rgba(255,255,255,.28)}',
     '.wbs-daily-rings:focus-visible{background:color-mix(in srgb,var(--wb-bg-hover,#eef0f3) 86%,transparent);box-shadow:0 0 0 2px color-mix(in srgb,var(--wbs-liquid-fill) 45%,transparent)}',
@@ -18992,7 +19860,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-daily-detail{display:grid;grid-template-columns:8px 72px minmax(0,1fr);align-items:center;gap:7px;min-height:31px;margin-top:5px;padding:0 9px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:8px;background:color-mix(in srgb,var(--wb-bg-secondary,#f6f7f8) 72%,transparent)}',
     '.wbs-daily-detail i,.wbs-credit-tip-value i{display:block;width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 0 2px color-mix(in srgb,currentColor 17%,transparent)}.wbs-daily-detail i.growth{color:var(--wbs-ring-growth)}.wbs-daily-detail i.cat{color:var(--wbs-ring-cat)}.wbs-daily-detail i.credit{color:var(--wbs-tip-credit)}.wbs-daily-detail>span{color:var(--wb-color-text-secondary,#5f6368);white-space:nowrap}.wbs-daily-detail b{min-width:0;text-align:right;font-size:11px;font-weight:650;overflow-wrap:anywhere}.wbs-daily-detail.cat-row b{white-space:nowrap;font-variant-numeric:tabular-nums}.wbs-daily-cat-value{display:flex;min-width:0;align-items:center;justify-content:flex-end;gap:8px}.wbs-travel-claim{flex:0 0 auto}',
     '.wbs-daily-detail i,.wbs-credit-tip-value i{display:block;width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 0 2px color-mix(in srgb,currentColor 17%,transparent)}.wbs-daily-detail i.growth{color:var(--wbs-ring-growth)}.wbs-daily-detail i.cat{color:var(--wbs-ring-cat)}.wbs-daily-detail i.credit{color:var(--wbs-tip-credit)}.wbs-daily-detail>span{color:var(--wb-color-text-secondary,#5f6368);white-space:nowrap}.wbs-daily-detail b{min-width:0;text-align:right;font-size:11px;font-weight:650;overflow-wrap:anywhere}.wbs-daily-detail.cat-row b{white-space:nowrap;font-variant-numeric:tabular-nums}.wbs-daily-cat-value{display:flex;min-width:0;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px}.wbs-daily-cat-value>b{white-space:normal!important}.wbs-travel-claim{flex:0 0 auto}',
-    '.wbs-growth-task-section{margin:7px 0 9px;padding:9px 10px 7px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:9px;background:color-mix(in srgb,var(--wb-bg-secondary,#f6f7f8) 38%,var(--wb-bg-popover,#fff))}.wbs-growth-task-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding-bottom:5px}.wbs-growth-task-head span{font-size:10.5px;font-weight:650;color:var(--wb-color-text-secondary,#5f6368)}.wbs-growth-task-head em{font-size:10px;font-style:normal;color:var(--wbs-ring-growth);font-variant-numeric:tabular-nums}.wbs-growth-task-list{max-height:360px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none}.wbs-growth-task-row{padding:9px 0;border-top:1px solid color-mix(in srgb,var(--wb-border-subtle,rgba(20,24,32,.1)) 72%,transparent);font-size:10.5px}.wbs-growth-task-row:first-child{border-top:0}.wbs-growth-task-title{display:grid;grid-template-columns:6px minmax(0,1fr) 42px 62px;align-items:center;gap:7px;min-height:22px}.wbs-growth-task-title>i{width:6px;height:6px;border-radius:50%;background:var(--wb-border-default,var(--wb-bg-tertiary,#d9dadd))}.wbs-growth-task-row.is-completed .wbs-growth-task-title>i,.wbs-growth-task-row.is-claimed .wbs-growth-task-title>i{background:var(--wbs-ring-growth)}.wbs-growth-task-title>span{min-width:0;color:var(--wb-color-text-primary,#1f1f1f);font-weight:620;line-height:1.4;overflow-wrap:anywhere}.wbs-growth-task-title>em{font-style:normal;text-align:right;color:var(--wb-icon-tertiary,#7c818b);font-variant-numeric:tabular-nums;white-space:nowrap}.wbs-growth-task-state{display:flex;min-width:62px;align-items:center;justify-content:flex-end}.wbs-growth-task-title b{text-align:right;color:var(--wb-color-text-secondary,#5f6368);font-size:10px;font-weight:600;white-space:nowrap}.wbs-growth-task-row.is-completed .wbs-growth-task-title b,.wbs-growth-task-row.is-claimed .wbs-growth-task-title b{color:var(--wbs-ring-growth)}.wbs-growth-task-action{display:inline-flex;min-width:60px;height:22px;box-sizing:border-box;align-items:center;justify-content:center;gap:4px;padding:0 7px;border:1px solid color-mix(in srgb,var(--wbs-ring-growth) 28%,var(--wb-border-subtle,transparent));border-radius:6px;background:var(--wbs-primary-soft);color:var(--wbs-ring-growth);font:600 10px/1 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;white-space:nowrap;cursor:pointer;transition:background-color .16s,border-color .16s,box-shadow .16s}.wbs-growth-task-action:hover:not([disabled]){background:var(--wbs-primary-soft-hover);border-color:color-mix(in srgb,var(--wbs-ring-growth) 42%,var(--wb-border-subtle,transparent))}.wbs-growth-task-action:focus-visible{outline:0;box-shadow:0 0 0 2px color-mix(in srgb,var(--wbs-ring-growth) 34%,transparent)}.wbs-growth-task-action[disabled]{opacity:.72;cursor:default}.wbs-growth-task-action-spinner{width:9px;height:9px;box-sizing:border-box;border:1.5px solid color-mix(in srgb,currentColor 28%,transparent);border-top-color:currentColor;border-radius:50%;animation:wbs-daily-spin .72s linear infinite}.wbs-growth-task-meta{display:flex;align-items:flex-start;gap:16px;margin:5px 0 0 13px;color:var(--wb-color-text-secondary,#5f6368);font-size:10px}.wbs-growth-task-meta>span{display:flex;min-width:0;align-items:flex-start;gap:6px;overflow-wrap:anywhere}.wbs-growth-task-meta>span:last-child{flex:1}.wbs-growth-task-meta label{flex:0 0 auto;color:var(--wb-icon-tertiary,#7c818b);font-size:10px;white-space:nowrap}.wbs-growth-reward-tags{display:flex;min-width:0;flex-wrap:wrap;gap:4px}.wbs-growth-reward-tag{display:inline-flex;align-items:center;min-height:16px;box-sizing:border-box;padding:1px 5px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:999px;background:color-mix(in srgb,var(--wb-bg-tertiary,#f2f3f4) 72%,transparent);color:var(--wb-color-text-secondary,#5f6368);font-size:9px;font-weight:500;line-height:1.2;white-space:nowrap}.wbs-growth-reward-tag.is-empty{color:var(--wb-icon-tertiary,#7c818b)}',
+    '.wbs-growth-task-section{margin:7px 0 9px;padding:9px 10px 7px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:9px;background:color-mix(in srgb,var(--wb-bg-secondary,#f6f7f8) 38%,var(--wb-bg-popover,#fff))}.wbs-growth-task-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding-bottom:5px}.wbs-growth-task-head span{font-size:10.5px;font-weight:650;color:var(--wb-color-text-secondary,#5f6368)}.wbs-growth-task-head em{font-size:10px;font-style:normal;color:var(--wbs-ring-growth);font-variant-numeric:tabular-nums}.wbs-growth-task-list{max-height:360px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none}.wbs-growth-task-row{padding:9px 0;border-top:1px solid color-mix(in srgb,var(--wb-border-subtle,rgba(20,24,32,.1)) 72%,transparent);font-size:10.5px}.wbs-growth-task-row:first-child{border-top:0}.wbs-growth-task-title{display:grid;grid-template-columns:6px minmax(0,1fr) 42px 62px;align-items:center;gap:7px;min-height:22px}.wbs-growth-task-title>i{width:6px;height:6px;border-radius:50%;background:var(--wb-border-default,var(--wb-bg-tertiary,#d9dadd))}.wbs-growth-task-row.is-completed .wbs-growth-task-title>i,.wbs-growth-task-row.is-claimed .wbs-growth-task-title>i{background:var(--wbs-ring-growth)}.wbs-growth-task-title>span{min-width:0;color:var(--wb-color-text-primary,#1f1f1f);font-weight:620;line-height:1.4;overflow-wrap:anywhere}.wbs-growth-task-title>em{font-style:normal;text-align:right;color:var(--wb-icon-tertiary,#7c818b);font-variant-numeric:tabular-nums;white-space:nowrap}.wbs-growth-task-state{display:flex;min-width:62px;align-items:center;justify-content:flex-end}.wbs-growth-task-title b{text-align:right;color:var(--wb-color-text-secondary,#5f6368);font-size:10px;font-weight:600;white-space:nowrap}.wbs-growth-task-row.is-completed .wbs-growth-task-title b,.wbs-growth-task-row.is-claimed .wbs-growth-task-title b{color:var(--wbs-ring-growth)}.wbs-growth-task-action{display:inline-flex;min-width:60px;height:22px;box-sizing:border-box;align-items:center;justify-content:center;gap:4px;padding:0 7px;border:1px solid var(--wb-button-primary-bg,#1f1f1f);border-radius:6px;background:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff);font:600 10px/1 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;white-space:nowrap;cursor:pointer;transition:background-color .16s,border-color .16s,box-shadow .16s}.wbs-growth-task-action:hover:not([disabled]){background:var(--wb-button-primary-bg-hover,var(--wb-button-primary-bg,#1f1f1f));border-color:var(--wb-button-primary-bg-hover,var(--wb-button-primary-bg,#1f1f1f))}.wbs-growth-task-action:focus-visible{outline:0;box-shadow:0 0 0 2px color-mix(in srgb,var(--wb-button-primary-bg,#1f1f1f) 34%,transparent)}.wbs-growth-task-action[disabled]{opacity:.72;cursor:default}.wbs-growth-task-action-spinner{width:9px;height:9px;box-sizing:border-box;border:1.5px solid color-mix(in srgb,currentColor 28%,transparent);border-top-color:currentColor;border-radius:50%;animation:wbs-daily-spin .72s linear infinite}.wbs-growth-task-meta{display:flex;align-items:flex-start;gap:16px;margin:5px 0 0 13px;color:var(--wb-color-text-secondary,#5f6368);font-size:10px}.wbs-growth-task-meta>span{display:flex;min-width:0;align-items:flex-start;gap:6px;overflow-wrap:anywhere}.wbs-growth-task-meta>span:last-child{flex:1}.wbs-growth-task-meta label{flex:0 0 auto;color:var(--wb-icon-tertiary,#7c818b);font-size:10px;white-space:nowrap}.wbs-growth-reward-tags{display:flex;min-width:0;flex-wrap:wrap;gap:4px}.wbs-growth-reward-tag{display:inline-flex;align-items:center;min-height:16px;box-sizing:border-box;padding:1px 5px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:999px;background:color-mix(in srgb,var(--wb-bg-tertiary,#f2f3f4) 72%,transparent);color:var(--wb-color-text-secondary,#5f6368);font-size:9px;font-weight:500;line-height:1.2;white-space:nowrap}.wbs-growth-reward-tag.is-empty{color:var(--wb-icon-tertiary,#7c818b)}',
     '.wbs-growth-task-head>span{display:inline-flex;align-items:center;gap:7px}.wbs-growth-task-head i.growth{width:8px;height:8px;flex:none;border-radius:50%;background:var(--wbs-ring-growth);box-shadow:0 0 0 2px color-mix(in srgb,var(--wbs-ring-growth) 17%,transparent)}.wbs-growth-task-head em{color:var(--wb-icon-tertiary,#7c818b)}.wbs-growth-task-title{grid-template-columns:6px minmax(0,1fr) auto minmax(78px,auto)}.wbs-growth-task-title>span{font-size:11px}.wbs-growth-task-tag{display:inline-flex!important;min-height:17px;box-sizing:border-box;align-items:center;padding:1px 6px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:999px;background:color-mix(in srgb,var(--wb-bg-tertiary,#f2f3f4) 72%,transparent);color:var(--wb-color-text-secondary,#5f6368)!important;font-size:9px!important;font-weight:550!important;white-space:nowrap}.wbs-growth-task-state{grid-column:4;min-width:78px}.wbs-growth-task-action{min-width:74px}.wbs-growth-task-guide{margin:4px 78px 0 13px;color:var(--wb-color-text-secondary,#5f6368);font-size:10px;line-height:1.5;overflow-wrap:anywhere}.wbs-growth-task-meta{flex-wrap:wrap;gap:5px 14px;margin-top:6px}.wbs-growth-task-meta>span:last-child{flex:0 1 auto}.wbs-growth-task-reward{flex:1 1 150px!important}.wbs-growth-task-progress{font-variant-numeric:tabular-nums}.wbs-growth-reward-tag{opacity:.76}.wbs-growth-claimed-toggle{display:flex;width:100%;align-items:center;justify-content:center;margin:3px 0 0;padding:6px 0 2px;border:0;border-top:1px solid color-mix(in srgb,var(--wb-border-subtle,rgba(20,24,32,.1)) 72%,transparent);background:transparent;color:var(--wb-icon-secondary,#667085);font:600 10px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;cursor:pointer}.wbs-growth-claimed-toggle em{font-style:normal;font-weight:500;color:var(--wb-icon-tertiary,#7c818b)}.wbs-growth-claimed-toggle:hover{color:var(--wb-color-text-primary,#1f1f1f)}.wbs-growth-claimed-toggle:focus-visible{outline:2px solid color-mix(in srgb,var(--wbs-primary) 40%,transparent);outline-offset:2px}',
     '.wbs-buddy-picker{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;padding:7px 9px 2px;font-size:10.5px;color:var(--wb-color-text-secondary,#5f6368)}',
     '.wbs-daily-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;margin-top:4px}.wbs-daily-action{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:7px;min-height:29px;padding:3px 5px 3px 8px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:7px;background:color-mix(in srgb,var(--wb-bg-secondary,#f6f7f8) 72%,transparent)}.wbs-daily-action span{min-width:0;color:var(--wb-color-text-secondary,#5f6368);white-space:nowrap}.wbs-daily-action b{color:var(--wb-color-text-primary,#1f1f1f);font-size:11px;font-weight:650;white-space:nowrap}.wbs-daily-action-button{min-width:46px}',
@@ -19033,7 +19901,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-credit-segment:first-child:last-child{border-radius:3px}',
     '.wbs-credit-segment:hover{z-index:3;filter:brightness(1.12);transform:scaleY(1.35)}',
     /* 积分越接近到期透明度越高，1 天内只保留很轻的颜色痕迹。 */
-    '.wbs-credit-segment,.wbs-credit-summary-fill{background:rgba(var(--wbs-primary-rgb,34,197,94),var(--wbs-credit-alpha,1));border-color:rgba(var(--wbs-primary-rgb,34,197,94),var(--wbs-credit-alpha,1))}',
+    // 保留浅色、深色、毛玻璃的积分配色；官方皮肤与其他接管主题跟随发送按钮。
+    ':is(html[data-skin]:not([data-skin=""]):not([data-wbs-theme-id="dark"]):not([data-wbs-theme-id="nebula"]),html[data-wbs-theme-id]:not([data-wbs-theme-id="default"]):not([data-wbs-theme-id="dark"]):not([data-wbs-theme-id="nebula"])) :is(.wbs-root,.wbs-credit-summary-popover){--wbs-credit-theme-color:var(--wb-button-primary-bg)}',
+    '.wbs-credit-segment,.wbs-credit-summary-fill{background:color-mix(in srgb,var(--wbs-credit-theme-color,var(--wbs-primary)) calc(var(--wbs-credit-alpha,1) * 100%),transparent);border-color:color-mix(in srgb,var(--wbs-credit-theme-color,var(--wbs-primary)) calc(var(--wbs-credit-alpha,1) * 100%),transparent)}',
     '.wbs-credit-empty{height:5px;border-radius:0;background:color-mix(in srgb,var(--wb-bg-tertiary,#e8e8eb) 70%,transparent);color:var(--wb-icon-tertiary,#999);font-size:10px;line-height:5px;text-align:center}',
     '.wbs-credit-hint{color:var(--wb-icon-tertiary,#999);font-size:10px;line-height:1.4;margin-top:2px}',
     '.wbs-account-tags{display:inline-flex;align-items:center;gap:5px;min-width:0;margin-left:auto}',
@@ -19050,6 +19920,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-daily-rings,.wbs-checkin-tag.ok{--wbs-badge-bg:var(--wb-color-text-primary,#1f1f1f);--wbs-badge-fg:var(--wb-bg-popover,#fff);background:var(--wbs-badge-bg);border-color:transparent;color:var(--wbs-badge-fg);box-shadow:none}.wbs-daily-rings{--wbs-liquid-fill:rgba(255,255,255,.46);--wbs-liquid-bg:rgba(255,255,255,.14);--wbs-liquid-ink:#fff}.wbs-daily-rings .wbs-daily-streak-label.is-pending{color:inherit;opacity:.75}.wbs-daily-rings:hover,.wbs-daily-rings[aria-expanded="true"]{background:color-mix(in srgb,var(--wbs-badge-bg) 84%,white);box-shadow:0 2px 8px rgba(0,0,0,.14)}',
     ':is(html.cb-dark,html[data-theme="dark"],html[data-wbs-theme-id="dark"],html[data-wbs-theme-id="cyber-purple"],html[data-wbs-theme-id="nebula"],body[data-vscode-theme-name*="dark" i]) .wbs-daily-rings,:is(html.cb-dark,html[data-theme="dark"],html[data-wbs-theme-id="dark"],html[data-wbs-theme-id="cyber-purple"],html[data-wbs-theme-id="nebula"],body[data-vscode-theme-name*="dark" i]) .wbs-checkin-tag.ok{--wbs-badge-bg:rgba(255,255,255,.085);--wbs-badge-fg:var(--wb-color-text-primary,#f6f5ff);background:var(--wbs-badge-bg);border:1px solid rgba(255,255,255,.12);color:var(--wbs-badge-fg);box-shadow:inset 0 1px 0 rgba(255,255,255,.08);backdrop-filter:blur(12px) saturate(1.08);-webkit-backdrop-filter:blur(12px) saturate(1.08)}:is(html.cb-dark,html[data-theme="dark"],html[data-wbs-theme-id="dark"],html[data-wbs-theme-id="cyber-purple"],html[data-wbs-theme-id="nebula"],body[data-vscode-theme-name*="dark" i]) .wbs-daily-rings{--wbs-liquid-fill:rgba(170,160,235,.62);--wbs-liquid-bg:rgba(255,255,255,.12);--wbs-liquid-ink:#f6f5ff}:is(html.cb-dark,html[data-theme="dark"],html[data-wbs-theme-id="dark"],html[data-wbs-theme-id="cyber-purple"],html[data-wbs-theme-id="nebula"],body[data-vscode-theme-name*="dark" i]) .wbs-daily-rings:hover,:is(html.cb-dark,html[data-theme="dark"],html[data-wbs-theme-id="dark"],html[data-wbs-theme-id="cyber-purple"],html[data-wbs-theme-id="nebula"],body[data-vscode-theme-name*="dark" i]) .wbs-daily-rings[aria-expanded="true"]{background:rgba(255,255,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.1),0 3px 10px rgba(0,0,0,.12)}',
     '.wbs-checkin-tag.fail{background:rgba(239,68,68,.1);color:#dc2626}',
+    '.wbs-model-rate-limit-slot{display:inline-flex;align-items:center;min-width:0}.wbs-model-rate-limit{appearance:none;-webkit-appearance:none;font:inherit;cursor:pointer;transition:background-color .15s,box-shadow .15s,color .15s}.wbs-model-rate-limit:hover,.wbs-model-rate-limit[aria-expanded="true"]{background:color-mix(in srgb,var(--wbs-badge-bg) 84%,white);box-shadow:0 2px 8px rgba(0,0,0,.14)}.wbs-model-rate-limit:focus-visible{outline:2px solid color-mix(in srgb,var(--wbs-badge-bg) 45%,transparent);outline-offset:2px}',
+    '.wbs-status-popover.is-rate-limit{width:500px;max-width:calc(100vw - 16px);overflow-x:auto}.wbs-status-popover.is-rate-limit-summary{width:360px;max-width:calc(100vw - 16px);overflow-x:auto}.wbs-model-rate-limit-detail{grid-template-columns:8px auto minmax(0,1fr) auto auto;gap:7px}.wbs-model-rate-limit-detail b{white-space:nowrap;overflow-wrap:normal}.wbs-model-rate-limit-detail .wbs-model-rate-limit-model{text-align:left}.wbs-model-rate-limit-detail i.rate-limit{color:var(--wb-color-text-primary,#1f1f1f)}.wbs-model-rate-limit-account-group{padding:7px 0 2px;border-top:1px solid var(--wb-border-subtle,rgba(20,24,32,.1))}.wbs-model-rate-limit-account-group:first-of-type{padding-top:0;border-top:0}.wbs-model-rate-limit-account-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 2px 2px}.wbs-model-rate-limit-account-head strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.wbs-model-rate-limit-account-head span{flex:0 0 auto;color:var(--wb-icon-tertiary,#7c818b);font-size:10px;white-space:nowrap}.wbs-model-rate-limit-summary-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,auto);align-items:center;gap:7px;min-height:28px;margin-top:4px;padding:0 8px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:8px;background:color-mix(in srgb,var(--wb-bg-secondary,#f6f7f8) 72%,transparent)}.wbs-model-rate-limit-summary-row>span{color:var(--wb-color-text-secondary,#5f6368);white-space:nowrap}.wbs-model-rate-limit-summary-row>b{min-width:0;font-size:11px;font-weight:650;white-space:nowrap;overflow-wrap:normal}.wbs-model-rate-limit-summary-row .wbs-model-rate-limit-model{text-align:left}.wbs-model-rate-limit-summary-row .wbs-model-rate-limit-reset{text-align:right}',
+    ':is(html.cb-dark,html[data-theme="dark"],body[data-vscode-theme-name*="dark" i]) .wbs-model-rate-limit:hover,:is(html.cb-dark,html[data-theme="dark"],body[data-vscode-theme-name*="dark" i]) .wbs-model-rate-limit[aria-expanded="true"]{background:rgba(255,255,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.1),0 3px 10px rgba(0,0,0,.12)}',
     '.wbs-ck.pending{color:var(--wb-icon-tertiary,#999)}',
     '.wbs-ck.fail{color:#f53f3f}',
     /* 右侧操作图标按钮：更轻量 */
@@ -19058,7 +19931,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-icon-btn svg{width:16px;height:16px;flex-shrink:0}', // 图标保持 16x16
     /* 账号切换按钮（wbs-acc-switch，与开关 .wbs-switch 区分）：与删除按钮同尺寸同风格 */
     '.wbs-acc-switch:hover{background:var(--wb-bg-hover,#e8e9eb);color:var(--wb-color-text-primary,#1f1f1f)}',
-    '.wbs-acc-switch.armed{background:#141416;color:#fff}',
+    '.wbs-acc-switch.armed{background:var(--wb-button-primary-bg,#141416);color:var(--wb-button-primary-fg,#fff);border-color:var(--wb-button-primary-bg,#141416)}',
     /* 删除按钮：与切换按钮同风格（灰底图标），hover/armed 才显红 */
     '.wbs-del{background:var(--wb-bg-hover,#f7f8fa);color:var(--wb-icon-secondary,#555);border-color:transparent}',
     '.wbs-del:hover{background:#ffecec;color:#f53f3f;border-color:transparent}',
@@ -19108,14 +19981,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-ask-hint{font-size:11px;color:#9a9a9a;font-weight:400}',
     '.wbs-fab-settings .wbs-ask-row{margin-top:0}.wbs-fab-settings .wbs-ask-label{flex-direction:column;align-items:flex-start;gap:4px}.wbs-fab-settings .wbs-ask-hint{color:var(--wb-color-text-tertiary,#9a9a9a);line-height:1.5;overflow-wrap:anywhere}',
     '.wbs-robot-option{position:relative;text-align:center;line-height:normal}.wbs-robot-option input{position:absolute;opacity:0;width:1px;height:1px}.wbs-robot-option:has(input:focus-visible){outline:2px solid var(--wb-icon-secondary);outline-offset:1px}',
-    '.wbs-fab-settings .wbs-switch-slider{background:var(--wb-bg-tertiary,#e5e5e5);box-shadow:inset 0 0 0 1px var(--wb-border-default,#d0d0d0)}.wbs-fab-settings .wbs-switch-slider:before{background:var(--wb-color-text-secondary,#777)}.wbs-fab-settings input:checked + .wbs-switch-slider{background:var(--wb-button-primary-bg,#1f1f1f)}.wbs-fab-settings input:checked + .wbs-switch-slider:before{background:var(--wb-button-primary-fg,#fff)}.wbs-fab-settings input:focus-visible + .wbs-switch-slider{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:3px}',
     '.wbs-switch{position:relative;display:inline-block;width:36px;height:20px;flex-shrink:0;cursor:pointer}',
     '.wbs-switch input{opacity:0;width:0;height:0}',
-    '.wbs-switch-slider{position:absolute;inset:0;border-radius:20px;background:rgba(255,255,255,.16);box-shadow:inset 0 0 0 1px rgba(255,255,255,.22);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);transition:background .18s}',
-    '.wbs-switch-slider:before{content:"";position:absolute;width:16px;height:16px;left:2px;top:2px;border-radius:50%;background:var(--wb-bg-popover,#fff);transition:transform .18s;box-shadow:0 1px 2px rgba(0,0,0,.2)}',
-    '.wbs-switch input:checked + .wbs-switch-slider{background:#f2f2f4;box-shadow:inset 0 0 0 1px rgba(255,255,255,.35)}',
-    '.wbs-switch input:checked + .wbs-switch-slider:before{background:#111113;box-shadow:0 1px 3px rgba(0,0,0,.35)}',
+    '.wbs-switch-slider{position:absolute;inset:0;border-radius:20px;background:var(--wb-bg-tertiary,#e5e5e5);box-shadow:inset 0 0 0 1px var(--wb-border-default,#d0d0d0);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);transition:background .18s}',
+    '.wbs-switch-slider:before{content:"";position:absolute;width:16px;height:16px;left:2px;top:2px;border-radius:50%;background:var(--wb-color-text-secondary,#777);transition:transform .18s;box-shadow:0 1px 2px rgba(0,0,0,.2)}',
+    '.wbs-switch input:checked + .wbs-switch-slider{background:var(--wb-button-primary-bg,#1f1f1f);box-shadow:inset 0 0 0 1px var(--wb-border-default,#d0d0d0)}',
+    '.wbs-switch input:checked + .wbs-switch-slider:before{background:var(--wb-button-primary-fg,#fff);box-shadow:0 1px 3px rgba(0,0,0,.35)}',
     '.wbs-switch input:checked + .wbs-switch-slider:before{transform:translateX(16px)}',
+    '.wbs-switch input:focus-visible + .wbs-switch-slider{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:3px}.wbs-switch input:disabled + .wbs-switch-slider{opacity:.5;cursor:default}',
     /* 背景毛玻璃开关 + 模糊度进度条 */
     '.wbs-blur-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px}',
     '.wbs-blur-label{display:flex;align-items:baseline;gap:6px;font-size:12px;color:var(--wb-color-text-secondary,#444);font-weight:600;min-width:0;line-height:1.3;white-space:nowrap}',
@@ -19138,21 +20011,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // 宽度按 icon(16)+gap(7)+文字(~90)+padding(13) 收紧，不留过多右侧留白
     'html[data-wbs-language="en"] .wbs-stash-inline:hover,html[data-wbs-language="en"] .wbs-stash-inline.wbs-stash-inline-inline:hover{width:128px}',
     'html[data-wbs-language="en"] .wbs-stash-inline:hover .wbs-stash-txt{max-width:96px}',
+    '.wbs-theme-takeover-row{display:flex;align-items:center;flex-shrink:0;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--wb-border-subtle)}.wbs-theme-takeover-row>.wbs-pcard-title{flex:1;min-width:0}',
+    '.wbs-theme-takeover-row:has(#wbs-theme-takeover:not(:checked)){margin-bottom:0;padding-bottom:0;border-bottom:0}',
     '.wbs-explore-inline{position:fixed;left:auto;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;z-index:auto;top:0;right:0;overflow:visible;padding:0 8px}',
     /* 复用暂存按钮视觉（wbs-stash-inline 提供 32px 圆形/背景/阴影），但 hover 不变宽 */
     '.wbs-stash-inline.wbs-explore-inline:hover,.wbs-stash-inline.wbs-explore-inline.wbs-stash-inline-inline:hover{width:32px!important;min-width:32px!important;height:32px!important;border-radius:50%;padding:0 8px}',
     /* 图标常显；hover 无任何自身动画 */
     '.wbs-explore-ico{display:flex;align-items:center;justify-content:center}',
-    /* 新版内联模式：弹层(absolute)必须以按钮自身为定位上下文——static 会让 .wbs-explore-pop 的 bottom:100% 上溯到最近的 positioned 祖先（操作栏外壳），导致弹层大幅偏离按钮；z-index 抬升让按钮成为独立层叠上下文，弹层在其内不受操作栏兄弟元素压制 */
     '.wbs-explore-inline.wbs-stash-inline-inline{position:relative;z-index:99999}',
-    /* 按钮不可点击缩放（点击不改变按钮自身与面板大小），菜单全由 hover 展示 */
     '.wbs-explore-inline:active{transform:none}',
-    '.wbs-explore-pop{position:absolute;bottom:calc(100% + 10px);left:50%;transform:translateX(-50%) translateY(6px);width:280px;max-width:84vw;opacity:0;visibility:hidden;transition:opacity .18s ease,transform .18s ease,visibility 0s linear .18s;z-index:2147483647;pointer-events:none}',
-    /* hover 桥接：向下覆盖按钮与弹窗之间的 10px 间隙，按钮→弹窗移动不丢失悬停（菜单雏形） */
+    '.wbs-explore-pop{position:fixed;bottom:0;left:0;transform:translateY(6px);width:280px;max-width:84vw;opacity:0;visibility:hidden;transition:opacity .18s ease,transform .18s ease,visibility 0s linear .18s;z-index:22;pointer-events:none;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}',
     '.wbs-explore-pop::before{content:"";position:absolute;left:-12px;right:-12px;bottom:-14px;height:14px}',
-    '.wbs-explore-inline:hover .wbs-explore-pop,.wbs-explore-pop:hover{opacity:1;visibility:visible;transform:translateX(-50%) translateY(0);pointer-events:auto}',
-    /* 点击选项后关闭面板（wbs-menu-closed 期间强制隐藏，重新进入按钮区后恢复可展示） */
-    '.wbs-explore-inline.wbs-menu-closed .wbs-explore-pop{opacity:0;visibility:hidden;pointer-events:none;transform:translateX(-50%) translateY(6px)}',
+    '.wbs-explore-pop.is-open{opacity:1;visibility:visible;transform:translateY(0);pointer-events:auto}',
     /* 弹窗卡片：适配插件主题的毛玻璃；面板整体为默认箭头，仅选项 hover 变点击手型 */
     '.wbs-explore-card{position:relative;padding:8px;border-radius:12px;background:color-mix(in srgb,var(--wb-bg-popover,#fff) 62%,transparent);backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);border:1px solid var(--wb-border-subtle,#ececec);box-shadow:0 12px 32px rgba(0,0,0,.18);color:var(--wb-color-text-primary,#1f1f1f);cursor:default}',
     'html[data-wbs-theme-id="nebula"] .wbs-explore-card{background:color-mix(in srgb,var(--wb-bg-popover,#1a1729) 88%,transparent);background-color:color-mix(in srgb,var(--wb-bg-popover,#1a1729) 88%,transparent);box-shadow:0 14px 36px rgba(0,0,0,.38)}',
@@ -19230,7 +20100,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-auto-card{display:flex;flex:1;flex-direction:column;min-height:0;margin-bottom:0}',
     '.wbs-auto-toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px;flex-shrink:0}.wbs-auto-toolbar .wbs-pcard-title{margin-bottom:0}.wbs-auto-toolbar>.wbs-auto-toolbar-actions{flex-basis:100%;justify-content:flex-start}.wbs-auto-toolbar .wbs-sess-bbtn{font-size:11px;padding:5px 8px}',
     '.wbs-auto-toolbar-actions,.wbs-auto-editor-actions,.wbs-auto-normal-actions,.wbs-auto-batch-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.wbs-auto-toolbar-actions{justify-content:flex-end}.wbs-auto-normal-actions{width:100%;min-width:0}.wbs-auto-right-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:6px;max-width:100%;margin-left:auto}.wbs-auto-log-head-actions{display:flex;align-items:center;gap:8px}',
-    '.wbs-auto-normal-actions .wbs-auto-pick-btn{border-color:var(--wb-button-primary-bg,#1f1f1f);background:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff)}.wbs-auto-normal-actions .wbs-auto-pick-btn:hover,.wbs-auto-normal-actions .wbs-auto-pick-btn:focus-visible{background:var(--wb-button-primary-hover-bg,var(--wb-button-primary-bg,#1f1f1f));color:var(--wb-button-primary-fg,#fff)}',
+    '.wbs-auto-normal-actions .wbs-auto-pick-btn{border-color:var(--wb-button-primary-bg,#1f1f1f);background:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff)}.wbs-auto-normal-actions .wbs-auto-pick-btn:hover,.wbs-auto-normal-actions .wbs-auto-pick-btn:focus-visible{background:var(--wb-button-primary-bg-hover,var(--wb-button-primary-bg,#1f1f1f));color:var(--wb-button-primary-fg,#fff)}',
     '.wbs-auto-list{display:flex;flex:1;min-height:0;flex-direction:column;gap:5px;overflow:auto;padding-right:2px;margin-top:10px}',
     '.wbs-auto-row{display:flex;flex:0 0 auto;flex-direction:column;align-items:stretch;gap:7px;min-height:48px;padding:10px;border:1px solid var(--wb-border-subtle,#ececec);border-radius:9px;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 22%,transparent)}',
     '.wbs-auto-row-head{display:flex;align-items:center;gap:8px;min-width:0}.wbs-auto-enabled{flex-shrink:0}.wbs-auto-enabled[hidden]{display:none!important}.wbs-auto-description{color:var(--wb-color-text-secondary,#666);font-size:11px;line-height:1.5;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}.wbs-auto-row-foot{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:10px}.wbs-auto-details{min-width:0}.wbs-auto-triggers{display:flex;flex-wrap:wrap;gap:4px}.wbs-auto-trigger-chip{display:inline-flex;max-width:100%;padding:2px 6px;border:1px solid var(--wb-border-subtle,#e7e7e7);border-radius:6px;background:var(--wb-bg-tertiary,#f5f5f5);color:var(--wb-color-text-secondary,#666);font-size:10px;line-height:1.4;overflow-wrap:anywhere}.wbs-auto-state-line{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;min-height:16px;margin-top:5px;color:var(--wb-icon-tertiary,#888);font-size:10px}.wbs-auto-state{display:inline-flex;align-items:center;gap:4px}.wbs-auto-state:before{content:"";width:4px;height:4px;flex:0 0 4px;border-radius:50%;background:currentColor}.wbs-auto-state.running{color:var(--wb-button-primary-bg,#1f1f1f)}.wbs-auto-state.off{opacity:.65}.wbs-auto-last-run.failed{color:var(--wb-color-text-primary,#222)}.wbs-auto-icon:focus-visible{outline:2px solid var(--wb-button-primary-bg,#1f1f1f);outline-offset:1px}',
@@ -19379,6 +20249,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // --wbs-fab-quiet-shift 右推出视口（右侧最多出屏 33px），挂在它上面的角标
     // 无法保证可见，所以进度统一放在面板内（会话页顶部常驻条）。
     '.wbs-sess-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:8px}',
+    '.wbs-sess-export-progress{flex:0 0 auto;min-width:0;margin:0 0 8px;padding:9px 10px;border:1px solid var(--wb-border-subtle);border-radius:9px;background:var(--wb-bg-secondary);color:var(--wb-color-text-primary);font-size:11px;line-height:1.5}.wbs-sess-export-progress[hidden],.wbs-sess-export-progress [hidden]{display:none}.wbs-sess-export-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.wbs-sess-export-head strong{flex:1;font-size:12px}.wbs-sess-export-progress progress{display:block;width:100%;height:5px;margin:7px 0;accent-color:var(--wbs-primary)}.wbs-sess-export-progress progress[hidden]{display:none}.wbs-sess-export-progress [data-export-detail]{overflow-wrap:anywhere;color:var(--wb-color-text-secondary)}',
     '.wbs-sess-copy-progress{box-sizing:border-box;margin:0 0 8px;padding:9px 10px;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:9px;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 82%,transparent);box-shadow:0 2px 8px rgba(0,0,0,.04)}',
     '.wbs-sess-copy-progress[hidden]{display:none!important}.wbs-sess-copy-head{display:flex;align-items:center;gap:6px;min-width:0}.wbs-sess-copy-icon{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;flex:0 0 20px;border-radius:6px;background:color-mix(in srgb,var(--wb-button-primary-bg,#1f1f1f) 9%,transparent);color:var(--wb-button-primary-bg,#1f1f1f)}.wbs-sess-copy-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px;font-weight:650;color:var(--wb-color-text-primary,#1f1f1f)}.wbs-sess-copy-count{margin-left:auto;flex:0 0 auto;font-size:10.5px;font-variant-numeric:tabular-nums;color:var(--wb-icon-secondary,#667085)}',
     '.wbs-sess-copy-detail{margin:4px 0 6px 26px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;line-height:1.35;color:var(--wb-icon-tertiary,#8a8f98)}.wbs-sess-copy-track{height:4px;margin-left:26px;overflow:hidden;border-radius:999px;background:var(--wb-bg-tertiary,#e9eaed)}.wbs-sess-copy-fill{display:block;height:100%;width:0;border-radius:inherit;background:var(--wb-accent-blue,var(--wb-button-primary-bg,#1f1f1f));transition:width .2s ease}.wbs-sess-copy-progress.is-done .wbs-sess-copy-fill{background:#2f9e63}.wbs-sess-copy-progress.is-partial .wbs-sess-copy-fill{background:#d48a19}.wbs-sess-copy-progress.is-error .wbs-sess-copy-fill{background:#d84a4a}',
@@ -19387,7 +20258,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-sess-refresh:hover{background:var(--wb-bg-hover,#f5f5f5);color:var(--wb-color-text-primary,#1f1f1f)}',
     '.wbs-sess-bbtn{display:inline-flex;align-items:center;justify-content:center;gap:4px;padding:7px 12px;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:9px;background:var(--wb-bg-popover,#fff);color:var(--wb-icon-secondary,#555);font-size:12px;cursor:pointer;line-height:1;transition:all .15s}',
     '.wbs-sess-bbtn:hover{background:var(--wb-bg-hover,#f5f5f5);color:var(--wb-color-text-primary,#1f1f1f)}',
-    '.wbs-sess-bbtn.active{background:#fff;color:#1f1f1f;border-color:#fff}',
+    '.wbs-sess-bbtn.active{background:var(--wb-button-primary-bg,#141416);color:var(--wb-button-primary-fg,#fff);border-color:var(--wb-button-primary-bg,#141416)}',
     '.wbs-sess-auto-all{display:inline-flex;align-items:center;justify-content:center;gap:5px;height:30px;flex:0 0 auto;padding:0 8px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--wb-icon-secondary,#555);font:inherit;font-size:11px;font-weight:600;line-height:1;cursor:pointer;transition:background .15s,color .15s,border-color .15s}',
     '.wbs-sess-auto-all:hover{background:var(--wb-bg-hover,#f5f5f5);color:var(--wb-color-text-primary,#1f1f1f)}',
     '.wbs-sess-auto-all.active{background:color-mix(in srgb,var(--wb-button-primary-bg,#1f1f1f) 10%,transparent);border-color:color-mix(in srgb,var(--wb-button-primary-bg,#1f1f1f) 28%,transparent);color:var(--wb-button-primary-bg,#1f1f1f)}',
@@ -19546,8 +20417,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-modal{width:300px;max-width:88vw;background:var(--wb-bg-popover,#fff);border-radius:14px;padding:16px;box-shadow:0 10px 40px rgba(0,0,0,.25);color:var(--wb-color-text-primary,#1f1f1f)}',
     /* 弹窗文字主题适配：body 继承 .wbs-root 硬编码深色字，暗色下必须显式覆盖为浅色 */
     'html.cb-dark .wbs-modal,html.cb-dark .wbs-modal-title,html.cb-dark .wbs-modal-body,html[data-theme="dark"] .wbs-modal,html[data-theme="dark"] .wbs-modal-title,html[data-theme="dark"] .wbs-modal-body{color:#e6e6e9}',
-    'html.cb-dark .wbs-modal-btn,html[data-theme="dark"] .wbs-modal-btn{color:#d5d5d9;border-color:rgba(232,232,234,0.16);background:rgba(255,255,255,0.05)}',
-    'html.cb-dark .wbs-modal-btn:hover,html[data-theme="dark"] .wbs-modal-btn:hover{background:rgba(255,255,255,0.12)}',
+    'html.cb-dark .wbs-modal-btn:not(:where(.wbs-modal-ok,.primary)),html[data-theme="dark"] .wbs-modal-btn:not(:where(.wbs-modal-ok,.primary)){color:#d5d5d9;border-color:rgba(232,232,234,0.16);background:rgba(255,255,255,0.05)}',
+    'html.cb-dark .wbs-modal-btn:not(:where(.wbs-modal-ok,.primary)):hover,html[data-theme="dark"] .wbs-modal-btn:not(:where(.wbs-modal-ok,.primary)):hover{background:rgba(255,255,255,0.12)}',
     /* 高危红色确认按钮在暗色下保持红色风格（略提亮更醒目） */
     'html.cb-dark .wbs-modal-btn.wbs-modal-danger,html[data-theme="dark"] .wbs-modal-btn.wbs-modal-danger{color:#fff;background:#e03d3d;border-color:#e03d3d}',
     'html.cb-dark .wbs-modal-btn.wbs-modal-danger:hover,html[data-theme="dark"] .wbs-modal-btn.wbs-modal-danger:hover{background:#f04a4a}',
@@ -19559,7 +20430,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-checkin-risk-modal p{margin:0}.wbs-checkin-risk-modal .wbs-modal-actions{flex-wrap:wrap}',
     '.wbs-checkin-risk-modal .wbs-modal-btn{line-height:1.4;white-space:normal;transition:background .15s,color .15s,border-color .15s}',
     '.wbs-checkin-risk-modal .wbs-modal-btn.wbs-modal-ok{background:var(--wb-button-primary-bg,#141416);color:var(--wb-button-primary-fg,#fff);border-color:var(--wb-button-primary-bg,#141416)}',
-    '.wbs-checkin-risk-modal .wbs-modal-btn.wbs-modal-ok:hover{background:var(--wb-button-primary-hover-bg,var(--wb-button-primary-bg,#2a2a2e))}',
+    '.wbs-checkin-risk-modal .wbs-modal-btn.wbs-modal-ok:hover:not(:disabled){background:var(--wb-button-primary-bg-hover,var(--wb-button-primary-bg,#2a2a2e))}',
     '.wbs-checkin-risk-modal .wbs-modal-btn:focus-visible{outline:2px solid var(--wb-color-text-primary,#1f1f1f);outline-offset:2px}',
     '.wbs-checkin-risk-modal .wbs-modal-btn:disabled{opacity:.55;cursor:wait}',
     '.wbs-checkin-risk-error{font-size:12px;line-height:1.5;overflow-wrap:anywhere;margin-bottom:10px;color:var(--wb-color-text-primary,#1f1f1f)}',
@@ -19576,11 +20447,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-modal-sub{font-size:11px;color:var(--wb-icon-tertiary,#999)}',
     '.wbs-modal-warn{font-size:12px;color:#ff6b6b;line-height:1.6}',
     '.wbs-modal-actions{display:flex;gap:8px;justify-content:flex-end}',
-    /* 会话弹窗按钮：取消=次级白底、确定=深色主按钮（与面板主按钮风格一致） */
+    /* 会话弹窗按钮：取消和确定分别跟随主题的次级/主按钮颜色 */
     '.wbs-modal-btn{padding:7px 12px;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:9px;background:var(--wb-bg-popover,#fff);color:var(--wb-icon-secondary,#555);font-size:12px;cursor:pointer;line-height:1;transition:all .15s;font-family:inherit}',
     '.wbs-modal-btn:hover{background:var(--wb-bg-hover,#f5f5f5);color:var(--wb-color-text-primary,#1f1f1f);border-color:var(--wb-border-strong,#bbb)}',
-    '.wbs-modal-btn.wbs-modal-ok{color:#fff;background:#141416;border-color:#141416}',
-    '.wbs-modal-btn.wbs-modal-ok:hover{background:#2a2a2e;color:#fff}',
+    '.wbs-modal-btn.wbs-modal-ok{color:var(--wb-button-primary-fg,#fff);background:var(--wb-button-primary-bg,#141416);border-color:var(--wb-button-primary-bg,#141416)}',
+    '.wbs-modal-btn.wbs-modal-ok:hover{background:var(--wb-button-primary-bg-hover,var(--wb-button-primary-bg,#2a2a2e));color:var(--wb-button-primary-fg,#fff)}',
     '.wbs-modal-btn.is-loading{display:inline-flex;align-items:center;justify-content:center;gap:6px;cursor:wait}',
     '.wbs-modal-btn.is-loading::before{content:"";width:11px;height:11px;box-sizing:border-box;border:1.5px solid currentColor;border-top-color:transparent;border-radius:50%;animation:wbs-modal-btn-spin .72s linear infinite}',
     '@keyframes wbs-modal-btn-spin{to{transform:rotate(360deg)}}',
@@ -19736,7 +20607,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-credit-summary-chart{max-height:230px;overflow:auto;overscroll-behavior:contain}.wbs-credit-summary-row{display:grid;grid-template-columns:68px minmax(30px,1fr) 58px;align-items:center;gap:8px;min-height:28px}.wbs-credit-summary-row>span{font-size:11px;color:var(--wb-color-text-secondary)}.wbs-credit-summary-row>b{text-align:right;font-size:11px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.wbs-credit-summary-track{height:8px;border-radius:4px;background:var(--wb-bg-tertiary);overflow:hidden}.wbs-credit-summary-track i{display:block;height:100%;border-radius:4px;}.wbs-credit-summary-foot{border-top:1px solid var(--wb-border-subtle);padding-top:8px;margin-top:8px}',
     'html.cb-dark .wbs-credit-summary-popover,html[data-theme="dark"] .wbs-credit-summary-popover,body[data-vscode-theme-name="IDE Night"] .wbs-credit-summary-popover{background:var(--wb-bg-popover,var(--wb-bg-primary));color:var(--wb-color-text-primary);border-color:var(--wb-border-default)}',
     '@media(max-width:600px){.wbs-acct-toolbar{flex-wrap:wrap;gap:8px}.wbs-acct-summary{flex-wrap:wrap}.wbs-acct-actions{margin-left:auto}}',
-    '.wbs-acct-summary{display:flex;align-items:center;gap:12px;min-width:0}',
+    '.wbs-acct-summary{display:flex;align-items:center;gap:12px;min-width:0}.wbs-acct-summary>[data-act="model-rate-limit-summary"]{margin-left:-7px}',
     '.wbs-acct-eye{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:none;border-radius:6px;background:transparent;color:var(--wb-icon-secondary,var(--wb-color-text-secondary,#666));cursor:pointer;flex-shrink:0;transition:color .15s,background-color .15s}',
     '.wbs-acct-eye:hover{background:var(--wb-bg-hover,#f0f0f0);color:var(--wb-color-text,#222)}',
     '.wbs-acct-eye:active{transform:scale(.94)}',
@@ -19919,7 +20790,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-session-copy-detail-note{min-width:0;overflow:hidden;color:var(--wb-color-text-secondary,#667085);text-overflow:ellipsis;white-space:nowrap}',
     '.wbs-session-copy-detail-row.is-copied .wbs-session-copy-detail-status{color:#238a5b}.wbs-session-copy-detail-row.is-conflict .wbs-session-copy-detail-status{color:#a55f09}.wbs-session-copy-detail-row.is-failed .wbs-session-copy-detail-status,.wbs-session-copy-detail-row.is-partial .wbs-session-copy-detail-status{color:#b05d18}',
     '.wbs-session-copy-detail-empty{padding:28px 14px;text-align:center;color:var(--wb-color-text-secondary,#667085);font-size:11px}',
-    '.wbs-session-copy-notice.is-done .wbs-session-copy-icon{background:color-mix(in srgb,#2e9b68 15%,transparent);color:#238a5b}.wbs-session-copy-notice.is-done .wbs-session-copy-fill{background:#2e9b68}',
+    '.wbs-session-copy-notice.is-done .wbs-session-copy-icon{background:color-mix(in srgb,var(--wb-button-primary-bg,#1f1f1f) 15%,transparent);color:var(--wb-button-primary-bg,#1f1f1f)}.wbs-session-copy-notice.is-done .wbs-session-copy-fill{background:var(--wb-button-primary-bg,#1f1f1f)}',
     '.wbs-session-copy-notice.is-partial .wbs-session-copy-icon,.wbs-session-copy-notice.is-error .wbs-session-copy-icon{background:color-mix(in srgb,#c77a17 16%,transparent);color:#a96208}.wbs-session-copy-notice.is-partial .wbs-session-copy-fill{background:#c77a17}',
     '.wbs-session-copy-notice.is-conflict .wbs-session-copy-icon{background:color-mix(in srgb,#b46a17 17%,transparent);color:#a55f09}.wbs-session-copy-notice.is-conflict .wbs-session-copy-fill{background:#b46a17}.wbs-session-copy-notice.is-conflict .wbs-session-copy-status{color:#96570b}',
     '.wbs-session-copy-notice.is-error .wbs-session-copy-fill{background:#c44343}',
@@ -19948,14 +20819,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-token-source-note{margin:0 0 12px;font-size:11px;line-height:1.6;color:var(--wb-icon-secondary,#667085);overflow-wrap:anywhere}',
     '.wbs-usage-tabs{display:flex;gap:18px;margin:13px 0 0;border-bottom:1px solid var(--wb-border-subtle,#eee)}.wbs-usage-tabs button{border:0;border-bottom:2px solid transparent;background:transparent;color:var(--wb-icon-secondary,#667085);padding:7px 2px 9px;font:inherit;font-size:12px;cursor:pointer;transition:color .15s,border-color .15s}.wbs-usage-tabs button.active{border-bottom-color:var(--wb-color-text-primary,#1f1f1f);color:var(--wb-color-text-primary,#1f1f1f);font-weight:700}.wbs-credit-stats-note{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0;color:var(--wb-icon-secondary,#667085);font-size:11px;line-height:1.5}.wbs-credit-sync{height:26px;padding:0 9px;border:1px solid var(--wb-border-default,#e2e4e8);border-radius:7px;background:var(--wb-bg-tertiary,#f5f6f8);color:var(--wb-color-text-primary,#1f1f1f);font:inherit;font-size:11px;cursor:pointer}.wbs-credit-sync:disabled{opacity:.6;cursor:wait}.wbs-credit-stats-body{min-height:240px}',
     '.wbs-usage-period{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:16px 0 12px;color:var(--wb-color-text-secondary,#667085);font-size:11px}.wbs-usage-segment{display:inline-flex;align-items:center;gap:2px;max-width:100%;padding:3px;border:1px solid var(--wb-border-subtle,#eee);border-radius:9px;background:var(--wb-bg-tertiary,#f5f6f8)}.wbs-usage-segment button{min-width:55px;height:27px;padding:0 9px;border:0;border-radius:6px;background:transparent;color:var(--wb-color-text-secondary,#667085);font:inherit;font-size:11px;cursor:pointer;white-space:nowrap}.wbs-usage-segment button.active{background:var(--wb-bg-popover,#fff);color:var(--wb-color-text-primary,#1f1f1f);font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.1)}.wbs-usage-segment button:disabled{opacity:.55;cursor:wait}.wbs-usage-segment button:focus-visible,.wbs-trend-legend button:focus-visible{outline:2px solid var(--wbs-primary);outline-offset:2px}',
-    '.wbs-trend-panel{--wbs-trend-series-1:#388fc6;--wbs-trend-series-2:#df806a;--wbs-trend-series-3:#269f8b;--wbs-trend-series-4:#a179c6;--wbs-trend-series-5:#d8759b;--wbs-trend-series-6:#759c41;--wbs-trend-series-7:#b27d3c;--wbs-trend-series-8:#559db1;--wbs-trend-series-9:#c46b71;--wbs-trend-series-10:#7b86c2;--wbs-trend-series-11:#6b9b78;--wbs-trend-series-12:#b878aa}',
-    'html.cb-dark #wbs-token-stats-modal .wbs-trend-panel,html[data-theme="dark"] #wbs-token-stats-modal .wbs-trend-panel,body[data-vscode-theme-name*="dark" i] #wbs-token-stats-modal .wbs-trend-panel,html[data-wbs-theme-id="dark"] #wbs-token-stats-modal .wbs-trend-panel,html[data-wbs-theme-id="cyber-purple"] #wbs-token-stats-modal .wbs-trend-panel,html[data-wbs-theme-id="nebula"] #wbs-token-stats-modal .wbs-trend-panel{--wbs-trend-series-1:#72bfeb;--wbs-trend-series-2:#f4a78d;--wbs-trend-series-3:#67cdb8;--wbs-trend-series-4:#bda0e0;--wbs-trend-series-5:#ed9ab9;--wbs-trend-series-6:#b1ce74;--wbs-trend-series-7:#dbb274;--wbs-trend-series-8:#8fc8d6;--wbs-trend-series-9:#e99a9f;--wbs-trend-series-10:#aab2ed;--wbs-trend-series-11:#94c8a2;--wbs-trend-series-12:#d9a1cd}',
+    '.wbs-trend-panel,.wbs-usage-pie-section{--wbs-chart-base:var(--wbs-credit-theme-color,var(--wbs-primary));--wbs-trend-series-1:var(--wbs-chart-base);--wbs-trend-series-2:color-mix(in srgb,var(--wbs-chart-base) 84%,var(--wb-color-text-primary));--wbs-trend-series-3:color-mix(in srgb,var(--wbs-chart-base) 68%,var(--wb-bg-primary));--wbs-trend-series-4:color-mix(in srgb,var(--wbs-chart-base) 52%,var(--wb-bg-primary));--wbs-trend-series-5:color-mix(in srgb,var(--wbs-chart-base) 36%,var(--wb-bg-primary));--wbs-trend-series-6:color-mix(in srgb,var(--wbs-chart-base) 72%,transparent);--wbs-trend-series-7:color-mix(in srgb,var(--wbs-chart-base) 58%,var(--wb-color-text-primary));--wbs-trend-series-8:color-mix(in srgb,var(--wbs-chart-base) 44%,var(--wb-color-text-primary));--wbs-trend-series-9:color-mix(in srgb,var(--wbs-chart-base) 30%,var(--wb-color-text-primary));--wbs-trend-series-10:color-mix(in srgb,var(--wbs-chart-base) 70%,var(--wb-bg-secondary));--wbs-trend-series-11:color-mix(in srgb,var(--wbs-chart-base) 52%,transparent);--wbs-trend-series-12:color-mix(in srgb,var(--wbs-chart-base) 38%,transparent);}',
     '.wbs-trend-controls{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:9px}.wbs-trend-modes{flex-shrink:0}.wbs-trend-modes button{min-width:48px}.wbs-trend-legend{display:flex;align-items:center;gap:6px;flex:1;flex-wrap:wrap;min-width:140px;max-height:74px;overflow-y:auto;scrollbar-width:none}.wbs-trend-legend::-webkit-scrollbar{display:none}.wbs-trend-legend button{display:inline-flex;align-items:center;gap:6px;max-width:165px;height:27px;padding:0 8px;border:1px solid var(--wb-border-subtle,#eee);border-radius:6px;background:var(--wb-bg-popover,#fff);color:var(--wb-color-text-secondary,#667085);font:inherit;font-size:11px;cursor:pointer;opacity:.55}.wbs-trend-legend button.active{opacity:1;color:var(--wb-color-text-primary,#1f1f1f)}.wbs-trend-legend button i{flex:none;width:8px;height:8px;border-radius:50%;background:var(--wbs-series-color);color:var(--wbs-series-color)}.wbs-trend-legend button span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wbs-trend-no-series{font-size:11px;color:var(--wb-color-text-secondary,#667085)}',
-    '.wbs-token-stats-actions{display:flex;justify-content:flex-end;gap:7px;margin:2px 0 12px}.wbs-token-stats-actions button{height:30px;padding:0 14px;border-radius:7px;font:inherit;font-size:11px;cursor:pointer}.wbs-token-stats-search{border:1px solid var(--wb-button-primary-bg,#1f1f1f);background:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-text,#fff)}.wbs-token-stats-reset{border:1px solid var(--wb-border-default,#e2e4e8);background:var(--wb-bg-tertiary,#f5f6f8);color:var(--wb-color-text-secondary,#667085)}.wbs-token-stats-actions button:disabled{opacity:.55;cursor:wait}',
+    '.wbs-token-stats-actions{display:flex;justify-content:flex-end;gap:7px;margin:2px 0 12px}.wbs-token-stats-actions button{height:30px;padding:0 14px;border-radius:7px;font:inherit;font-size:11px;cursor:pointer}.wbs-token-stats-search{border:1px solid var(--wb-button-primary-bg,#1f1f1f);background:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff)}.wbs-token-stats-reset{border:1px solid var(--wb-border-default,#e2e4e8);background:var(--wb-bg-tertiary,#f5f6f8);color:var(--wb-color-text-secondary,#667085)}.wbs-token-stats-actions button:disabled{opacity:.55;cursor:wait}',
     '.wbs-token-stats-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}',
     '.wbs-token-stats-grid>div{position:relative;display:flex;min-width:0;overflow:hidden;flex-direction:column;gap:6px;padding:14px 12px 13px;border:1px solid var(--wb-border-subtle,#eee);border-radius:9px;background:var(--wb-bg-popover,#fff)}',
     '.wbs-token-stats-grid span{font-size:10.5px;color:var(--wb-icon-secondary,#667085)}',
     '.wbs-token-stats-grid strong{font-size:17px;line-height:1.25;color:var(--wb-color-text-primary,#1f1f1f);font-variant-numeric:tabular-nums}.wbs-usage-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;align-items:start}',
+    '.wbs-usage-pie{display:grid;grid-template-columns:116px minmax(0,1fr);gap:14px;align-items:start;min-width:0}.wbs-pie-plot{width:116px;height:116px;margin-top:4px}.wbs-pie-plot svg{display:block;width:100%;height:100%;overflow:visible}.wbs-pie-slice{fill:var(--wbs-pie-color);stroke:var(--wb-bg-popover);stroke-width:1.5;outline:none;transition:opacity .12s,filter .12s}.has-pie-preview .wbs-pie-slice:not(.is-preview){opacity:.35}.wbs-pie-slice.is-preview,.wbs-pie-slice:focus-visible{fill:var(--wbs-pie-color);filter:drop-shadow(0 2px 3px rgba(0,0,0,.12))}.wbs-pie-subtitle{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px;margin:-5px 0 12px;color:var(--wb-color-text-secondary);font-size:10px}.wbs-pie-subtitle strong{font-size:13px;font-weight:600;color:var(--wb-color-text-primary);font-variant-numeric:tabular-nums}.wbs-pie-tooltip{position:fixed;z-index:20;max-width:min(260px,calc(100vw - 24px));padding:9px 11px;border:1px solid var(--wb-border-subtle);border-radius:8px;background:var(--wb-bg-popover);color:var(--wb-color-text-primary);box-shadow:0 4px 16px rgba(0,0,0,.12);pointer-events:none;font-size:11px;line-height:1.6;overflow-wrap:anywhere}.wbs-pie-tooltip[hidden]{display:none}.wbs-pie-tooltip strong{font-weight:600}.wbs-pie-tooltip [data-pie-tip-detail]{color:var(--wb-color-text-secondary)}',
+    '.wbs-pie-legend{min-width:0;overflow:visible}.wbs-pie-row{display:grid;grid-template-columns:8px minmax(0,1fr) auto 40px;gap:6px;align-items:center;min-height:33px;border-bottom:0;font-size:11px;color:var(--wb-color-text-primary)}.wbs-pie-row>i{width:7px;height:7px;border-radius:50%}.wbs-pie-name{min-width:0;overflow-wrap:anywhere;line-height:1.4}.wbs-pie-name small{display:block;font-size:10px;color:var(--wb-color-text-secondary);font-weight:400}.wbs-pie-row>b{font-weight:600;font-variant-numeric:tabular-nums}.wbs-pie-percent{text-align:right;color:var(--wb-color-text-secondary);font-variant-numeric:tabular-nums}.wbs-pie-other>summary{cursor:pointer;list-style:none}.wbs-pie-other>summary::-webkit-details-marker{display:none}.wbs-pie-other>summary .wbs-pie-name:before{content:"▸ ";color:var(--wb-icon-secondary)}.wbs-pie-other[open]>summary .wbs-pie-name:before{content:"▾ "}.wbs-pie-other>summary:hover{background:var(--wb-bg-hover)}.wbs-pie-other>summary:focus-visible{outline:2px solid var(--wb-accent-blue);outline-offset:-2px}.wbs-pie-details{padding-left:10px}',
+    '.wbs-pie-row.is-preview{background:var(--wb-bg-hover);border-radius:5px}.wbs-pie-row{padding:3px 4px;box-sizing:border-box}@media(max-width:900px) and (min-width:701px),(max-width:420px){.wbs-usage-pie{grid-template-columns:90px minmax(0,1fr);gap:8px}.wbs-pie-plot{width:90px;height:90px}.wbs-pie-row{grid-template-columns:6px minmax(0,1fr) auto;gap:4px}.wbs-pie-percent{grid-column:3;font-size:10px}.wbs-pie-row>b{align-self:end}.wbs-pie-name{grid-row:span 2}}',
     '.wbs-token-stats-section{margin-top:20px;border-top:1px solid var(--wb-border-subtle,#eee);padding-top:14px}.wbs-token-stats-section-title{font-size:12.5px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f);margin-bottom:11px}',
     '.wbs-token-stats-chart{display:block;height:176px;overflow-x:auto;overflow-y:hidden;padding:5px 12px;border:1px solid var(--wb-border-subtle,#eee);border-radius:10px;background:var(--wb-bg-secondary,#fafafa);scrollbar-width:none}.wbs-token-stats-chart::-webkit-scrollbar{display:none}.wbs-usage-trend-canvas{display:block;height:166px}.wbs-usage-trend-canvas:focus-visible{outline:2px solid var(--wbs-primary);outline-offset:-3px;border-radius:5px}.wbs-usage-trend-tooltip{width:max-content;min-width:104px;max-width:min(320px,calc(100vw - 20px));display:flex;flex-direction:column;gap:6px;padding:8px 11px;font-size:11px;line-height:1.35;pointer-events:none;white-space:nowrap}.wbs-usage-trend-tooltip[hidden]{display:none}.wbs-usage-trend-tooltip span{color:var(--wb-color-text-secondary,#5f6368)}.wbs-usage-trend-tooltip [data-trend-values]{display:flex;flex-direction:column;gap:3px}.wbs-usage-trend-tooltip [data-trend-values]>div{display:flex;justify-content:space-between;gap:18px}.wbs-usage-trend-tooltip [data-trend-values] span{max-width:180px;overflow:hidden;text-overflow:ellipsis}.wbs-usage-trend-tooltip strong{font-size:13px;font-variant-numeric:tabular-nums}',
     '.wbs-token-model-scroll{position:relative;max-height:250px;overflow-y:auto;scrollbar-width:thin}.wbs-token-model-scroll:after{content:"";position:sticky;display:block;bottom:0;height:28px;margin-top:-28px;background:linear-gradient(to bottom,transparent,color-mix(in srgb,var(--wb-bg-popover,#fff) 92%,transparent));pointer-events:none;opacity:1;transition:opacity .16s}.wbs-token-model-scroll.at-end:after,.wbs-token-model-scroll.no-overflow:after{opacity:0}.wbs-token-stats-table{display:flex;flex-direction:column}.wbs-token-stats-table>div{display:grid;grid-template-columns:minmax(0,1fr) 88px 58px;gap:8px;align-items:center;min-height:30px;border-bottom:1px solid var(--wb-border-subtle,#eee);font-size:11px;color:var(--wb-color-text-secondary,#667085)}.wbs-token-stats-table>div:last-child{border-bottom:0}.wbs-token-stats-table span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wbs-token-stats-table b{color:var(--wb-color-text-primary,#1f1f1f);font-variant-numeric:tabular-nums;text-align:right}.wbs-token-stats-table em{font-style:normal;color:var(--wb-icon-tertiary,#8a8f98);text-align:right}',
@@ -19969,7 +20842,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '@media(max-width:700px){.wbs-usage-modal-mask{padding:12px}.wbs-usage-columns{grid-template-columns:1fr}.wbs-token-stats-modal{width:calc(100vw - 24px);max-width:calc(100vw - 24px);height:calc(100vh - 24px);max-height:calc(100vh - 24px)}.wbs-token-stats-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}',
     '@media(max-width:620px){.wbs-usage-header{padding:14px 14px 0}.wbs-usage-scroll{padding:4px 14px 14px}.wbs-token-stats-modal>.wbs-modal-actions{padding:10px 14px}.wbs-trend-controls{flex-direction:column}.wbs-trend-legend{width:100%;flex:none}.wbs-usage-segment button{min-width:0}}',
     '.wbs-modal.wbs-auto-discovery-modal{display:flex;flex-direction:column;width:min(980px,calc(100vw - 48px));max-width:calc(100vw - 48px);height:min(84vh,800px);max-height:calc(100vh - 48px);gap:0;padding:0;border:1px solid var(--wb-border-default,rgba(20,24,32,.14));border-radius:16px;box-shadow:0 24px 80px rgba(15,18,24,.22)}.wbs-auto-discovery-header{padding-bottom:14px}.wbs-auto-discovery-header .wbs-auto-modal-head{align-items:center;flex-wrap:wrap}.wbs-auto-discovery-head-actions{display:flex;align-items:center;gap:10px}.wbs-auto-discovery-header .wbs-auto-textbtn{white-space:normal;text-align:right}.wbs-auto-discovery-list{flex:1;gap:8px;padding-top:14px;scrollbar-width:thin;overscroll-behavior:contain}.wbs-auto-discovery-item{padding:13px 14px}.wbs-auto-discovery-pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin:0}.wbs-auto-discovery-total{margin-right:auto;font-size:11px;color:var(--wb-color-text-secondary,#666)}.wbs-auto-discovery-page{min-width:36px;text-align:center;font-size:11px;font-variant-numeric:tabular-nums;color:var(--wb-color-text-secondary,#666)}.wbs-auto-discovery-pagination .wbs-modal-btn{min-width:54px;margin:0}.wbs-auto-discovery-pagination .wbs-modal-btn:disabled{opacity:.45;cursor:not-allowed}.wbs-auto-discovery-pagination .wbs-modal-btn:focus-visible,.wbs-auto-discovery-header button:focus-visible{outline:2px solid var(--wb-button-primary-bg,#1f1f1f);outline-offset:2px}',
-    '.wbs-auto-discovery-head-actions [data-auto-discovery-guide]{display:inline-flex;align-items:center;justify-content:center;min-height:30px;padding:6px 11px;border:1px solid var(--wb-button-primary-bg,#1f1f1f);border-radius:7px;background:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff);font:inherit;font-size:11px;font-weight:600;text-decoration:none;white-space:nowrap;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.12)}.wbs-auto-discovery-head-actions [data-auto-discovery-guide]:hover{background:var(--wb-button-primary-hover-bg,var(--wb-button-primary-bg,#1f1f1f));color:var(--wb-button-primary-fg,#fff)}.wbs-auto-discovery-head-actions [data-auto-discovery-guide]:focus-visible{outline:2px solid var(--wb-button-primary-bg,#1f1f1f);outline-offset:2px}',
+    '.wbs-auto-discovery-head-actions [data-auto-discovery-guide]{display:inline-flex;align-items:center;justify-content:center;min-height:30px;padding:6px 11px;border:1px solid var(--wb-button-primary-bg,#1f1f1f);border-radius:7px;background:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff);font:inherit;font-size:11px;font-weight:600;text-decoration:none;white-space:nowrap;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.12)}.wbs-auto-discovery-head-actions [data-auto-discovery-guide]:hover{background:var(--wb-button-primary-bg-hover,var(--wb-button-primary-bg,#1f1f1f));color:var(--wb-button-primary-fg,#fff)}.wbs-auto-discovery-head-actions [data-auto-discovery-guide]:focus-visible{outline:2px solid var(--wb-button-primary-bg,#1f1f1f);outline-offset:2px}',
     '.wbs-modal.wbs-auto-guide-modal{box-sizing:border-box;width:min(520px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);overflow:auto;padding:18px 20px}.wbs-auto-guide-body{font-size:12px;line-height:1.65;color:var(--wb-color-text-secondary,#666);overflow-wrap:anywhere}.wbs-auto-guide-body p{margin:0 0 10px}.wbs-auto-guide-body .wbs-auto-textbtn{padding:0;color:var(--wb-color-text-primary,#1f1f1f);text-decoration:underline;overflow-wrap:anywhere;text-align:left}.wbs-auto-guide-modal .wbs-modal-actions{margin-top:12px}.wbs-auto-guide-body .wbs-auto-textbtn:focus-visible{outline:2px solid var(--wb-button-primary-bg,#1f1f1f);outline-offset:2px}',
     '.wbs-auto-guide-body ol{margin:8px 0 0;padding-left:20px}.wbs-auto-guide-body li{margin:0 0 8px;padding-left:2px}.wbs-auto-guide-body code{padding:2px 4px;border-radius:4px;background:var(--wb-bg-tertiary,#f2f3f5);color:var(--wb-color-text-primary,#1f1f1f);font:10.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}',
     'html.cb-dark #wbs-auto-discovery-mask,html[data-theme="dark"] #wbs-auto-discovery-mask,body[data-vscode-theme-name*="dark" i] #wbs-auto-discovery-mask,html.cb-dark #wbs-auto-discovery-guide,html[data-theme="dark"] #wbs-auto-discovery-guide,body[data-vscode-theme-name*="dark" i] #wbs-auto-discovery-guide{color-scheme:dark;background:rgba(0,0,0,.56)}html.cb-dark .wbs-auto-discovery-version,html[data-theme="dark"] .wbs-auto-discovery-version,body[data-vscode-theme-name*="dark" i] .wbs-auto-discovery-version{border-color:var(--wb-border-subtle,rgba(255,255,255,.18));background:var(--wb-bg-tertiary,#303137);color:var(--wb-color-text-secondary,#d0d0d5)}',
@@ -20030,6 +20903,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-login-link{color:var(--wb-accent-blue,#4f86ff);text-decoration:none;font-weight:600}',
     '.wbs-login-link:hover{text-decoration:underline}',
     '.wbs-empty{text-align:center;color:var(--wb-icon-tertiary,#999);padding:28px 10px;font-size:12px}',
+    // 主操作的交互色使用 WorkBuddy 正式 token；禁用态放在悬浮态之后，避免鼠标覆盖禁用颜色。
+    ':is(.wbs-modal-btn.wbs-modal-ok,.wbs-account-note-footer .primary,.wbs-sess-bbtn.active,.wbs-sess-done,.wbs-acc-switch.armed,.wbs-token-stats-search,.wbs-growth-task-action,.wbs-auto-normal-actions .wbs-auto-pick-btn,.wbs-update-btn,.wbs-credit-rotation-switch,.wbs-auto-discovery-head-actions [data-auto-discovery-guide]):hover:not(:disabled){background:var(--wb-button-primary-bg-hover,var(--wb-button-primary-bg,#2a2a2e));border-color:var(--wb-button-primary-bg-hover,var(--wb-button-primary-bg,#2a2a2e));color:var(--wb-button-primary-fg,#fff);opacity:1}',
+    ':is(.wbs-modal-btn.wbs-modal-ok,.wbs-account-note-footer .primary,.wbs-sess-bbtn.active,.wbs-sess-done,.wbs-acc-switch.armed,.wbs-token-stats-search,.wbs-growth-task-action,.wbs-auto-normal-actions .wbs-auto-pick-btn,.wbs-update-btn,.wbs-credit-rotation-switch,.wbs-auto-discovery-head-actions [data-auto-discovery-guide]):disabled{background:var(--wb-button-primary-bg-disabled,color-mix(in srgb,var(--wb-button-primary-bg,#141416) 25%,transparent));border-color:var(--wb-button-primary-bg-disabled,color-mix(in srgb,var(--wb-button-primary-bg,#141416) 25%,transparent));color:var(--wb-button-primary-fg-disabled,var(--wb-button-primary-fg,#fff));opacity:1}',
     /* body 高度：无底部功能区后最大化 */
     '.wbs-body{max-height:calc(min(78vh,660px) - 118px)}',
     // 账号页填满面板剩余空间：少量账号时登录按钮靠底部，长列表仍在列表内滚动。

@@ -180,8 +180,10 @@ const hashBefore = cacheA.get(tKey).hash;
     'C4 落盘 timer 已 unref（缓存是尽力而为的，不许拖住 daemon 退出）');
 
   const callCount = (daemonSrc.match(/getSessionSyncCache\(\)/g) || []).length;
-  ok(callCount === 4,
-    'C5 getSessionSyncCache() 恰好 4 处（1 处定义 + 3 处调用）—— 多一处就是有别的路径偷偷开了缓存', callCount);
+  // 2026-09-29 BUG3 修复新增第 4 处调用（展示侧 autoCopyConflictSnapshot），故 4 → 5。
+  // 同日「切号后复制会话失败」修复再加 1 处：瞬态 CAS 冲突重试时重读源快照（仍在 content 区），故 5 → 6。
+  ok(callCount === 6,
+    'C5 getSessionSyncCache() 恰好 6 处（1 定义 + 4 处 content 区 + 1 处展示侧）—— 多一处就是有别的路径偷偷开了缓存', callCount);
 
   // 三处调用必须都落在 content 分支**之前**（mtime 分支的注释就是分界线）：
   // 默认 judge='mtime' 时一行都不该经过 A3，否则「默认行为零变化」不成立。
@@ -193,9 +195,18 @@ const hashBefore = cacheA.get(tKey).hash;
     if (daemonSrc.slice(i - 9, i) === 'function ') continue;
     callIndexes.push(i);
   }
-  ok(mtimeBranch > 0 && callIndexes.length === 3 && callIndexes.every((i) => i < mtimeBranch),
-    'C6 三处调用全部在 content 区（mtime 分支之前）⇒ 默认 mtime 路径零触碰 A3',
+  // 2026-09-29 BUG3 修复：新增的第 4 处调用落在**展示侧**（autoCopyConflictSnapshot），位于 mtime 分支
+  //   之后。它是只读的，且只在用户点「处理冲突」打开弹窗时才执行 —— 默认 mtime 同步路径依然零触碰 A3。
+  //   这里把「content 区必须全在 mtime 之前」与「第 4 处必须在展示函数里」拆成两条独立断言。
+  const conflictSnapAt = at('function autoCopyConflictSnapshot(');
+  const contentCalls = callIndexes.filter((i) => i < mtimeBranch);
+  const displayCalls = callIndexes.filter((i) => i >= mtimeBranch);
+  ok(mtimeBranch > 0 && contentCalls.length === 4 && contentCalls.every((i) => i < mtimeBranch),
+    'C6 四处 content 区调用全部在 mtime 分支之前 ⇒ 默认 mtime 路径零触碰 A3',
     { mtimeBranch, callIndexes });
+  ok(displayCalls.length === 1 && conflictSnapAt > 0 && displayCalls[0] > conflictSnapAt,
+    'C6b ⭐ 展示侧那一处调用落在 autoCopyConflictSnapshot（只读；用户点「处理冲突」才跑）',
+    { displayCalls, conflictSnapAt });
 
   ok(has('const contentSource = autoCopyJudge.readWritableSnapshot(PROFILE.dataRoot, latest.id, ownerIds, getSessionSyncCache());')
     && has('const contentTarget = autoCopyJudge.readWritableSnapshot(PROFILE.dataRoot, target.id, ownerIds, getSessionSyncCache());'),

@@ -75,6 +75,10 @@ if [ -f "scripts/picker-internal.js" ]; then
 else
   rm -f "$APP/Contents/Resources/scripts/picker-internal.js"
 fi
+# 主题令牌也是源码：可复用的壳里可能带着旧配色，必须每次覆盖（上游 1.2.8 起）。
+# 1.2.8 把 nebula 的按钮底色改成 transparent 交变量接管 ⇒ 漏拷会让 mac 包缺最新令牌。
+mkdir -p "$APP/Contents/Resources/scripts/builtin/nebula"
+cp scripts/builtin/nebula/theme.json "$APP/Contents/Resources/scripts/builtin/nebula/theme.json"
 WALLPAPER_OVERRIDE="scripts/builtin-overrides/wallpaper-06.webp"
 if [ -f "$WALLPAPER_OVERRIDE" ]; then
   mkdir -p "$APP/Contents/Resources/scripts/builtin/wallpapers" "$APP/Contents/Resources/scripts/builtin/nebula"

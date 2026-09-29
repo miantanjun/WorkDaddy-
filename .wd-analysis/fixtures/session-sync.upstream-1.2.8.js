@@ -8,6 +8,8 @@ const crypto = require('node:crypto');
 const { StringDecoder } = require('node:string_decoder');
 const identityKeys = new Set(['sessionId', 'conversationId', 'ownerConversationId', 'session_id', 'conversation_id']);
 const SKIP_LOCAL_DIR = /^workspace\/sessions\/[^/]+\/(?:modify_backup|\.modify_backup_meta)$/;
+const SYNC_BACKUP_DIR = /^sync-[A-Za-z0-9_-]+$/;
+const DEFAULT_SYNC_BACKUP_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
 // WorkBuddy appends session-meta lifecycle records when a conversation is
@@ -683,8 +685,101 @@ function unchanged(snapshot) {
   return now.files.size === snapshot.files.size && [...snapshot.files].every(([key, file]) => now.files.get(key)?.hash === file.hash);
 }
 
+function removeSyncBackup(backup) {
+  try { fs.rmSync(backup, { recursive: true, force: true }); } catch (_) {}
+}
+
+async function removeSyncBackupAsync(backup) {
+  try { await fs.promises.rm(backup, { recursive: true, force: true }); } catch (_) {}
+}
+
+// Successful and fully rolled-back syncs have no remaining reader for their
+// snapshots. Keep only recovery-needed backups, and age out crash leftovers
+// when the daemon starts so old versions cannot grow the data directory forever.
+function pruneSyncBackups(backupRoot, options = {}) {
+  const now = Number.isFinite(options.now) ? options.now : Date.now();
+  const maxAgeMs = Number.isFinite(options.maxAgeMs) && options.maxAgeMs >= 0
+    ? options.maxAgeMs : DEFAULT_SYNC_BACKUP_MAX_AGE_MS;
+  const result = { removed: 0, retainedRecovery: 0 };
+  let entries;
+  try { entries = fs.readdirSync(backupRoot, { withFileTypes: true }); }
+  catch (_) { return result; }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !SYNC_BACKUP_DIR.test(entry.name)) continue;
+    const backup = path.join(backupRoot, entry.name);
+    let status = '';
+    try {
+      const journal = JSON.parse(fs.readFileSync(path.join(backup, 'journal.json'), 'utf8'));
+      status = typeof journal.status === 'string' ? journal.status : '';
+    } catch (_) {}
+    if (status === 'recovery-needed') { result.retainedRecovery++; continue; }
+    let ageMs = 0;
+    try { ageMs = Math.max(0, now - fs.statSync(backup).mtimeMs); } catch (_) { continue; }
+    const remove = status === 'committed' || status === 'rolled-back' ||
+      (ageMs >= maxAgeMs && (status === 'prepared' || !status));
+    if (!remove) continue;
+    try { fs.rmSync(backup, { recursive: true, force: true }); result.removed++; } catch (_) {}
+  }
+  return result;
+}
+
+// Return lightweight operational metadata for the local rollback area. This
+// deliberately reads directory entries and stat metadata only; backup
+// contents never leave the machine and are never included in the response.
+function inspectSyncBackups(backupRoot) {
+  const result = { count: 0, totalBytes: 0, recoveryCount: 0, recoveryBytes: 0, pendingCount: 0 };
+  let entries;
+  try { entries = fs.readdirSync(backupRoot, { withFileTypes: true }); }
+  catch (_) { return result; }
+  const sizeOf = (file) => {
+    let info;
+    try { info = fs.lstatSync(file); } catch (_) { return 0; }
+    if (info.isSymbolicLink()) return 0;
+    if (info.isFile()) return info.size;
+    if (!info.isDirectory()) return 0;
+    let total = 0;
+    let children;
+    try { children = fs.readdirSync(file); } catch (_) { return 0; }
+    for (const child of children) total += sizeOf(path.join(file, child));
+    return total;
+  };
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !SYNC_BACKUP_DIR.test(entry.name)) continue;
+    const backup = path.join(backupRoot, entry.name);
+    let status = '';
+    try {
+      const journal = JSON.parse(fs.readFileSync(path.join(backup, 'journal.json'), 'utf8'));
+      status = typeof journal.status === 'string' ? journal.status : '';
+    } catch (_) {}
+    const bytes = sizeOf(backup);
+    result.count++;
+    result.totalBytes += bytes;
+    if (status === 'recovery-needed') {
+      result.recoveryCount++;
+      result.recoveryBytes += bytes;
+    } else if (status === 'prepared' || !status) {
+      result.pendingCount++;
+    }
+  }
+  return result;
+}
+
 function targetRelative(logical, id) {
   return logical.split('/').map(part => part === '__session__' ? id : part === '__session__.jsonl' ? id + '.jsonl' : part === '__session__.json' ? id + '.json' : part).join('/');
+}
+
+function changedTargetFiles(changes, target) {
+  const entries = [];
+  const seen = new Set();
+  for (const change of changes) {
+    if (seen.has(change.key)) continue;
+    seen.add(change.key);
+    const file = target.files.get(change.key);
+    // New source files have no old target bytes to restore. Only files that
+    // will be overwritten or deleted need a rollback copy.
+    if (file) entries.push([change.key, file]);
+  }
+  return entries;
 }
 
 function targetBytes(key, file, source, target) {
@@ -712,18 +807,19 @@ async function applySnapshot(source, target, options) {
   if (!missingOnly) for (const [key, file] of target.files) {
     if (!source.files.has(key)) changes.push({ key, relative: file.relative, bytes: null });
   }
+  const backupEntries = changedTargetFiles(changes, target);
   await guard();
   if (!unchanged(source) || !unchanged(target)) throw Error('会话文件正在变化，请稍后重试');
   fs.mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
   const backup = fs.mkdtempSync(path.join(backupRoot, 'sync-'));
   fs.chmodSync(backup, 0o700);
-  for (const [key, file] of target.files) {
+  for (const [key, file] of backupEntries) {
     const filePath = safePath(backup, 'files/' + key);
     fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
     fs.writeFileSync(filePath, file.bytes, { mode: 0o600, flag: 'wx' });
   }
   const journal = { version: 1, sourceId: source.id, targetId: target.id, status: 'prepared', metadata: options.metadata || null,
-    files: [...target.files].map(([key, file]) => ({ key, relative: file.relative, mode: file.mode, mtimeMs: file.mtimeMs })),
+    files: backupEntries.map(([key, file]) => ({ key, relative: file.relative, mode: file.mode, mtimeMs: file.mtimeMs })),
     changes: changes.map(change => ({ relative: change.relative, hash: change.bytes === null ? null : digest(change.bytes) })) };
   const journalFile = path.join(backup, 'journal.json');
   const save = () => fs.writeFileSync(journalFile, JSON.stringify(journal), { mode: 0o600 });
@@ -773,6 +869,7 @@ async function applySnapshot(source, target, options) {
     // Metadata already committed: a journal I/O failure must not undo files.
     let journalPending = false;
     try { save(); } catch (_) { journalPending = true; }
+    removeSyncBackup(backup);
     // Count only newly published payload bytes. Backups, unchanged files and
     // removals are not copied session data; rolled-back writes never reach here.
     const copiedBytes = changes.reduce((sum, change) => sum + (change.bytes ? change.bytes.length : 0), 0);
@@ -793,6 +890,7 @@ async function applySnapshot(source, target, options) {
     }
     journal.status = incomplete ? 'recovery-needed' : 'rolled-back';
     try { save(); } catch (_) { /* Keep the original failure and retained backup. */ }
+    if (!incomplete) removeSyncBackup(backup);
     throw error;
   }
 }
@@ -838,12 +936,13 @@ async function applySnapshotAsync(source, target, options) {
   if (!missingOnly) for (const [key, file] of target.files) {
     if (!source.files.has(key)) changes.push({ key, relative: file.relative, bytes: null, sourceFile: null, hash: null, size: 0 });
   }
+  const backupEntries = changedTargetFiles(changes, target);
   await guard();
   if (!await unchangedAsync(source) || !await unchangedAsync(target)) throw Error('会话文件正在变化，请稍后重试');
   await fs.promises.mkdir(backupRoot, { recursive: true, mode: 0o700 });
   const backup = await fs.promises.mkdtemp(path.join(backupRoot, 'sync-'));
   await fs.promises.chmod(backup, 0o700);
-  for (const [key, file] of target.files) {
+  for (const [key, file] of backupEntries) {
     const filePath = await safePathAsync(backup, 'files/' + key);
     await fs.promises.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
     await fs.promises.copyFile(file.sourcePath, filePath, fs.constants.COPYFILE_EXCL);
@@ -852,7 +951,7 @@ async function applySnapshotAsync(source, target, options) {
   }
   const journal = {
     version: 1, sourceId: source.id, targetId: target.id, status: 'prepared', metadata: options.metadata || null,
-    files: [...target.files].map(([key, file]) => ({ key, relative: file.relative, mode: file.mode, mtimeMs: file.mtimeMs })),
+    files: backupEntries.map(([key, file]) => ({ key, relative: file.relative, mode: file.mode, mtimeMs: file.mtimeMs })),
     changes: changes.map(change => ({ relative: change.relative, hash: change.hash })),
   };
   const journalFile = path.join(backup, 'journal.json');
@@ -905,6 +1004,7 @@ async function applySnapshotAsync(source, target, options) {
     journal.status = 'committed';
     let journalPending = false;
     try { await save(); } catch (_) { journalPending = true; }
+    await removeSyncBackupAsync(backup);
     const copiedBytes = changes.reduce((sum, change) => sum + (change.hash === null ? 0 : change.size), 0);
     return { backup, copied: changes.length, copiedBytes, journalPending, totalBytes };
   } catch (error) {
@@ -926,11 +1026,12 @@ async function applySnapshotAsync(source, target, options) {
     }
     journal.status = incomplete ? 'recovery-needed' : 'rolled-back';
     try { await save(); } catch (_) { /* Keep the original failure and retained backup. */ }
+    if (!incomplete) await removeSyncBackupAsync(backup);
     throw error;
   }
 }
 
 module.exports = {
   readSessionSizes, readSnapshot, readSnapshotAsync, readSessionFingerprintAsync, readSessionQuickFingerprintAsync, compareSnapshots, selectTargetSnapshot,
-  applySnapshot, applySnapshotAsync,
+  applySnapshot, applySnapshotAsync, pruneSyncBackups, inspectSyncBackups,
 };

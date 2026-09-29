@@ -157,6 +157,18 @@ function contentLeader(entries, options = {}) {
     };
   }
 
+  // 【BUG3 修复】分叉的定义是「两边都读得到、且内容不同」。若所有两两比较都只因为
+  //   「读不出来」（kind=unreadable，例如成员会话正文文件缺失）而落进 REL_DIV，
+  //   那这不是分叉，是**不可比** —— 必须归 insufficient，否则会报出用户点进去看不见的假冲突。
+  const allUnreadable = pairs.length > 0 && pairs.every((pair) => pair.kind === 'unreadable');
+  if (allUnreadable) {
+    for (const entry of readable) status.set(entry.id, 'excluded');
+    return {
+      kind: 'insufficient', leaderId: null, candidates: [], readable: readable.length,
+      members: members(), pairs,
+      reason: '成员内容都读不出来（会话正文文件缺失或损坏），无法比较 —— 不是分叉',
+    };
+  }
   for (const entry of readable) status.set(entry.id, 'branch');
   return {
     kind: 'divergent', leaderId: null, candidates: [], readable: readable.length,

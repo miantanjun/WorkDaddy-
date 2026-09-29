@@ -25,6 +25,15 @@
  *   注意：本地 delta 从 1.2.5 的 7 条**一条没少**，只是 delta-2b/2d 需要限定作用域
  *   （1.2.6 新增了异步孪生，同形代码各出现两次）。
  *
+ * 2026-09-27（上游 1.2.8 吸纳批，见 WorkDaddy-上游1.2.8吸纳建议报告-2026-09-27.md §4 批 2）：
+ *   基线 fixture 从 1.2.6 升到 **1.2.8**（46 826 B → 51 098 B）。上游新增的全是「回滚备份生命周期」：
+ *     · `SYNC_BACKUP_DIR` / `DEFAULT_SYNC_BACKUP_MAX_AGE_MS`（30 天）
+ *     · `pruneSyncBackups()`（committed/rolled-back 立即删；recovery-needed **永久保留**；prepared 超期清）
+ *     · `inspectSyncBackups()`（只读目录项 + stat 元数据，绝不回内容）
+ *     · `changedTargetFiles()`（回滚副本只为**会被覆盖/删除**的文件做）+ 提交后 `removeSyncBackup*`
+ *   ⇒ [A] 导出面 9 → **11**；delta 表**一条没加**（这些全是上游原生能力，本地零定制）。
+ *   （1.2.6 那份 fixture 已归档到 `_backup/scripts-20260927160903/`。）
+ *
  * 本套件守七件事：
  *   [A] 契约 + 「上游原文 fixture + delta 表 == 工作副本」的逐字节 provenance 锁（保证可长期与上游 diff）
  *   [B] 判据是「内容」不是「时间」
@@ -75,8 +84,8 @@ ok(typeof sync.readSnapshot === 'function', 'A2 readSnapshot 是函数');
 ok(typeof sync.compareSnapshots === 'function', 'A3 compareSnapshots 是函数');
 ok(typeof sync.selectTargetSnapshot === 'function', 'A4 selectTargetSnapshot 是函数');
 ok(typeof sync.applySnapshot === 'function', 'A5 applySnapshot 是函数');
-ok(Object.keys(sync).sort().join(',') === 'applySnapshot,applySnapshotAsync,compareSnapshots,readSessionFingerprintAsync,readSessionQuickFingerprintAsync,readSessionSizes,readSnapshot,readSnapshotAsync,selectTargetSnapshot',
-  'A6 导出面与上游 1.2.6 一致（9 个：1.2.5 的 5 个 + 异步孪生 applySnapshotAsync/readSnapshotAsync + 两个指纹助手）', Object.keys(sync).sort());
+ok(Object.keys(sync).sort().join(',') === 'applySnapshot,applySnapshotAsync,compareSnapshots,inspectSyncBackups,pruneSyncBackups,readSessionFingerprintAsync,readSessionQuickFingerprintAsync,readSessionSizes,readSnapshot,readSnapshotAsync,selectTargetSnapshot',
+  'A6 导出面与上游 1.2.8 一致（11 个：1.2.6 的 9 个 + 备份清理 inspectSyncBackups/pruneSyncBackups）', Object.keys(sync).sort());
 
 ok(SOURCE.indexOf('\r') === -1, 'A7 纯 LF（与上游逐字节可 diff）');
 ok(!SOURCE.startsWith('\uFEFF'), 'A8 无 BOM');
@@ -86,12 +95,12 @@ ok(!SOURCE.startsWith('\uFEFF'), 'A8 无 BOM');
 // 任何人绕过 delta 表直接改工作副本，这条立刻翻红。
 // （2026-09-20 从「正则还原两个常量」升级而来：那时差异只有常量，现在有多处，
 //   硬编码还原式已经不可维护，改由 fixtures/session-sync.deltas.js 作唯一真相。）
-const FIXTURE = path.join(ROOT, '.wd-analysis', 'fixtures', 'session-sync.upstream-1.2.6.js');
+const FIXTURE = path.join(ROOT, '.wd-analysis', 'fixtures', 'session-sync.upstream-1.2.8.js');
 const deltas = require('./fixtures/session-sync.deltas.js');
-ok(fs.existsSync(FIXTURE), 'A9 上游原文 fixture 存在（可随时 diff 上游）');
+ok(fs.existsSync(FIXTURE), 'A9 上游原文 fixture 存在（可随时 diff 上游）；1.2.6 那份已归档到 _backup');
 const fixtureText = fs.readFileSync(FIXTURE, 'utf8');
 ok(crypto.createHash('sha256').update(fixtureText, 'utf8').digest('hex') === deltas.UPSTREAM_SHA256,
-  'A10 fixture 指纹 == 登记的 1.2.5 指纹（防 fixture 本身被改）', deltas.UPSTREAM_SHA256.slice(0, 12));
+  'A10 fixture 指纹 == 登记的 1.2.8 指纹（防 fixture 本身被改）', deltas.UPSTREAM_SHA256.slice(0, 12));
 ok(fixtureText.indexOf('\r') === -1, 'A11 fixture 纯 LF');
 const drifted = deltas.DELTAS.filter((d) => fixtureText.split(d.from).length - 1 !== 1).map((d) => d.id);
 ok(drifted.length === 0, 'A12 每条 delta 在上游原文里恰好命中 1 次（防原地漂移）', drifted);
@@ -248,14 +257,21 @@ section('[E] 沙箱：选主 + applySnapshot 真写');
   ok(sync.compareSnapshots(src, read('T-SHORT')).kind === 'equal', 'E9 复制后判定为 equal');
   ok(result.copied >= 1, 'E10 报告了写入条数', result.copied);
   ok(commitCalls === 1, 'E11 commit 回调恰好一次（DB 侧在文件发布后再提交）', commitCalls);
-  ok(fs.existsSync(path.join(result.backup, 'journal.json')), 'E12 生成 journal.json');
-  const journal = JSON.parse(fs.readFileSync(path.join(result.backup, 'journal.json'), 'utf8'));
-  ok(journal.status === 'committed', 'E13 journal.status = committed', journal.status);
-  ok(journal.metadata && journal.metadata.note === 'test', 'E14 journal 记录了 metadata');
-  const bakFiles = [];
-  (function walk(p) { for (const e of fs.readdirSync(p, { withFileTypes: true })) { const q = path.join(p, e.name); if (e.isDirectory()) walk(q); else bakFiles.push(q); } })(path.join(result.backup, 'files'));
-  ok(bakFiles.some((f) => fs.readFileSync(f).equals(beforeShort)),
-    'E15 备份里保存了被覆盖前的原始字节（可回滚）', bakFiles.length);
+  // ⚠️ 语义变更（上游 1.2.8）：提交成功后**立即删除**自己的回滚备份。
+  //    旧断言「生成 journal.json / 备份里有旧字节」是 1.2.6 的行为；1.2.8 起
+  //    备份只在 `recovery-needed`（写到一半失败）时留存 —— 那正是要避免发生的状态。
+  //    所以这里改守「提交即清理」，并把「回滚凭据仍可产生」交给 C2 段的手工备份用例。
+  ok(result.backup && !fs.existsSync(result.backup),
+    'E12 ⭐ 1.2.8 起「提交即清理」：applySnapshot 成功后备份目录已删除（旧断言是 journal.json 仍存在）',
+    result.backup);
+  ok(fs.readdirSync(backupRoot).length === 0,
+    'E13 备份根目录里没有残留（成功路径不只是未提交 journal，而是整目录都不留）',
+    fs.readdirSync(backupRoot));
+  ok(result.journalPending === false,
+    'E14 journal 写盘成功（journalPending 是唯一还能观测到的写盘结论）', result.journalPending);
+  ok(result.totalBytes > 0 && Number.isFinite(result.copiedBytes),
+    'E15 返回体仍带 totalBytes / copiedBytes（面板进度依赖它们，不能因为删备份就丢）',
+    { totalBytes: result.totalBytes, copiedBytes: result.copiedBytes });
   const idx = JSON.parse(fs.readFileSync(path.join(SANDBOX, 'artifact-index', 'T-SHORT.json'), 'utf8'));
   ok(idx.artifacts[0]._meta.ownerConversationId === 'T-SHORT',
     'E16 产物索引 ownerConversationId 改写为目标 id', idx.artifacts[0]._meta.ownerConversationId);
