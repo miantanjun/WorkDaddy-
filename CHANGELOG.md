@@ -65,6 +65,35 @@
 
 ### 发布
 
+- tag `v1.9.1`（annotated）→ 提交 `103c675`；CI run `36553224170` —— **19 步全绿 / 3 分 1 秒**
+  （`10:04:06Z → 10:07:07Z`）；Release [WorkBuddy 助手 1.9.1](https://github.com/miantanjun/WorkDaddy-/releases/tag/v1.9.1)
+  （id `399022508`，published `2026-09-29T10:06:59Z`）。
+- 4 资产齐备。SHA-256 取自 `assets[].digest`（与本地落地字节比对**逐字节一致**）：
+
+  | 资产 | 大小 | SHA-256 |
+  |---|---|---|
+  | `WorkDaddy-Setup-1.9.1.exe` | 27.8 MB | `251954e0016c84e3c7cd088e8ee2e96cb8734e85d4c1b479d3dacff2c361aa11` |
+  | `WorkDaddy-AI-Setup-1.9.1.exe` | 27.8 MB | `f03585b0dce7a80cde1b898f03bb035457b2627979570c5c90812c7b73223820` |
+  | `WorkDaddy-Portable-1.9.1.zip` | 39.0 MB | `58fe95c4d210c4808316d38926ba4cb1ab84ac94880aa30e6479b4ac9ed08db0` |
+  | `WorkDaddy-AI-Portable-1.9.1.zip` | 39.0 MB | `3617e8f974aea309bb9a95052ac5318aca104ca48243192bd5a377dd4f4822fa` |
+
+  ⚠️ Release 正文恒定只有 **2 行**（两个 `Setup.exe` 的 SHA-256）—— 便携包的哈希**只在该资产的
+  `assets[].digest` 上**，这是 CI 步骤的既定行为，不是校验缺失。
+
+- **开包复验 16 项断言全通过**：便携 ZIP **176 条目**；包内 `package.json` + `package-lock.json`（2 处）
+  三处 version 均 `1.9.1`；包内 `daemon.js` = `1.9.1` / `release-1.9.1-20260929-upstream-128-absorbed-r1`
+  / `UPSTREAM_VERSION = 1.2.8`；本次三类改动的特征串全部能在**正文**里读到
+  （`RATE_LIMIT_CODES` / `TRANSIENT_SYNC_ERROR` / `resolveContentLeader` / `bootUntil` /
+  `wbs-sess-zh-reasoning` / `wbs-pie-legend`）；`build-mac-dmg.sh` 内含 `builtin/nebula` 拷贝。
+  ⚠️ 复验脚本有一条断言**先误报、后修正**：初版写「inject.js 全文不含 `sessionsState.wsExpanded = {}`」，
+  但该清空在**用户主动切换筛选**（时间范围 / 体积）时**仍然存在且是正确设计** ⇒ 改为
+  「只剩 2 处、且都不在 `loadSessions` 的自动刷新路径内」。
+  **判据教训：断言要写「哪个路径不该这么做」，不要写「全文不该出现」。**
+- 复验脚本 `.wd-tmp/verify-zip-191.py`（下载走 `gh-proxy.com` 镜像，39.0 MB / **5.5 秒**；
+  与 `assets[].digest` 比 SHA ⇒ 镜像改不了字节）。
+- 本次发版的**分工与 token 评测**（主 AI × 本地子 Agent）见工作区
+  `WorkDaddy-v1.9.1发版-主AI与子Agent分工评估-2026-09-29.html`。
+
 ---
 
 ## v1.9.0 —— 2026-09-26
