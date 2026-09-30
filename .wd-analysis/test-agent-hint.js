@@ -287,6 +287,14 @@ ok(brokenCat.corrupt === true && Object.keys(brokenCat.entries).length === 0,
 catalogForTest.setEntry(catTmpB, 'x', { kind: 'cloud' });
 ok(fs.readdirSync(catTmpB).filter((f) => f.indexOf('.corrupt-') >= 0).length === 1,
   'G13 ⭐⭐ 覆盖损坏文件前**先留 .corrupt-*.bak 备份**（不静默抹掉用户声明）');
+// ⚠️ `corrupt` 是**运行时标记**，绝不能落盘 —— 我第一版只在 corrupt===true 时 delete，
+//    正常写入时就把 `"corrupt": false` 一起写进了文件（实测抓到的 bug）。
+const catTmpC = fs.mkdtempSync(path.join(osMod.tmpdir(), 'wbs-catc-'));
+catalogForTest.setEntry(catTmpC, 'm-c', { kind: 'local' });
+const catWritten = fs.readFileSync(path.join(catTmpC, 'agent-catalog.json'), 'utf8');
+ok(catWritten.indexOf('corrupt') < 0,
+  'G13b ⭐⭐ 落盘的目录**不得含 corrupt 字段**（运行时标记不许被序列化）', catWritten.slice(0, 120));
+fs.rmSync(catTmpC, { recursive: true, force: true });
 ok(catalogForTest.delegatable(catalogForTest.readCatalog(catTmp)).length >= 1,
   'G14 delegatable 只返回 delegate=true 的模型');
 [catTmp, catTmpB].forEach((d) => { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {} });

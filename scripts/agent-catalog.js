@@ -152,8 +152,11 @@ function writeCatalog(dataDir, catalog) {
   //    （损坏几乎都是人为编辑导致，原文件里往往还有能救回的内容。）
   if (catalog && catalog.corrupt) {
     try { fs.copyFileSync(target, target + '.corrupt-' + Date.now() + '.bak'); } catch (_) {}
-    delete catalog.corrupt;
   }
+  // ⚠️⚠️ `corrupt` 是**运行时标记**，**绝不能落盘** —— 必须**无条件**删掉。
+  //     我第一版只在 corrupt===true 时才 delete ⇒ 正常写入时会把 `"corrupt": false`
+  //     一起序列化进文件（实测抓到的 bug：文件里多了一个不该有的字段）。
+  if (catalog) delete catalog.corrupt;
   const json = JSON.stringify(catalog, null, 2) + '\n';
   replaceFileWithRetry(target, json, 0o600);
   return catalog;

@@ -554,7 +554,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         （删 acIsDarkTheme / watchThemeForButtons / syncAccountFade / syncModelFade）。
 //         同版修复：会话同步冲突误报 / 切号后需再切一次才能同步 / 模型限流写入被服务端白名单拒 /「空间」
 //         分组反复折叠 / 引导会话被暂存队列永久暂停；新增「中文思考」开关（写入官方全局自定义指令）。
-const DAEMON_VERSION = '1.9.3';
+const DAEMON_VERSION = '1.9.4';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.8';
@@ -577,7 +577,7 @@ const UPSTREAM_VERSION = '1.2.8';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.9.3-20261001-agent-catalog-r1';
+const DAEMON_BUILD_ID = 'release-1.9.4-20261001-catalog-corrupt-fix-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({

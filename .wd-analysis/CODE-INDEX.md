@@ -1,6 +1,6 @@
 # 代码索引（自动生成，勿手改）
 
-> 由 `.wd-analysis/gen-code-index.js` 生成 · 2026-09-30 20:32:48
+> 由 `.wd-analysis/gen-code-index.js` 生成 · 2026-09-30 20:43:42
 > 用途：定位大文件里的函数，**替代「grep 整个文件」**（索引按需读，不常驻上下文）。
 > 查法：`node .wd-analysis/gen-code-index.js --grep <关键词>`
 
