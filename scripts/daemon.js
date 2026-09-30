@@ -246,6 +246,9 @@ const {
   atomicWriteText,
 } = require('./automation.js');
 const scheduledSend = require('./scheduled-send.js');
+// 本地子 Agent 的「使用记录 + 专长分析」（解析会话 jsonl 里的 Agent 调用；纯只读）
+const agentUsage = require('./agent-usage.js');
+const agentCatalog = require('./agent-catalog.js');
 const scheduleLedger = require('./schedule-ledger.js');
 
 /**
@@ -551,7 +554,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         （删 acIsDarkTheme / watchThemeForButtons / syncAccountFade / syncModelFade）。
 //         同版修复：会话同步冲突误报 / 切号后需再切一次才能同步 / 模型限流写入被服务端白名单拒 /「空间」
 //         分组反复折叠 / 引导会话被暂存队列永久暂停；新增「中文思考」开关（写入官方全局自定义指令）。
-const DAEMON_VERSION = '1.9.2';
+const DAEMON_VERSION = '1.9.3';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.8';
@@ -574,7 +577,7 @@ const UPSTREAM_VERSION = '1.2.8';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.9.2-20261001-gateway-presync-selfheal-r1';
+const DAEMON_BUILD_ID = 'release-1.9.3-20261001-agent-catalog-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -6373,6 +6376,95 @@ async function sqliteQuery(sql, params = []) {
   ])));
 }
 
+/** 本地时区槽位 `YYYY-MM-DDTHH:MM`（与 scheduled-send 的 localSlot 同格式）。 */
+function officialSlotOf(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/**
+ * 只读官方 WorkBuddy 的「定时任务」（5.7.3+：`workbuddy.db` → `automations` 表）。
+ *
+ * 为什么插件要读它（2026-10-01 官方定时任务评估的结论）：官方这一版也做了定时任务，
+ * 而它与插件的是**两种范式** —— 官方「定时跑一段 prompt」，插件「定时执行自动化步骤」。
+ * 用户很可能**两边都配同一件事**，插件看不见官方任务就会出现两个后果：
+ *   ① 用户忘了自己配过 ⇒ 重复执行；② 两边在同一分钟同时触发 ⇒ 抢会话 / 抢账号。
+ * 所以这个函数只做「**看见**」这一件事。
+ *
+ * ⚠️ **只读，绝不写官方表**：`automations` 是官方的领域，写坏了后果不可控。
+ * ⚠️ 表可能不存在（旧客户端）⇒ 返回 `supported:false`，让界面能区分
+ *    「官方没有这个功能」与「有功能但当前没有任务」—— 这两件事对用户的含义完全不同。
+ */
+async function readOfficialAutomations() {
+  let rows = null;
+  try {
+    rows = await sqliteQuery(
+      'SELECT id, name, status, schedule_type, rrule, scheduled_at, next_run_at, last_run_at, '
+      + 'push_to_wechat, push_to_wecom_bot, model_id, expert_id '
+      + 'FROM automations WHERE deleted_at IS NULL;'
+    );
+  } catch (error) {
+    return { supported: false, reason: String((error && error.message) || error).slice(0, 200), items: [], count: 0 };
+  }
+  const items = (Array.isArray(rows) ? rows : []).map((row) => {
+    // sqliteQuery 会把所有值 String().trim() ⇒ 时间戳要转回来。
+    // ⚠️ **单位必须用数量级判别**：官方同表里 `created_at` 用的是 `unixepoch()`（**秒**），
+    //    但实测 `next_run_at` 存的是**毫秒** —— 一律按秒解析会得到「58720 年」这种荒谬年份
+    //    （2026-10-01 实测踩到）。所以：超过 1e11 的一律当毫秒。
+    const rawNext = Number(row.next_run_at) || 0;
+    const nextMs = rawNext > 1e11 ? rawNext : rawNext * 1000;
+    const nextDate = nextMs ? new Date(nextMs) : null;
+    return {
+      id: String(row.id || ''),
+      name: String(row.name || ''),
+      status: String(row.status || ''),
+      scheduleType: String(row.schedule_type || 'recurring'),
+      rrule: String(row.rrule || ''),
+      scheduledAt: String(row.scheduled_at || ''),
+      nextRunAt: nextDate ? nextDate.toISOString() : '',
+      nextSlot: nextDate ? officialSlotOf(nextDate) : '',
+      pushToWechat: String(row.push_to_wechat || '') === '1',
+      pushToWecomBot: String(row.push_to_wecom_bot || '') === '1',
+      modelId: String(row.model_id || ''),
+      expertId: String(row.expert_id || ''),
+    };
+  });
+  return { supported: true, reason: '', items, count: items.length };
+}
+
+/**
+ * 「同槽位」冲突检测：官方任务的**下一次触发分钟**与插件任务的**每日触发分钟**相同 ⇒ 提示用户。
+ *
+ * ⚠️ **故意只做 `daily` 一种**：官方表虽然存了 `rrule`（iCalendar 标准重复规则），但我们**不解析它**
+ *    —— 解析错比不解析更糟（会给出**假的**冲突结论，让用户白折腾）。
+ *    weekly / monthly / interval 一律**只展示、不判定**。
+ *    这是刻意的保守：**宁可漏报，不要误报**（误报会消耗用户对提示的信任）。
+ */
+function findOfficialSlotConflicts(official, tasks) {
+  const conflicts = [];
+  const byMinute = new Map();
+  for (const item of (official && official.items) || []) {
+    if (!item.nextSlot) continue;
+    const hhmm = item.nextSlot.slice(11);      // YYYY-MM-DDTHH:MM → HH:MM
+    if (!byMinute.has(hhmm)) byMinute.set(hhmm, []);
+    byMinute.get(hhmm).push(item.name || item.id);
+  }
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    const sched = task && task.schedule;
+    if (!sched || sched.type !== 'daily' || !sched.time) continue;
+    const hit = byMinute.get(String(sched.time));
+    if (hit && hit.length) {
+      conflicts.push({
+        taskId: String(task.id || ''),
+        taskName: String(task.name || ''),
+        time: String(sched.time),
+        officialNames: hit.slice(0, 5),
+      });
+    }
+  }
+  return conflicts;
+}
+
 // WorkBuddy 将会话正文保存在 ~/.workbuddy*/projects 等系统目录，同时在 sessions.cwd
 // 保存该会话所属的工作目录。cwd 被用户移动/清理后，官方会话页仍能列出记录，但打开时
 // 会报“工作目录可能已被重命名或删除”。仅凭数据库记录创建目录过于宽松，因此这里要求
@@ -6478,7 +6570,25 @@ async function copySessionFiles(wbHome, oldId, newId, lineageIds = [], options =
       // A7：源侧体积。cp 是「整份覆盖」（force: true，不比对内容），复制成功即
       // 源侧体积真的被写了一遍 ⇒ copiedBytes 直接取它，无需逐文件记账。
       const sourceBytes = measurePathBytes(from);
-      await fsMod.promises.cp(from, to, { recursive: true, force: true, preserveTimestamps: true });
+      // ⭐ 2026-10-01（全面审查 P-1）：**跳过特殊文件**。
+      //    官方会在 `modify_backup` 目录里留下 socket / 设备类文件（形如 `10.d.<hash>.MUMUNX_SOCK_`），
+      //    而 `fs.cp` 会对每个条目 `lstat` —— 撞上它就抛 `EACCES: permission denied, lstat '…'`，
+      //    导致**整份复制失败**（日志实测 2026-09-14 出现 2 次）。
+      //    `fs.cp` 没有"忽略此类文件"的选项 ⇒ 用 `filter` 放行**可复制的类型**；
+      //    lstat 本身失败（正是 EACCES 那种）也返回 false 跳过 —— 宁可少复制一个 socket，
+      //    也不要让整个会话的产物复制失败。
+      //    ⚠️ 必须**放行符号链接**：`fs.cp` 默认就会复制链接本身（dereference:false），
+      //    只放行 file/dir 会把它静默跳过 ⇒ 那是本次修复**会引入的新回归**。
+      //    要拦的只有 socket / FIFO / 字符设备 / 块设备这类**根本无法复制**的特殊文件。
+      const onlyCopyable = (src) => {
+        try {
+          const st = fsMod.lstatSync(src);
+          return st.isFile() || st.isDirectory() || st.isSymbolicLink();
+        } catch (_) { return false; }
+      };
+      await fsMod.promises.cp(from, to, {
+        recursive: true, force: true, preserveTimestamps: true, filter: onlyCopyable,
+      });
       result.sourceBytes += sourceBytes;
       result.copiedBytes += sourceBytes;
       result.copied++;
@@ -10641,6 +10751,198 @@ function refreshZhReasoningIfEnabled() {
   }
 }
 
+/* ================= 本地子 Agent 提示（全局自定义指令注入） =================
+ * 与「决策弹窗」「中文思考」**共用同一条官方通道**：settings.personalization.customPrompt
+ * → 渲染进 user-context-identity.tpl 的 <user_custom_instructions> 区块（模板原文
+ * "You MUST follow them in all responses"）—— 对**每个会话全局生效**。
+ *
+ * 解决什么问题（2026-10-01 用户明确的需求）：
+ *   主 AI 能调用本地子 Agent（qwen3.8-27b）协同干活，但**上下文一多就忘了它存在**，
+ *   要用户反复提醒；换到别的任务会话更不会主动用。
+ *   ⇒ 把「你有一个可用的本地子 Agent」写进全局自定义指令，让**每个会话开局就知道**它存在。
+ *
+ * 开关行为：**关闭时既不提醒也不注入** —— 整段规则从 customPrompt 里摘掉，
+ *   用户其它的自定义指令原样保留；用户本来就没写内容时把键一起删掉（开→关字节级还原）。
+ *   ⚠️ 「关闭」只停**提醒**，不影响用户在对话里手动要求使用。
+ */
+const AGENT_HINT_TAG_START = '<!-- wbs-agent-hint:start -->';
+const AGENT_HINT_TAG_END = '<!-- wbs-agent-hint:end -->';
+/**
+ * 子 Agent 提醒规则（**按目录动态生成**，2026-10-01 通用化）。
+ *
+ * ⚠️ 旧版把 `model="qwen3.8-27b"` **写死在文案里** —— 接入任何别的 AI 之后提醒就失真
+ *    （AI 只会照着文案去调那一个模型）。现在清单来自用户在模型页的**声明**
+ *    （`agent-catalog.js` 里 `delegate: true` 的那些）。
+ *
+ * @param {Array<{id:string,kind:string,label:string}>} models 可委派的模型（非空）
+ */
+function buildAgentHintRule(models) {
+  const rows = models.map((m) => '  - ' + m.id + '   (' + m.kind + ')').join('\n');
+  const example = models[0].id;
+  return [
+    'You can delegate work to one of these sub-agent models:',
+    rows,
+    '',
+    'Call it with Agent(subagent_type="general-purpose", model="' + example + '", prompt="...") when a sub-task is',
+    '"read a large amount of material, return a short conclusion" — for example reading large files to extract',
+    'a list, surveying a directory tree, summarizing logs, or cross-checking two documents against each other.',
+    '',
+    'Rules:',
+    '1. Delegate one at a time, serially. Concurrent calls crash a local engine.',
+    '2. If a delegation fails, fall back to the default model for that task. Do not retry the same task repeatedly.',
+    '3. Do not delegate critical-path work (writing code, editing files, cutting a release).',
+    '4. Sub-agents are reliable at reading and copying, not at writing or deciding. Do not delegate work that needs design or judgment.',
+    '',
+    'Every delegation is recorded locally. Consult that history (WorkDaddy panel -> Models) when you need',
+    'to judge what kinds of tasks they have actually been good at.'
+  ].join('\n');
+}
+
+/**
+ * 生成提醒块。
+ * ⚠️ **可委派的模型一个都没有 ⇒ 返回空串 ⇒ 整段不注入** ——
+ *    宁可不提，也不要让 AI 去调一个不存在的模型。调用方需自行处理空串
+ *    （`setAgentHint` 会据此拒绝开启并给出可操作提示）。
+ */
+function buildAgentHintBlock() {
+  const list = agentCatalog.delegatable(agentCatalog.readCatalog(DATA_DIR));
+  if (!list.length) return '';
+  return AGENT_HINT_TAG_START + '\n' + buildAgentHintRule(list) + '\n' + AGENT_HINT_TAG_END;
+}
+
+/** 从 customPrompt 中移除子 Agent 提示段（保留用户其它内容，**且不改动用户原文一个字节**）。 */
+function stripAgentHint(customPrompt) {
+  if (typeof customPrompt !== 'string') return '';
+  const start = customPrompt.indexOf(AGENT_HINT_TAG_START);
+  const end = customPrompt.indexOf(AGENT_HINT_TAG_END);
+  if (start === -1 || end === -1 || end < start) return customPrompt;
+  const before = customPrompt.slice(0, start);
+  const after = customPrompt.slice(end + AGENT_HINT_TAG_END.length);
+  // ⚠️⚠️ 这里**既不能 trim、也不能折叠空行** —— 那正是 2026-10-01 被独立复核抓到的：
+  //     原实现 `(before + after).replace(/\n{3,}/g,'\n\n').trim()` 会顺手改动**用户自己**的
+  //     首尾空白 ⇒ 注释里声称的「开→关字节级还原」其实**只在用户原文无尾随空白时成立**。
+  //     现改为：**只吃掉「开启时补在块前面那两个换行」**（见 setAgentHint 的 join('\n\n')），
+  //     其余一律原样。这样任意用户原文都能精确还原。
+  return before.replace(/\n{1,2}$/, '') + after;
+}
+
+function getAgentHintState() {
+  const settings = readWorkbuddySettings();
+  const customPrompt = (settings && settings.personalization && typeof settings.personalization.customPrompt === 'string')
+    ? settings.personalization.customPrompt
+    : '';
+  const enabled = customPrompt.includes(AGENT_HINT_TAG_START) && customPrompt.includes(AGENT_HINT_TAG_END);
+  // 预览里把三段插件规则都遮掉，只让用户看到自己写的内容
+  const userOnly = customPrompt
+    .replace(/<!-- wbs-ask-mode:start -->[\s\S]*?<!-- wbs-ask-mode:end -->/g, '')
+    .replace(/<!-- wbs-zh-reasoning:start -->[\s\S]*?<!-- wbs-zh-reasoning:end -->/g, '')
+    .replace(/<!-- wbs-agent-hint:start -->[\s\S]*?<!-- wbs-agent-hint:end -->/g, '')
+    .replace(/\n{3,}/g, '\n\n').trim();
+  return {
+    enabled,
+    hasUserCustomPrompt: !!userOnly,
+    userCustomPromptPreview: userOnly.slice(0, 120),
+  };
+}
+
+function setAgentHint(enabled) {
+  const settings = readWorkbuddySettings();
+  if (!settings.personalization || typeof settings.personalization !== 'object') settings.personalization = {};
+  const existing = typeof settings.personalization.customPrompt === 'string' ? settings.personalization.customPrompt : '';
+  const stripped = stripAgentHint(existing);
+  if (enabled) {
+    const block = buildAgentHintBlock();
+    // ⚠️ 没有任何「可委派」的模型 ⇒ 块为空 ⇒ **拒绝开启**。
+    //    否则用户以为开了、面板也显示"已开"，实际却什么都没注入 —— 那是最坏的一种骗人。
+    if (!block) {
+      const err = new Error('请先在「模型」页把至少一个模型标记为「可委派」，再打开这个开关');
+      err.code = 'NO_DELEGATABLE_MODEL';
+      throw err;
+    }
+    settings.personalization.customPrompt = [stripped, block].filter(Boolean).join('\n\n');
+  } else if (stripped) {
+    settings.personalization.customPrompt = stripped;
+  } else {
+    // 关且用户本来就没写自定义指令 ⇒ 把键一起摘掉，保证「开→关」字节级回到原状
+    delete settings.personalization.customPrompt;
+    if (Object.keys(settings.personalization).length === 0) delete settings.personalization;
+  }
+  writeWorkbuddySettings(settings);
+  return getAgentHintState();
+}
+
+/** 启动时调用：如已开启，把旧的提示规则替换为最新版本（用标记精确识别）。 */
+function refreshAgentHintIfEnabled() {
+  if (PROFILE.kind !== 'workbuddy') return;
+  try {
+    if (!getAgentHintState().enabled) return;
+    setAgentHint(true);
+    log('[agent-hint] 启动时已刷新子 Agent 提示为最新版本');
+  } catch (e) {
+    // ⚠️ 最常见的原因：用户把「可委派」全关了 ⇒ 块为空 ⇒ setAgentHint 拒绝开启。
+    //    这时**应当把旧块摘掉** —— 否则会留着一份"写着已经停用的模型"的过期提醒。
+    if (e && e.code === 'NO_DELEGATABLE_MODEL') {
+      try { setAgentHint(false); log('[agent-hint] 已无可委派模型，过期提示已自动摘除'); } catch (_) {}
+      return;
+    }
+    log('[agent-hint] 刷新失败: ' + e.message);
+  }
+}
+
+/**
+ * 扫会话 jsonl，抽出「派给子 Agent」的调用并聚合（**只读**，带 5 分钟缓存）。
+ *
+ * 判据严格用 `name === 'Agent'` —— 实测用「文本含模型名」判定会大量误报
+ * （`Read` / `Bash` 的记录正文里也会提到模型名）。
+ *
+ * ⚠️ 性能：只扫**最近 60 天修改过**的 jsonl；不活跃的会话直接跳过。
+ *    实测全量约 150 个文件，加过滤后通常只剩十来个，够快。
+ */
+let agentUsageCache = { at: 0, data: null };
+const AGENT_USAGE_CACHE_MS = 5 * 60 * 1000;
+
+function collectAgentUsage() {
+  if (agentUsageCache.data && (Date.now() - agentUsageCache.at) < AGENT_USAGE_CACHE_MS) {
+    return Object.assign({ cached: true }, agentUsageCache.data);
+  }
+  const projects = path.join(path.dirname(SESSIONS_DB), 'projects');
+  const records = [];
+  let scannedFiles = 0;
+  let skippedOld = 0;
+  const cutoff = Date.now() - 60 * 24 * 3600 * 1000;
+  try {
+    for (const proj of fs.readdirSync(projects, { withFileTypes: true })) {
+      if (!proj.isDirectory() || proj.isSymbolicLink()) continue;
+      const dir = path.join(projects, proj.name);
+      let names = [];
+      try { names = fs.readdirSync(dir); } catch (_) { continue; }
+      for (const name of names) {
+        if (!name.endsWith('.jsonl')) continue;
+        const full = path.join(dir, name);
+        try {
+          if (fs.statSync(full).mtimeMs < cutoff) { skippedOld += 1; continue; }
+          const text = fs.readFileSync(full, 'utf8');
+          if (text.indexOf('"Agent"') < 0) continue;      // 绝大多数文件不含派活，快速跳过
+          scannedFiles += 1;
+          const parsed = agentUsage.parseAgentCalls(text, { sessionId: name.replace(/\.jsonl$/, '') });
+          for (const item of parsed) records.push(item);
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  // ⭐ 按目录的「记录」开关做**读时过滤** —— 汇总与明细用同一份过滤结果，保持一致
+  const catalog = agentCatalog.readCatalog(DATA_DIR);
+  const data = {
+    ok: true,
+    scannedFiles,
+    skippedOld,
+    summary: agentUsage.summarizeUsage(records, catalog),
+    records: agentCatalog.filterRecords(catalog, records).slice(-80),   // 明细只回最近 80 条，避免响应体过大
+  };
+  agentUsageCache = { at: Date.now(), data };
+  return Object.assign({ cached: false }, data);
+}
+
 /* ================= 免打扰模块（No-Disturb）：基于 WorkBuddy 官方 sandbox 配置通道 ================= */
 // 原理（逆向 app.asar 内 cli/dist/codebuddy.js）：
 //  - CLI 的沙箱入口 shouldSandbox() 读 settings.json 的 sandbox 键：命中 excludedCommands 直接本地执行，
@@ -14186,6 +14488,22 @@ function handleApiRoute(req, res) {
     );
   }
 
+  // ⭐ 官方 5.7.3 的定时任务（**只读**）。见 readOfficialAutomations 的注释：
+  //    插件看不见官方任务会导致「重复执行」与「同一分钟抢会话/抢账号」两个后果。
+  //    同时返回「同槽位冲突」（只判定 daily，理由见 findOfficialSlotConflicts）。
+  if (req.method === 'GET' && p === '/api/official-automations') {
+    return (async () => {
+      const official = await readOfficialAutomations();
+      const tasks = readAutomations(DATA_DIR);
+      return json(res, 200, {
+        ok: true,
+        official,
+        pluginTaskCount: Array.isArray(tasks) ? tasks.length : 0,
+        conflicts: official.supported && official.count ? findOfficialSlotConflicts(official, tasks) : [],
+      });
+    })();
+  }
+
   if (req.method === 'GET' && p === '/api/automations/capabilities') {
     return json(res, 200, { ok: true, schemaVersion: AUTOMATION_SCHEMA_VERSION, supportedSchemaVersions: [1, 2, 3], capabilities: AUTOMATION_CAPABILITIES.filter(item => item.available !== false), protocolZh: automationCapabilityText('zh'), protocolEn: automationCapabilityText('en') });
   }
@@ -14836,6 +15154,72 @@ function handleApiRoute(req, res) {
         return json(res, 500, { ok: false, error: e.message });
       }
     });
+  }
+
+  if (req.method === 'GET' && p === '/api/agent-hint') {
+    // 额外回「可委派模型数」—— 面板据此解释"为什么开关打不开"
+    const delegatable = agentCatalog.delegatable(agentCatalog.readCatalog(DATA_DIR));
+    return json(res, 200, { ok: true, ...getAgentHintState(), delegatableCount: delegatable.length, delegatable });
+  }
+
+  if (req.method === 'POST' && p === '/api/agent-hint-set') {
+    return readBody(req).then((body) => {
+      try {
+        const state = setAgentHint(!!body.enabled);
+        log(`[agent-hint] 子 Agent 提示开关已${state.enabled ? '开启' : '关闭'}`
+          + `（${state.enabled ? '已写入全局自定义指令' : '已从全局自定义指令移除'}）`);
+        return json(res, 200, { ok: true, ...state });
+      } catch (e) {
+        // ⚠️「没有可委派的模型」是**用户可修正**的状态 ⇒ 400，不是 500
+        const code = (e && e.code) || '';
+        return json(res, code === 'NO_DELEGATABLE_MODEL' ? 400 : 500, { ok: false, error: e.message, code });
+      }
+    });
+  }
+
+  // 子 Agent「模型目录」（**声明制**，与具体 AI 解耦）：用户在模型页声明每个模型的性质、
+  // 是否计入记录、是否写进「可委派」提醒。存插件自己的目录，**不碰官方 models.json**。
+  if (req.method === 'GET' && p === '/api/agent-catalog') {
+    const catalog = agentCatalog.readCatalog(DATA_DIR);
+    return json(res, 200, { ok: true, defaults: catalog.defaults, entries: catalog.entries });
+  }
+  if (req.method === 'POST' && p === '/api/agent-catalog') {
+    return readBody(req).then((body) => {
+      try {
+        const id = String((body && body.id) || '').trim();
+        const saved = agentCatalog.setEntry(DATA_DIR, id, {
+          kind: body && body.kind,
+          record: body && body.record,
+          delegate: body && body.delegate,
+          label: body && body.label,
+        });
+        log(`[agent-catalog] ${id} → kind=${saved.kind} record=${saved.record} delegate=${saved.delegate}`);
+        // ⚠️⚠️ 必须**清掉使用记录的缓存** —— 统计是按目录做「读时过滤」的，而它带 5 分钟缓存；
+        //    不清的话用户改完声明**看不到任何变化**，会以为功能坏了（实测第一次就踩到）。
+        agentUsageCache = { at: 0, data: null };
+        // ⚠️ 提醒块是**按目录动态生成**的 ⇒ 改了 delegate 必须**立即重算已注入的那一份**，
+        //    否则用户以为改好了、上下文里却还是旧文案（要等下次开关或重启才变）。
+        if (getAgentHintState().enabled) {
+          try {
+            setAgentHint(true);
+          } catch (e2) {
+            // 把「可委派」全关掉 ⇒ 块为空 ⇒ 应顺势摘掉旧块（而不是留一份过期的）
+            if (e2 && e2.code === 'NO_DELEGATABLE_MODEL') {
+              try { setAgentHint(false); log('[agent-catalog] 已无可委派模型，提醒块已摘除'); } catch (_) {}
+            }
+          }
+        }
+        return json(res, 200, { ok: true, entry: saved });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: e.message });
+      }
+    });
+  }
+
+  // 子 Agent 的使用记录与专长分析（扫会话 jsonl，**只读**，带 5 分钟缓存）
+  if (req.method === 'GET' && p === '/api/agent-usage') {
+    try { return json(res, 200, collectAgentUsage()); }
+    catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
 
   if (req.method === 'GET' && p === '/api/zh-reasoning') {
@@ -16659,7 +17043,23 @@ function handleApiRoute(req, res) {
     } catch (e) {
       officialError = e.message;
     }
-    return json(res, 200, { ok: true, file: workbuddyModelsFile(), official, officialError, backups: listModelBackups(DATA_DIR), imports: listInstalledModelSources(PROFILE.id) });
+    // ⭐ 顺带把「子 Agent 目录」一起回（含 defaults 兜底后的**生效值**）——
+    //    模型页要在每行直接渲染 kind/record/delegate，前端不该为此再发一次请求。
+    const catalog = agentCatalog.readCatalog(DATA_DIR);
+    const agentEntries = {};
+    for (const m of official) {
+      const id = String((m && m.id) || '').trim();
+      if (id) agentEntries[id] = agentCatalog.resolveEntry(catalog, id);
+    }
+    return json(res, 200, {
+      ok: true,
+      file: workbuddyModelsFile(),
+      official,
+      officialError,
+      backups: listModelBackups(DATA_DIR),
+      imports: listInstalledModelSources(PROFILE.id),
+      agentCatalog: { defaults: catalog.defaults, entries: agentEntries },
+    });
   }
   if (req.method === 'POST' && p === '/api/models/import') {
     return readBody(req).then((body) => {
@@ -17313,7 +17713,18 @@ function handleApiRoute(req, res) {
         }
         const run = await purgeCloudConversations(items);
         const summary = cloudCleanup.summarizePurgeRun(run);
-        log('[cloud-ghosts] 清理云端残留 ' + JSON.stringify({ currentUid: currentUid.slice(0, 8), ...summary }));
+        // ⭐ 2026-10-01（全面审查 P-3）：**只加日志澄清，不动 `failed` 的结构**。
+        //    为什么不动结构：`failed[]` 里含 `other-account` 是**既有契约** ——
+        //    `test-cloud-ghosts.js` 的 D12 断言锁着「指定非当前账号 → other-account 拦下」必须出现在
+        //    `failed[0]`（且「根本不碰云端」）。改结构会打破它，收益却不值。
+        //    但 `other-account` 语义上是**保护性跳过**（该项不属于当前账号、按设计就不该删），
+        //    不标注会让日志读起来像「每次清理都失败一条」⇒ 在日志里点明来源即可。
+        const otherAccountCount = Number((summary.reasons && summary.reasons['other-account']) || 0);
+        log('[cloud-ghosts] 清理云端残留 ' + JSON.stringify(Object.assign(
+          { currentUid: currentUid.slice(0, 8) },
+          summary,
+          otherAccountCount ? { note: '其中 ' + otherAccountCount + ' 条属于其它账号（保护性跳过，非失败）' } : {}
+        )));
         return json(res, 200, { ok: true, ...run, summary, currentUid });
       } catch (e) {
         return json(res, 500, { ok: false, error: e.message });
@@ -18616,6 +19027,46 @@ initBuiltinAssets();
 refreshAskModeIfEnabled();
 // 启动时刷新中文思考规则到最新版本（已启用时替换旧规则段）
 refreshZhReasoningIfEnabled();
+// 本地子 Agent 提示：如已开启，启动时把规则刷新为最新版本（用标记精确识别）
+// ⚠️ 顺序有讲究：**先把官方模型列进目录 → 再从旧规则迁移声明 → 最后才刷新提醒块**。
+//    因为新版提醒块是**按目录动态生成**的，目录为空 ⇒ 块为空 ⇒ 会被判成"无可委派"而摘除。
+try {
+  const officialIds = listOfficialModels().map((m) => String((m && m.id) || '').trim()).filter(Boolean);
+  if (officialIds.length) agentCatalog.ensureEntries(DATA_DIR, officialIds);
+} catch (e) {
+  log('[agent-catalog] 初始化目录失败: ' + e.message);
+}
+/**
+ * 迁移：旧版把模型名**硬编码**在提醒规则文案里（`model="xxx"`）。
+ * 升级到「声明制」后要把它**从实际配置里读出来**补进目录 ——
+ * 否则用户原有的提醒行为会**无声失效**（那是最糟的升级体验）。
+ * ⚠️ 这里**不写死任何模型名**：名字是从用户自己的 customPrompt 里解析的。
+ * ⚠️ 幂等：已经声明过 `delegate` 的模型**不覆盖**（尊重用户的决定）。
+ */
+function migrateAgentHintModel() {
+  try {
+    const settings = readWorkbuddySettings();
+    const cp = (settings.personalization && settings.personalization.customPrompt) || '';
+    if (cp.indexOf(AGENT_HINT_TAG_START) < 0) return;      // 从没开过提醒 ⇒ 无需迁移
+    const m = /model="([^"]+)"/.exec(cp);
+    if (!m) return;
+    const id = String(m[1]).trim();
+    if (!id) return;
+    const catalog = agentCatalog.readCatalog(DATA_DIR);
+    const entry = agentCatalog.resolveEntry(catalog, id);
+    if (entry.declared && entry.delegate) return;          // 已声明过 ⇒ 不覆盖
+    agentCatalog.setEntry(DATA_DIR, id, {
+      kind: entry.declared ? entry.kind : 'unknown',       // 不替用户判断性质
+      record: true,
+      delegate: true,
+    });
+    log('[agent-catalog] 已从旧提醒规则迁移模型声明: ' + id);
+  } catch (e) {
+    log('[agent-catalog] 迁移失败: ' + e.message);
+  }
+}
+migrateAgentHintModel();
+refreshAgentHintIfEnabled();
 // 启动时补偿持续会话指令块（开关开启但 app-config 块缺失/被改写时补写）
 refreshAutoContinueIfEnabled();
 refreshGatewayIfEnabled();

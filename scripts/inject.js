@@ -1316,6 +1316,56 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // 同名键**后者胜**，所以这里只补真正缺的词条；'每月日期' 是刻意造的长键，
     // 用来避开已有的裸 '日期' 词条把标签撕成中英混合。
     '触发时间': 'Trigger time', '每月日期': 'Day of month',
+    // 2026-10-01：官方 5.7.3 也有定时任务了 ⇒ 面板新增「官方任务 + 该用哪个」区块。
+    // ⚠️ 引导语**一律整句一条**（不要把「用官方」这类短语夹在句子中间）——
+    //    扫描器是「按位置最长匹配」，夹在中间的短词会漏译成中英混合。
+    '官方定时任务': 'Official scheduled tasks',
+    '该用哪个？': 'Which one should I use?',
+    '让 AI 定时干活（查资料 / 领券 / 巡检 / 刷新看板）→ 用官方': 'Let AI do the work on schedule (research, claims, checks, refreshing boards) → use the official one',
+    '要操作界面 / 管多个账号 / 调接口 / 按条件分支 → 用本插件': 'UI actions / multiple accounts / HTTP calls / conditional branching → use WorkDaddy',
+    '官方这类任务做得很全，还能推微信；插件这类任务官方做不了': 'Official covers the first case well and can push to WeChat; the second case is beyond official',
+    '官方暂无定时任务': 'No official scheduled tasks yet',
+    '官方任务': 'Official task',
+    '下次': 'Next',
+    '推送微信': 'Push to WeChat',
+    '与本插件任务同一分钟触发，注意别重复': 'Fires in the same minute as a WorkDaddy task — avoid duplicates',
+    '当前客户端没有官方定时任务功能': 'This client has no official scheduled-task feature',
+    '读取官方任务失败': 'Could not read official tasks',
+    // 2026-10-01：本地子 Agent 提醒开关 + 使用记录（用户需求）
+    '本地子 Agent': 'Local sub-agent',
+    '在每个会话里提醒 AI 可用（关闭后既不提醒也不注入）': 'Remind the AI in every session (when off, no reminder and nothing is injected)',
+    '派活次数': 'Delegations',
+    '成功率': 'Success rate',
+    '本地承担': 'Handled locally',
+    '漏到云端': 'Leaked to cloud',
+    '按任务类别': 'By task category',
+    '读不到使用记录': 'Could not read usage history',
+    '暂无派活记录': 'No delegations recorded yet',
+    // 2026-10-01 补：成功率的**口径**必须显示出来 —— 官方 status 恒为 completed，
+    // 成功率只能看输出正文（见 agent-usage.js 文件头），分母是「已有结果的派活」。
+    ' 次 · 成功 ': ' runs · OK ',
+    '，失败 ': ', failed ',
+    '被中断': 'Interrupted',
+    '成功率的分母是「已有结果的派活」': 'Success rate is measured over delegations that returned a result',
+    // 2026-10-01 补：模型页整合「子 Agent 能力」（与具体 AI 解耦；**不含任何模型名**）
+    '子 Agent': 'Sub-agent',
+    '类型': 'Type',
+    '本地': 'Local',
+    '云端': 'Cloud',
+    '未定': 'Undecided',
+    '可委派': 'Delegatable',
+    '记录': 'Record',
+    '计入记录': 'Tracked',
+    '派活': 'Delegations',
+    '未指定': 'Unspecified',
+    '统计不可用': 'Stats unavailable',
+    '统计加载中…': 'Loading stats…',
+    '从未派活': 'Never delegated to',
+    '保存失败': 'Save failed',
+    '子 Agent 配置已保存': 'Sub-agent settings saved',
+    '请先填写模型 ID，才能配置子 Agent 属性': 'Fill in the model ID first to configure sub-agent settings',
+    '勾选后写进「提醒 AI 可用」的规则': 'When checked, written into the "sub-agent available" reminder',
+    '取消勾选则不计入使用台账': 'When unchecked, excluded from the usage ledger',
     '留空则按命令首行自动命名': 'Leave blank to name it after the first line of the command',
     '保存并排定': 'Save and schedule', '保持当前模型': 'Keep current model',
     '（无可用账号）': '(No account available)',
@@ -1999,6 +2049,19 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var e = ev && ev.error !== undefined ? ev.error : (ev && ev.reason);
         if (e instanceof Error) { msg = e && e.message; stack = e && e.stack; }
         else if (e && e.message) { msg = e.message; stack = e.stack; }
+        // ⭐ 2026-10-01（全面审查 P-4）：原来这里直接走 `String(e)` ⇒ 当 `ev.error === null` 时
+        //    msg 会被记成字符串 "null"。实测日志里 133 条崩溃记录**全都是 `error: null`**，
+        //    等于根因永久丢失（事后已无法追溯那次渲染进程为什么崩）。
+        //    现在按三种情况兜底，**绝不允许再记成 null**：
+        //    · 空值  ⇒ 明写「(无错误对象)」并带上事件类型 kind 与是否带 reason（当时唯一可得的线索）
+        //    · 对象  ⇒ 安全序列化并截断（可能是带自定义载荷的事件对象）
+        //    · 其他  ⇒ String()
+        else if (e === null || e === undefined) {
+          msg = '(无错误对象) kind=' + kind + ' 事件字段=' + (ev ? Object.keys(ev).join(',') : '(无)');
+        }
+        else if (typeof e === 'object') {
+          try { msg = JSON.stringify(e).slice(0, 500); } catch (_) { msg = '(不可序列化对象)'; }
+        }
         else { msg = String(e); }
       } catch (_) {}
       var line = '[wbscrash] ' + kind + ': ' + msg + (stack ? '\n' + stack : '');
@@ -9395,6 +9458,157 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         else toast('元素拾取器尚未加载', true, root);
       }
       automationPane.innerHTML = '<div class="wbs-pcard wbs-auto-card"><div class="wbs-auto-toolbar"><div class="wbs-pcard-title">自动化<span class="wbs-pcard-sub" id="wbs-auto-count"></span></div><button type="button" class="wbs-auto-textbtn" id="wbs-auto-cap">查看接口说明</button><div class="wbs-auto-toolbar-actions"><div class="wbs-auto-normal-actions" id="wbs-auto-normal-actions"><button class="wbs-sess-bbtn wbs-auto-pick-btn is-loading" type="button" id="wbs-auto-discover" disabled>' + AUTO_DISCOVER_SVG + '<span>正在发现…</span></button><button class="wbs-sess-bbtn wbs-auto-pick-btn" type="button" id="wbs-auto-pick">' + AUTO_PICK_SVG + '<span>拾取元素</span></button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-create">让 WorkBuddy 帮我创建</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-new">新建任务</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-sched">定时发送</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-import" title="选择 JSON 或 ZIP 任务文件">' + IMPORT_ICON + '<span>导入</span></button><input type="file" id="wbs-auto-import-file" accept=".json,.zip,application/json,application/zip" hidden><button class="wbs-sess-bbtn" type="button" id="wbs-auto-batch">批量操作</button></div><div class="wbs-auto-batch-actions" id="wbs-auto-batch-actions" style="display:none"><span class="wbs-auto-batch-count" id="wbs-auto-batch-count">已选 0</span><button class="wbs-sess-bbtn" type="button" id="wbs-auto-select-all">全选</button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-export" disabled>' + EXPORT_ICON + '<span>导出</span></button><button class="wbs-sess-bbtn wbs-sess-delbtn" type="button" id="wbs-auto-batch-apply">' + TRASH_SVG + '<span>删除选中</span></button><button class="wbs-sess-bbtn" type="button" id="wbs-auto-batch-cancel">取消</button></div></div></div><div class="wbs-auto-list" id="wbs-auto-list"></div></div>';
+      /* ⭐ 2026-10-01（官方定时任务评估 · 融合动作 2/3/5）：
+         官方 WorkBuddy 5.7.3 也做了定时任务（范式与插件不同：官方「定时跑一段 prompt」，
+         插件「定时执行自动化步骤」）。两边各配一套的后果是**重复执行**或**抢会话/抢账号**。
+         ⇒ 在自动化卡片下方补一块「官方任务 + 该用哪个」的引导。
+         · 数据来自 daemon 的 GET /api/official-automations —— **只读**官方表，绝不写。
+         · 官方任务列表整块标 data-wbs-i18n-skip（里面全是动态数据，按本仓「文案与数据分元素」的约定）；
+           引导语是静态文案，已**整句入典**。 */
+      function wbsOfficialEsc(text) {
+        return String(text == null ? '' : text)
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      }
+
+      function wbsOfficialCardHTML() {
+        var box = 'padding:8px 10px;border-radius:8px;background:var(--wb-bg-tertiary,#f5f5f5);'
+          + 'font-size:11px;line-height:1.75;margin:8px 0';
+        return '<div class="wbs-pcard" id="wbs-official-card">'
+          + '<div class="wbs-pcard-title">官方定时任务<span class="wbs-pcard-sub" id="wbs-official-count"></span></div>'
+          + '<div style="' + box + '">'
+          + '<div><b>该用哪个？</b></div>'
+          + '<div>· 让 AI 定时干活（查资料 / 领券 / 巡检 / 刷新看板）→ 用官方</div>'
+          + '<div>· 要操作界面 / 管多个账号 / 调接口 / 按条件分支 → 用本插件</div>'
+          + '<div style="opacity:.75">官方这类任务做得很全，还能推微信；插件这类任务官方做不了</div>'
+          + '</div>'
+          + '<div id="wbs-official-list" data-wbs-i18n-skip></div>'
+          + '</div>';
+      }
+
+      function wbsOfficialEmpty(message) {
+        return '<div style="font-size:11px;opacity:.75;padding:4px 0">' + message + '</div>';
+      }
+
+      function wbsLoadOfficial() {
+        var host = automationPane.querySelector('#wbs-official-list');
+        if (!host) return;
+        var render = function (result) {
+          var countEl = automationPane.querySelector('#wbs-official-count');
+          var off = (result && result.official) || {};
+          if (!off.supported) { host.innerHTML = wbsOfficialEmpty('当前客户端没有官方定时任务功能'); return; }
+          var items = off.items || [];
+          if (countEl) countEl.textContent = items.length ? ('共 ' + items.length + ' 条') : '';
+          if (!items.length) { host.innerHTML = wbsOfficialEmpty('官方暂无定时任务'); return; }
+          var html = items.map(function (item) {
+            var bits = [];
+            if (item.nextSlot) bits.push('下次 ' + String(item.nextSlot).replace('T', ' '));
+            if (item.modelId) bits.push(String(item.modelId));
+            if (item.pushToWechat) bits.push('推送微信');
+            if (item.pushToWecomBot) bits.push('企微机器人');
+            return '<div style="display:flex;gap:8px;align-items:baseline;padding:3px 0;font-size:11px">'
+              + '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+              + wbsOfficialEsc(item.name || item.id) + '</span>'
+              + '<span style="opacity:.7;white-space:nowrap">' + wbsOfficialEsc(bits.join(' · ')) + '</span></div>';
+          }).join('');
+          if ((result.conflicts || []).length) {
+            html += '<div style="margin-top:6px;font-size:11px;color:#b26a00">'
+              + '与本插件任务同一分钟触发，注意别重复</div>';
+          }
+          host.innerHTML = html;
+        };
+        try {
+          fetch(API + '/api/official-automations', { headers: { 'X-WorkDaddy-Token': WBS_API_TOKEN } })
+            .then(function (response) { return response.json(); })
+            .then(render)
+            .catch(function () { host.innerHTML = wbsOfficialEmpty('读取官方任务失败'); });
+        } catch (_) {
+          host.innerHTML = wbsOfficialEmpty('读取官方任务失败');
+        }
+      }
+
+      /* ⭐ 2026-10-01（用户需求）：把「你有一个可用的本地子 Agent」做成**可开关的提醒**，
+         并把每次派活记下来，便于分析它擅长什么。
+         · 提醒写进官方全局自定义指令（settings.personalization.customPrompt）
+           ⇒ **每个会话开局都会看到**（解决"上下文一多就忘了它存在"）
+         · 关闭时**既不提醒也不注入**：规则整段从 customPrompt 摘掉，用户自己的指令原样保留
+         · 使用记录来自会话 jsonl（**只读**），不依赖任何外部服务 */
+      function wbsAgentCardHTML() {
+        var note = 'padding:8px 10px;border-radius:8px;background:var(--wb-bg-tertiary,#f5f5f5);'
+          + 'font-size:11px;line-height:1.75;margin:8px 0';
+        return '<div class="wbs-pcard" id="wbs-agent-card">'
+          + '<div class="wbs-pcard-title">本地子 Agent<span class="wbs-pcard-sub" id="wbs-agent-sub"></span></div>'
+          + '<label style="display:flex;align-items:flex-start;gap:8px;margin:8px 0;font-size:12px;cursor:pointer">'
+          + '<input type="checkbox" id="wbs-agent-toggle" style="margin-top:3px">'
+          + '<span>在每个会话里提醒 AI 可用（关闭后既不提醒也不注入）</span></label>'
+          + '<div style="' + note + '" data-wbs-i18n-skip id="wbs-agent-usage"></div>'
+          + '</div>';
+      }
+
+      function wbsLoadAgent() {
+        var usageHost = automationPane.querySelector('#wbs-agent-usage');
+        var toggle = automationPane.querySelector('#wbs-agent-toggle');
+        var subEl = automationPane.querySelector('#wbs-agent-sub');
+        if (!usageHost || !toggle) return;
+
+        fetch(API + '/api/agent-hint', { headers: { 'X-WorkDaddy-Token': WBS_API_TOKEN } })
+          .then(function (r) { return r.json(); })
+          .then(function (state) {
+            toggle.checked = !!(state && state.enabled);
+            if (subEl) subEl.textContent = (state && state.enabled) ? '提醒已开' : '提醒已关';
+          })
+          .catch(function () {});
+
+        toggle.addEventListener('change', function () {
+          var want = !!toggle.checked;
+          fetch(API + '/api/agent-hint-set', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'X-WorkDaddy-Token': WBS_API_TOKEN },
+            body: JSON.stringify({ enabled: want }),
+          }).then(function (r) { return r.json(); }).then(function (state) {
+            toggle.checked = !!(state && state.enabled);
+            if (subEl) subEl.textContent = state && state.enabled ? '提醒已开' : '提醒已关';
+            toast(state && state.enabled ? '已开启：每个会话都会提醒 AI 可用本地子 Agent' : '已关闭：不再提醒、也不再注入', false, root);
+          }).catch(function () {
+            toggle.checked = !want;   // 失败回滚勾选状态，别让界面骗人
+            toast('设置失败', true, root);
+          });
+        });
+
+        fetch(API + '/api/agent-usage', { headers: { 'X-WorkDaddy-Token': WBS_API_TOKEN } })
+          .then(function (r) { return r.json(); })
+          .then(function (result) {
+            var s = (result && result.summary) || {};
+            if (!s.total) { usageHost.innerHTML = '暂无派活记录'; return; }
+            var groups = Object.keys(s.byGroup || {}).sort(function (a, b) {
+              return s.byGroup[b].count - s.byGroup[a].count;
+            });
+            var rows = groups.map(function (name) {
+              var g = s.byGroup[name];
+              return '<div style="display:flex;gap:8px;justify-content:space-between">'
+                + '<span>' + wbsOfficialEsc(name) + '</span>'
+                + '<span style="opacity:.75">' + g.count + ' 次 · 成功 ' + (g.succeeded || 0)
+                + (g.failed ? '，失败 ' + g.failed : '') + '</span></div>';
+            }).join('');
+            usageHost.innerHTML =
+              '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px">'
+              + '<span>派活次数 <b>' + s.total + '</b></span>'
+              + '<span>成功率 <b>' + s.successRate + '%</b></span>'
+              + '<span>本地承担 <b>' + s.localCount + '</b></span>'
+              + '<span>漏到云端 <b>' + s.fallbackCount + '</b></span>'
+              + (s.unknownCount ? '<span>被中断 <b>' + s.unknownCount + '</b></span>' : '')
+              + '</div>'
+              + '<div style="opacity:.6;font-size:11px;margin-bottom:6px">成功率的分母是「已有结果的派活」</div>'
+              + (s.sampleWarning ? '<div style="opacity:.6;font-size:11px;margin-bottom:4px">' + wbsOfficialEsc(s.sampleWarning) + '</div>' : '')
+              + '<div style="opacity:.75;margin-bottom:4px">按任务类别</div>' + rows;
+          })
+          .catch(function () { usageHost.innerHTML = '读不到使用记录'; });
+      }
+
+      automationPane.insertAdjacentHTML('beforeend', wbsAgentCardHTML());
+      wbsLoadAgent();
+      automationPane.insertAdjacentHTML('beforeend', wbsOfficialCardHTML());
+      wbsLoadOfficial();
       automationPane.querySelector('#wbs-auto-import').addEventListener('click', function () { automationPane.querySelector('#wbs-auto-import-file').click(); });
       automationPane.querySelector('#wbs-auto-import-file').addEventListener('change', readAutomationImport);
       automationPane.querySelector('#wbs-auto-export').addEventListener('click', exportAutomationTasks);
@@ -11013,7 +11227,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
 
     // ===== 模型 pane（当前模型 + WorkDaddy 本地备份） =====
-    var modelsState = { tab: 'official', official: [], groups: [], imports: [], selected: {}, batch: false, officialError: '' };
+    // ⭐ 2026-10-01：模型页整合「子 Agent 能力」——
+    //    agentDefaults 来自 /api/models 的 agentCatalog（后端已用 defaults 兜底，前端**不猜**）
+    //    agentStats/agentSummary 来自 /api/agent-usage（**独立降级**：它挂了不影响模型列表）
+    //    ⚠️ 三态要分清：`undefined` = 还没加载 / `null` = 加载失败 / 对象 = 结果
+    //       （我第一版把"未加载"和"失败"都写成 null ⇒ 界面永远显示"统计不可用"，实测抓到）
+    var modelsState = { tab: 'official', official: [], groups: [], imports: [], selected: {}, batch: false, officialError: '', agentDefaults: null, agentStats: undefined, agentSummary: undefined };
     function buildModelsPane() {
       if (!modelsPane) return;
       modelsPane.dataset.built = '1';
@@ -11035,6 +11254,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<button class="wbs-sess-bbtn wbs-sess-done" type="button" id="wbs-model-done">取消</button>' +
         '</div>' +
         '</div>' +
+        '<div class="wbs-agent-summary" id="wbs-model-agent-summary" style="display:none"></div>' +
         '<div class="wbs-model-tip" id="wbs-model-tip" style="display:none"><span class="wbs-model-tip-ico">' + MODEL_TIP_SVG + '</span><strong>小贴士</strong><span>解决 WorkBuddy 不支持多个同名模型的问题。</span></div>' +
         '<div class="wbs-model-list" id="wbs-model-list"><div class="wbs-empty">加载中…</div></div>' +
         '</div>' +
@@ -11087,18 +11307,145 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '</div>' +
         '<div class="wbs-model-tag-row">' + tags + '</div>' +
         modelDetailsHtml(model) +
+        agentBlockHtml(model, options) +
         '</div></div>';
+    }
+
+    /* ================= ⭐ 子 Agent 能力（2026-10-01 整合进模型页）=================
+       设计原则（用户要求「与具体 AI 解耦」）：
+         · **不硬编码任何模型名** —— 数据全部来自 `modelsState.agentDefaults.entries[id]`
+           （后端已用 defaults 兜底），前端只负责画
+         · 三个控件**改动即存**，失败**回滚控件状态**（不让界面骗人）
+         · 统计来自另一个接口 ⇒ **独立降级**：它挂了不影响模型列表渲染
+       ============================================================================ */
+    function kindLabelOf(kind) {
+      if (kind === 'local') return '本地';
+      if (kind === 'cloud') return '云端';
+      return '未定';
+    }
+
+    /** 每行底部的「子 Agent」区块。⚠️ 只在「当前模型」tab 显示（备选模型没生效 ⇒ 统计无意义）。 */
+    function agentBlockHtml(model, options) {
+      if (!options.official) return '';
+      var id = String(model.id || '').trim();
+      if (!id) {
+        return '<div class="wbs-agent-block"><span class="wbs-agent-noid">请先填写模型 ID，才能配置子 Agent 属性</span></div>';
+      }
+      var entry = ((modelsState.agentDefaults || {}).entries || {})[id] || {};
+      var kind = entry.kind || 'unknown';
+      var record = entry.record !== false;
+      var delegate = entry.delegate === true;
+      var stat = (modelsState.agentStats || {})[id] || null;
+
+      var statText;
+      if (modelsState.agentStats === undefined) statText = '统计加载中…';
+      else if (modelsState.agentStats === null) statText = '统计不可用';
+      else if (!stat) statText = '从未派活';
+      else {
+        // ⚠️ 分母必须是「**已有结果的派活**」（succeeded+failed），**不是** count ——
+        //    否则会与顶部汇总条的口径打架（实测第一版就是 count，同一模型两处显示 59.8% vs 62.0%）。
+        var paired = (stat.succeeded || 0) + (stat.failed || 0);
+        var rate = paired ? Math.round((stat.succeeded / paired) * 1000) / 10 : 0;
+        statText = '派活 ' + stat.count + ' · 成功 ' + stat.succeeded
+          + (stat.failed ? ' · 失败 ' + stat.failed : '') + ' · ' + rate + '%';
+      }
+
+      return '<div class="wbs-agent-block" data-agent-for="' + escAttr(id) + '">'
+        + '<div class="wbs-agent-head">'
+        + '<span class="wbs-agent-dot wbs-agent-dot-' + escAttr(kind) + '"></span>'
+        + '<span class="wbs-agent-label">子 Agent</span>'
+        + '<span class="wbs-agent-kind">' + esc(kindLabelOf(kind)) + '</span>'
+        + '<span class="wbs-agent-stat" data-wbs-i18n-skip>' + esc(statText) + '</span>'
+        + '</div>'
+        + '<div class="wbs-agent-controls">'
+        + '<label class="wbs-agent-ctl"><span class="wbs-agent-ctl-name">类型</span>'
+        + '<select class="wbs-agent-select" data-agent-kind="' + escAttr(id) + '">'
+        + '<option value="local"' + (kind === 'local' ? ' selected' : '') + '>' + esc(kindLabelOf('local')) + '</option>'
+        + '<option value="cloud"' + (kind === 'cloud' ? ' selected' : '') + '>' + esc(kindLabelOf('cloud')) + '</option>'
+        + '<option value="unknown"' + (kind === 'unknown' ? ' selected' : '') + '>' + esc(kindLabelOf('unknown')) + '</option>'
+        + '</select></label>'
+        + '<label class="wbs-agent-ctl" title="勾选后写进「提醒 AI 可用」的规则"><input type="checkbox" data-agent-delegate="' + escAttr(id) + '"' + (delegate ? ' checked' : '') + '><span>可委派</span></label>'
+        + '<label class="wbs-agent-ctl" title="取消勾选则不计入使用台账"><input type="checkbox" data-agent-record="' + escAttr(id) + '"' + (record ? ' checked' : '') + '><span>记录</span></label>'
+        + '</div></div>';
+    }
+
+    /** 顶部汇总条（**只在「当前模型」tab 显示**）。 */
+    function renderAgentSummary() {
+      var host = modelsPane && modelsPane.querySelector('#wbs-model-agent-summary');
+      if (!host) return;
+      if (modelsState.tab !== 'official' || !modelsState.agentDefaults) { host.style.display = 'none'; return; }
+      var entries = (modelsState.agentDefaults || {}).entries || {};
+      var ids = Object.keys(entries);
+      var recordOn = ids.filter(function (id) { return entries[id].record !== false; }).length;
+      var delegateOn = ids.filter(function (id) { return entries[id].delegate === true; }).length;
+      var s = modelsState.agentSummary;
+      var parts = [];
+      parts.push('<span>可委派 <b>' + delegateOn + '</b></span>');
+      parts.push('<span>计入记录 <b>' + recordOn + '/' + ids.length + '</b></span>');
+      if (s) {
+        parts.push('<span>派活 <b>' + s.total + '</b></span>');
+        parts.push('<span>成功率 <b>' + s.successRate + '%</b></span>');
+        parts.push('<span>本地 <b>' + s.localCount + '</b></span>');
+        parts.push('<span>未指定 <b>' + s.unspecifiedCount + '</b></span>');
+      }
+      // ⚠️ 统计里有、模型页却没有的模型 —— 必须提示，否则用户会困惑（"这个模型哪来的？"）
+      var unlisted = [];
+      if (modelsState.agentStats) {
+        Object.keys(modelsState.agentStats).forEach(function (k) {
+          if (k && k.indexOf('(未指定') < 0 && !entries[k]) unlisted.push(k);
+        });
+      }
+      host.innerHTML = '<div class="wbs-agent-sum-row">' + parts.join('') + '</div>'
+        + (unlisted.length ? '<div class="wbs-agent-sum-warn" data-wbs-i18n-skip>有 ' + unlisted.length + ' 个未登记的模型在记录里：' + esc(unlisted.join('、')) + '</div>' : '');
+      host.style.display = '';
+    }
+
+    /** 拉使用统计（**独立降级**：失败只影响统计区，不影响模型列表）。 */
+    function loadAgentStats() {
+      return api('/api/agent-usage').then(function (data) {
+        modelsState.agentStats = (data && data.summary && data.summary.byModel) || {};
+        modelsState.agentSummary = (data && data.summary) || null;
+        renderModels();
+      }).catch(function () {
+        modelsState.agentStats = null;   // 约定：null = 统计不可用（与"空对象"区分）
+        modelsState.agentSummary = null;
+        renderModels();
+      });
+    }
+
+    /** 保存单个模型的子 Agent 声明（改动即存；失败回滚控件）。 */
+    function saveAgentEntry(id, patch, el) {
+      var entries = (modelsState.agentDefaults || {}).entries || {};
+      var prev = entries[id] || { kind: 'unknown', record: true, delegate: false };
+      var body = { id: id, kind: patch.kind !== undefined ? patch.kind : prev.kind,
+        record: patch.record !== undefined ? patch.record : prev.record !== false,
+        delegate: patch.delegate !== undefined ? patch.delegate : prev.delegate === true };
+      return api('/api/agent-catalog', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+        .then(function () { return Promise.all([loadModels(), loadAgentStats()]); })
+        .then(function () { toast('子 Agent 配置已保存', false, root); })
+        .catch(function (e) {
+          // ⚠️ **回滚控件状态** —— 不让界面显示一个其实没保存成功的值
+          if (el && el.type === 'checkbox') el.checked = !el.checked;
+          else if (el && el.value !== undefined) el.value = prev.kind || 'unknown';
+          toast((e && e.message) || '保存失败', true, root);
+        });
     }
     function loadModels() {
       if (!modelsPane) return;
       var list = modelsPane.querySelector('#wbs-model-list');
       if (list) list.innerHTML = '<div class="wbs-empty">加载中…</div>';
+      // ⭐ 统计与模型列表是**两个数据源** ⇒ **并行**发起（串行会让统计慢好几秒才出现）
+      loadAgentStats();
       api('/api/models').then(function (data) {
         modelsState.official = data.official || [];
         modelsState.groups = data.backups || [];
         modelsState.imports = data.imports || [];
         modelsState.officialError = data.officialError || '';
+        // ⭐ 子 Agent 目录随模型列表**同一次请求**返回（后端已用 defaults 兜底）—— 不再多发一次
+        modelsState.agentDefaults = data.agentCatalog || null;
         renderModels();
+        // ⭐ 使用统计是**另一个数据源**（会话 jsonl）⇒ 单独拉、**独立降级**
+        loadAgentStats();
       }).catch(function (e) {
         modelsState.official = [];
         modelsState.groups = [];
@@ -11119,6 +11466,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
     function renderModels() {
       if (!modelsPane) return;
+      renderAgentSummary();   // ⭐ 顶部汇总条（自带 tab 判断，独立于列表，放最前面即可）
       var list = modelsPane.querySelector('#wbs-model-list');
       if (!list) return;
       modelsPane.querySelectorAll('.wbs-model-tab').forEach(function (tab) {
@@ -11324,6 +11672,20 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       cancel.focus();
     }
     function wireModelsPane() {
+      // ⭐ 子 Agent 三个控件（类型 / 可委派 / 记录）—— 用**事件委托**绑定，避免逐行挂监听
+      //    （逐行绑定会在每次 renderModels 重渲染后失效，委托不会）
+      modelsPane.addEventListener('change', function (event) {
+        var el = event.target;
+        if (!el || !el.getAttribute) return;
+        var idKind = el.getAttribute('data-agent-kind');
+        var idDel = el.getAttribute('data-agent-delegate');
+        var idRec = el.getAttribute('data-agent-record');
+        var id = idKind || idDel || idRec;
+        if (!id) return;
+        if (idKind) saveAgentEntry(id, { kind: el.value }, el);
+        else if (idDel) saveAgentEntry(id, { delegate: !!el.checked }, el);
+        else saveAgentEntry(id, { record: !!el.checked }, el);
+      });
       listen(document, 'click', function (event) { if (!event.target.closest || !event.target.closest('.wbs-model-third-party')) closeThirdPartyMenu(); });
       modelsPane.addEventListener('keydown', function (event) {
         var menu = modelsPane.querySelector('#wbs-model-source-menu');
@@ -20715,6 +21077,23 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-model-title-row{display:flex;align-items:center;gap:9px;min-width:0;margin-bottom:6px}',
     '.wbs-model-name{min-width:0;flex:0 1 auto;font-size:14px;font-weight:650;color:var(--wb-color-text-primary,#1f1f1f);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.wbs-model-details{display:flex;flex-direction:column;gap:4px;min-width:0}',
+    // ⭐ 2026-10-01：模型页的「子 Agent」区块（与具体 AI 解耦；本地/云端靠**声明**不靠猜）
+    '.wbs-agent-block{margin-top:8px;padding-top:8px;border-top:1px dashed var(--wb-border-default,#e5e5e5)}',
+    '.wbs-agent-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;line-height:1.6}',
+    '.wbs-agent-label{font-weight:600;color:var(--wb-icon-secondary,#666)}',
+    '.wbs-agent-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--wb-icon-tertiary,#bbb)}',
+    '.wbs-agent-dot-local{background:#18a058}',
+    '.wbs-agent-dot-cloud{background:#2080f0}',
+    '.wbs-agent-kind{padding:1px 7px;border-radius:999px;background:var(--wb-bg-tertiary,#f5f5f5);color:var(--wb-icon-secondary,#666)}',
+    '.wbs-agent-stat{margin-left:auto;color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-agent-controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:7px;font-size:12px}',
+    '.wbs-agent-ctl{display:inline-flex;align-items:center;gap:5px;cursor:pointer;color:var(--wb-icon-secondary,#666)}',
+    '.wbs-agent-ctl-name{color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-agent-select{height:24px;padding:0 6px;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:6px;background:transparent;color:var(--wb-color-text-primary,#1f1f1f);font-size:12px}',
+    '.wbs-agent-noid{font-size:12px;color:var(--wb-icon-tertiary,#999)}',
+    '.wbs-agent-summary{margin:8px 0}',
+    '.wbs-agent-sum-row{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--wb-icon-secondary,#666)}',
+    '.wbs-agent-sum-warn{margin-top:4px;font-size:11px;color:#d03050}',
     // 第二行：vendor 标签 + 模型 id 标签
     '.wbs-model-tag-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0;margin-bottom:6px}',
     '.wbs-model-tag{display:inline-flex;align-items:center;max-width:100%;padding:2px 8px;border:1px solid color-mix(in srgb,var(--wb-border-default,#e5e5e5) 85%,transparent);border-radius:999px;background:var(--wb-bg-tertiary,#f0f0f0);color:var(--wb-icon-secondary,#555);font-size:11px;font-weight:500;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',

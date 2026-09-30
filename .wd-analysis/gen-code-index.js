@@ -31,6 +31,17 @@ const TARGETS = [
   // 省 token 专项新增的纯模块（体积不大，但定位 contextAudit/contextFix 的调用点时会用到）
   { rel: 'scripts/context-audit.js' },
   { rel: 'scripts/context-fix.js' },
+  // ⭐ 2026-10-01（全面审查 P-5）：索引原来只覆盖 4 个文件，而 scripts/ 下有 76 个 .js
+  //    ⇒ 「定位小模块里的函数」完全帮不上忙。本次按 **文件大小 × 访问频率** 扩容：
+  //    · 只收 **≥1000 行**的（400 行以下 grep 一下就够，进索引反而把索引撑大、降低可读性）
+  //    · 外加 v1.9.2 新增的核心模块 api-gateway.js（虽只有 400+ 行，但它是独立子系统）
+  //    扩容后覆盖 10 个文件 / 约 4.96 万行（原 4 个 / 4.08 万行），生成仍在一秒内。
+  { rel: 'scripts/lib.js' },            // 2270 行 · 共享库，被 daemon 大量引用
+  { rel: 'scripts/win-launcher.js' },   // 1820 行 · 原生启动器
+  { rel: 'scripts/growth-tasks.js' },   // 1770 行 · 成长任务
+  { rel: 'scripts/automation.js' },     // 1228 行 · 自动化
+  { rel: 'scripts/session-sync.js' },   // 1053 行 · 会话同步核心（⚠️ 该文件是 LF 的生成产物，见会话同步文档）
+  { rel: 'scripts/api-gateway.js' },    // 414 行 · 反代网关（v1.9.2 新子系统，按需定位）
 ];
 
 // 保守取三种「明确是函数定义」的写法，宁可少收也不误收对象属性。
