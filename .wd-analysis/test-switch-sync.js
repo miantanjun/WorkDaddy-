@@ -142,8 +142,16 @@ world.failStart = false;
 section('\n[C] 接线与前端源码断言');
 
 // 三个调用点
-ok(/const autoCopyJob = autoCopyAfterAccountSwitch\(sourceUid, uid, 'switch-api'\);/.test(daemonSrc),
-  'C1 手动切号 /api/switch 改走共享实现');
+// ⭐ 2026-09-30 更新（用户需求变更，不是放宽标准）：手动切号改为「**先同步、再切号**」
+//    ——方案见工作区《WorkDaddy-切号预同步与进度弹窗-设计与评估》，用户明确要求
+//    「不论自动切号还是手动切号，统一改为先复制同步会话、再执行切号」。
+//    本断言原先锁的是旧实现（`const autoCopyJob = autoCopyAfterAccountSwitch(...)`，即**切号之后**
+//    才发起复制）。新实现：预同步成功（preSyncedOnce=true）⇒ 切号后那次**显式跳过**
+//    （复制虽幂等，但幂等省掉的是「重复复制」，省不掉「全量扫描 + 生成 plan」那次读盘）；
+//    未预同步（源=目标 / 源账号无自动复制规则）⇒ 仍调 autoCopyAfterAccountSwitch 作兜底。
+//    断言的**原意**（手动切号不再自己内联一份判定，而走共享实现）依然成立 —— C2 仍在守它。
+ok(/const autoCopyJob = preSyncedOnce \? null : autoCopyAfterAccountSwitch\(sourceUid, uid, 'switch-api'\);/.test(daemonSrc),
+  'C1 手动切号 /api/switch 走共享实现（预同步过则跳过，否则仍调 autoCopyAfterAccountSwitch）');
 ok(!/const hasSourceAutoCopyRules/.test(daemonSrc), 'C2 路由里原来那份内联判定已删除（避免两份实现走样）');
 ok(/autoCopyAfterAccountSwitch\(plan\.toUid, primaryUid, 'limit-failover-switchback'\)/.test(daemonSrc),
   'C3 限流续跑收尾切回：源=续跑账号 → 目标=主账号');

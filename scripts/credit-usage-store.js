@@ -443,6 +443,12 @@ function createCreditUsageStore(options = {}) {
     const timestamp = Number(now === undefined ? Date.now() : now);
     if (!Number.isSafeInteger(timestamp) || timestamp < 0) throw new Error('限流查询时间无效');
     const placeholders = accountUids.map(() => '?').join(',');
+    // ⚠️ 只清「有解封时间且已到点」的行。`reset_at` 为空（官方没给时间）的行**刻意保留** ——
+    //    这是上游 1.2.8 的设计决定（「时间未知 ⇒ 只记不删」，`test-upstream-128.js` C6 有断言锁）。
+    //    2026-09-30 排查 BUG4 时曾把这条改成「按 observed_at 兜底清理」，落地后被 C6 拦下；
+    //    复核实测：这张表**只喂面板徽标**，不参与候选过滤（模型维度可用性走 account-health 的
+    //    `models[].until`，而 `until=0` 不会判不可用）⇒ 残留的实际危害只是「面板上多一条历史记录」，
+    //    不足以抵消「偏离上游」的维护成本。故**维持上游行为**，不再改这里。
     await db.run(
       `DELETE FROM model_rate_limit_records
        WHERE profile_id = ? AND reset_at IS NOT NULL AND reset_at <= ? AND uid IN (${placeholders})`,

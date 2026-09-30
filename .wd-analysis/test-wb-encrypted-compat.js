@@ -324,9 +324,12 @@ const INTENTIONAL = [
 ok(INTENTIONAL.every(([p, n]) => (daemonSrc.split(p).length - 1) === n),
   'F3 另有 2 处属「登录响应明文，刻意不改」（rawToken / data —— 来自服务端而非磁盘文件）');
 
+// 2026-09-30：反代网关的凭证桥（daemon 的 gatewayCollectAccounts）新增 1 处 wdCompatDecryptAuthJson。
+// 它是**接了密的调用**（解密 accounts/*.info 后写 auths/ 喂给网关），不是本断言要防的"未接线的裸读"
+// ⇒ 更新计数而不是回退代码；wdCompatAuthToken 未动，仍为 15。
 ok((daemonSrc.split('wdCompatAuthToken').length - 1) === 15
-  && (daemonSrc.split('wdCompatDecryptAuthJson').length - 1) === 13,
-  'F4 daemon 层已接线：wdCompatAuthToken ×15 / wdCompatDecryptAuthJson ×13（含导入），'
+  && (daemonSrc.split('wdCompatDecryptAuthJson').length - 1) === 14,
+  'F4 daemon 层已接线：wdCompatAuthToken ×15 / wdCompatDecryptAuthJson ×14（含导入），'
   + '数目不符即有人动过接线面');
 
 const importFn = LIB_SRC.slice(LIB_SRC.indexOf('function normalizeAccountImportJson('),

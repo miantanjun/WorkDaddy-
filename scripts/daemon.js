@@ -551,7 +551,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         （删 acIsDarkTheme / watchThemeForButtons / syncAccountFade / syncModelFade）。
 //         同版修复：会话同步冲突误报 / 切号后需再切一次才能同步 / 模型限流写入被服务端白名单拒 /「空间」
 //         分组反复折叠 / 引导会话被暂存队列永久暂停；新增「中文思考」开关（写入官方全局自定义指令）。
-const DAEMON_VERSION = '1.9.1';
+const DAEMON_VERSION = '1.9.2';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.8';
@@ -574,7 +574,7 @@ const UPSTREAM_VERSION = '1.2.8';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.9.1-20260929-upstream-128-absorbed-r1';
+const DAEMON_BUILD_ID = 'release-1.9.2-20261001-gateway-presync-selfheal-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -634,6 +634,8 @@ const creditUsageSyncInFlight = new Map();
 const { selectRotationCandidate, nearestExpiringSegment } = require('./credit-rotation.js');
 const limitFailover = require('./limit-failover.js');
 const structuredError = require('./structured-error.js');
+// 反代网关（sidecar）：第三方 wb2api-panel 的集成层（下载校验 / 凭证桥 / 配置 / 启停）。
+const apiGateway = require('./api-gateway.js');
 // F2：账号健康状态机（429 冷却 / 需重新认证分流）。纯模块，判据唯一真相仍在 limit-failover.js。
 const accountHealth = require('./account-health.js');
 const accountSwitchLog = require('./account-switch-log.js');
@@ -4606,12 +4608,45 @@ async function runLimitFailoverCore(detail, ports) {
       ports.log('limit-failover:try ' + JSON.stringify({ uid: target.uid, nickname: target.nickname || '', reason: pick.reason }));
       try {
         await ports.guard();
+        // ⭐ 2026-09-30：**先同步、再切号**（本次改动的核心，见报告 §2 / §4.1）。
+        // 旧顺序是「切号 → 发起复制」，而切号 = Page.reload ⇒ reload 期间官方 flush「旧账号正在用的
+        // 会话」+ load「新账号的会话」，**正是要被复制的那些文件** ⇒ 撞上 applySnapshot 的 CAS 保护
+        // ⇒ 抛错回滚 → 记 failed → 作业 partial。提前到切号前，复制就落在
+        // 「源账号还活着、且尚未 reload」的**静默期**。
+        // 仍是**可选端口**：测试沙箱不注入 ⇒ 与加这个功能之前逐字等价（既有 5 个切片套件断言一条不用改）。
+        let preSynced = false;
+        if (typeof ports.preSyncTo === 'function') {
+          // ⚠️ 必须自己兜住异常：真实实现（preSyncBeforeSwitch）已保证不抛，但这里再包一层是有意的
+          // —— 若哪天它被改坏而抛错，错误会冒到下面的 per-round catch，那条路会
+          // markAccountBlocked(target,'error')（把一个健康账号写进限流窗口）。宁可折成「预同步失败」。
+          let pre = null;
+          try { pre = await ports.preSyncTo(liveUid, target.uid, { originUid: current.uid, modelId, round }); }
+          catch (error) { pre = { ok: false, error: String((error && error.message) || error) }; }
+          if (!pre || pre.ok !== true) {
+            // 预同步失败 ⇒ **中止整轮**：不换号、也不继续试下一个账号（源账号的会话一份都没搬过去，
+            // 换谁都是错的）。⚠️ 特别注意**不能**走下面的 per-round catch —— 那会
+            // markAccountBlocked(target, 'error')，把一个原本健康的账号写进限流窗口（硬事实，
+            // 整个窗口都不会再被选为接管方），代价远大于收益。
+            ports.log('limit-failover:presync-failed ' + JSON.stringify({ uid: target.uid, error: (pre && pre.error) || '' }));
+            if (typeof ports.flowPhase === 'function') {
+              try { ports.flowPhase('failed', { error: (pre && pre.error) || '', targetUid: target.uid }); } catch (_) {}
+            }
+            await ports.notify('error', '会话同步未完成，已中止切号（内容没搬过去，换号也会丢）');
+            return { ok: false, reason: 'presync-failed', error: (pre && pre.error) || '', tried, fromUid: current.uid, toUid: target.uid, modelId };
+          }
+          preSynced = true;
+        }
+        if (typeof ports.flowPhase === 'function') {
+          try { ports.flowPhase('switching', { targetUid: target.uid, targetNickname: target.nickname || '' }); } catch (_) {}
+        }
         await ports.switchAccount(target);
         // 切号完成后同步会话（与手动切号 / 闲置切回共用同一份实现，daemon 侧注入）。
         // ⚠️ 这里只**发起**：等不等、等多久由下面的 prepareContinuation 决定
         // （它等的是「目标账号里出现这份副本」，不是整个复制任务跑完）。
+        // ⭐ 2026-09-30：**已经预同步过就不再发起**。复制本身幂等（已完成的行按 mapping 判 skipped），
+        // 但幂等省掉的是「重复复制」，省不掉「全量扫描 + 生成 plan」那次读盘 ⇒ 显式跳过，别靠幂等兜。
         let copyJob = null;
-        if (typeof ports.afterAccountSwitch === 'function') {
+        if (!preSynced && typeof ports.afterAccountSwitch === 'function') {
           try { copyJob = ports.afterAccountSwitch(liveUid, target.uid); }
           catch (error) { ports.log('limit-failover:afterAccountSwitch 失败 ' + String((error && error.message) || error)); }
         }
@@ -4672,6 +4707,11 @@ async function runLimitFailoverCore(detail, ports) {
           }
         }
         ports.log('limit-failover:send ' + JSON.stringify({ mode: sentMode, textLength: sentText.length, surface: surface.mode, contentVerified: surface.contentVerified === true, sourceCount: surface.sourceCount || 0, copyCount: surface.copyCount || 0 }));
+        // ⭐ 2026-09-30：进入「续发中」—— 弹窗第三阶段。**只有本路有**（手动切号没有「要续发的任务」），
+        // 用户明确要求把它显示出来（否则弹窗会从「切号中」直接跳到消失，看不出中间发生了什么）。
+        if (typeof ports.flowPhase === 'function') {
+          try { ports.flowPhase('resuming', { toUid: target.uid, conversationId: surface.conversationId || '' }); } catch (_) {}
+        }
         await ports.sendPhrase(sentText);
         if (typeof ports.captureTaskText === 'function') {
           try { ports.captureTaskText({ text: sentText, mode: sentMode, taskSource, surfaceReason: String(surface.reason || '') }); } catch (_) {}
@@ -4712,6 +4752,12 @@ async function runLimitFailoverCore(detail, ports) {
           + (sentMode === 'continue' ? '（只发了一句「继续」，没有重跑）' : '')
           + (modelId ? '（模型 ' + modelId + '）' : ''));
         ports.log('limit-failover:done ' + JSON.stringify({ toUid: target.uid, modelId, surface: surface.mode, sendMode: sentMode, conversationId: surface.conversationId || '' }));
+        // ⭐ 2026-09-30：三阶段全成功 ⇒ 弹窗可自动关闭（用户决策的关闭条件：同步 + 切号 + 续发）。
+        // 注意「续发成功」的口径 = 消息已发出**且未被判定再次限流**（= 本函数走到这里），
+        // 不是「任务跑完」—— 后者可能要几十分钟，弹窗挂那么久不现实，也没必要。
+        if (typeof ports.flowPhase === 'function') {
+          try { ports.flowPhase('done', { toUid: target.uid }); } catch (_) {}
+        }
         return { ok: true, fromUid: current.uid, toUid: target.uid, toNickname: target.nickname || '', modelId, modelSource: modelInfo && modelInfo.model ? 'live' : 'none', taskSource, sendMode: sentMode, tried, verdict, surface };
       } catch (error) {
         lastError = String((error && error.message) || error);
@@ -4750,6 +4796,12 @@ async function runLimitFailoverCore(detail, ports) {
           ? '其他账号需要先重新登录（或已被手动停用），已停止自动切号 —— 请到账号面板看各账号的健康状态'
           : '其他账号都无法接管本次任务，已停止自动切号');
     ports.log('limit-failover:exhausted ' + JSON.stringify({ tried, lastError, reason: failReason, earliestRecovery: recoveryAt || 0, excluded: (emptyPick && emptyPick.excluded) || [] }));
+    // ⭐ 2026-09-30：收尾也落一次阶段。⚠️ 终态在 setSwitchFlowPhase 里只是把 active 置 false ——
+    // 若本次流程**从未亮过弹窗**（一开始就没得换号、也没预同步过），这不会凭空造出一个弹窗
+    // （渲染层只看 active）。所以这里可以放心无条件调用。
+    if (typeof ports.flowPhase === 'function') {
+      try { ports.flowPhase('failed', { error: failReason }); } catch (_) {}
+    }
     return { ok: false, reason: failReason, tried, error: lastError, modelId, fromUid: current.uid, earliestRecovery: recoveryAt || null };
   } finally {
     try { if (restorePanelTo) await ports.setPanelOpen(true); } catch (_) {}
@@ -4807,6 +4859,15 @@ function buildLimitFailoverPorts(ctx) {
     readTaskText: readLastUserTaskText,
     switchAccount: (account) => automationSwitchAccount(account),
     afterAccountSwitch: (fromUid, toUid) => autoCopyAfterAccountSwitch(fromUid, toUid, 'limit-failover'),
+    // ⭐ 2026-09-30 新增（切号「预同步 + 进度弹窗」）—— 两个端口都**可选**，理由是同一套纪律：
+    //   测试沙箱不注入 ⇒ core 里那两块整段跳过 ⇒ 与加这个功能之前**逐字等价**
+    //   （既有 5 个切片套件断言一条都不用改；与 healthFilter 的做法完全一致，见上面的注释）。
+    //   · preSyncTo —— 切号**之前**把源账号会话复制到目标账号。返回 { ok, error }。
+    //     失败由 core **显式 return 中止整轮**，绝不走 per-round catch（那条路会把一个
+    //     原本健康的账号 markAccountBlocked 进限流窗口，是硬事实写入）。
+    //   · flowPhase —— 把当前阶段写进弹窗状态域（syncing/switching/resuming/done/failed）。
+    preSyncTo: (fromUid, toUid, meta) => preSyncBeforeSwitch(fromUid, toUid, meta),
+    flowPhase: (phase, info) => setSwitchFlowPhase(phase, info),
     prepareContinuation: (prepareCtx) => prepareFailoverContinuation(prepareCtx),
     ensureNewTask: () => ensureAutomationNewTask({ guard: async () => { if (isCancelled()) throw new Error('任务已停止'); } }),
     sendPhrase: (text) => acSendPhrase(text, { requireEmpty: true, isCancelled }),
@@ -8481,12 +8542,18 @@ function isAutoCopyRowCleanByDirty(sourceUid, row, rules) {
 }
 
 async function buildAutoCopyPlan(sourceUid, targetUid) {
+  // ⭐ 阶段计时（2026-09-30）：预同步的「规划阶段」实测出现过 60~220 秒**零日志**的阻塞，
+  // 靠猜连错两次（先怪超时阈值、再怪体积测量）。⇒ 就地分段打点，只在总耗时 > 3 秒时
+  // 打一行，平时零噪音。纯诊断，不参与任何判据。
+  const tPlan0 = Date.now();
   const source = String(sourceUid || '').trim();
   const target = String(targetUid || '').trim();
   if (!source || !target || source === target) return [];
   normalizeAutoCopyLineages(DATA_DIR);
+  const tPlan1 = Date.now();
   const rules = getAutoCopyRules(DATA_DIR, source);
   if (!rules.allSessions && !rules.sessionIds.length && !rules.workspaces.length) return [];
+  const tPlan2 = Date.now();
   // 批次 3 的开关在**规划开始读一次**（默认关）⇒ 关着时下面每行 `false && ...` 直接短路，
   // 连 getAutoCopyMapping 都不会调 —— 「加了条判据」不许变成「每行多读一次盘」。
   const dirtyFastpathOn = autoCopyDirtyFastpathEnabled();
@@ -8495,6 +8562,7 @@ async function buildAutoCopyPlan(sourceUid, targetUid) {
     'FROM sessions WHERE deleted_at IS NULL AND user_id = ? ORDER BY created_at DESC;',
     [source]
   );
+  const tPlan3 = Date.now();
   const workspaceSet = new Set(rules.workspaces.map(canonicalWorkspace));
   // 单向级联删除：目标账号上被「本地删除」过的 lineage 不再复制过去，否则用户会看到
   // 「删了又回来」。只按**已知** lineage 过滤 —— 还没有 lineage 的行不可能被抑制，
@@ -8513,9 +8581,10 @@ async function buildAutoCopyPlan(sourceUid, targetUid) {
     //    套件（`test-archive-isolation` B1/B2）的锚点，它守的是「归档行不参与复制」这条不变量；
     //    动它的形态 = 让那条不变量失去守卫。
     // 开关默认关 + 本仓映射无 fingerprintVersion ⇒ 今天**必然不可达**（见上面的注释块）。
-    const planRows = dirtyFastpathOn
-      ? selectedRows.filter((row) => !isAutoCopyRowCleanByDirty(source, row, rules))
-      : selectedRows;
+  const tPlan4 = Date.now();
+  const planRows = dirtyFastpathOn
+    ? selectedRows.filter((row) => !isAutoCopyRowCleanByDirty(source, row, rules))
+    : selectedRows;
   // Full-copy and workspace matches need stable hidden lineages for idempotent
   // repeated switches. Prepare the whole batch with one metadata write.
   const lineageSessionIds = planRows
@@ -8524,6 +8593,13 @@ async function buildAutoCopyPlan(sourceUid, targetUid) {
   const ensuredLineages = lineageSessionIds.length
     ? ensureAutoCopySessions(DATA_DIR, source, lineageSessionIds, { enabled: !rules.allSessions })
     : {};
+  const tPlan5 = Date.now();
+  const planCost = Date.now() - tPlan0;
+  if (planCost > 3000) {
+    log('[auto-copy-plan] 规划慢 ' + planCost + 'ms ← 归一化=' + (tPlan1 - tPlan0) + 'ms 取规则=' + (tPlan2 - tPlan1)
+      + 'ms SQL=' + (tPlan3 - tPlan2) + 'ms 过滤=' + (tPlan4 - tPlan3) + 'ms 建血缘=' + (tPlan5 - tPlan4)
+      + 'ms (会话 ' + planRows.length + ' 条)');
+  }
   return planRows.map((row) => Object.assign({}, row, {
     lineageId: rules.allLineages[String(row.id)] || ensuredLineages[String(row.id)] || null,
   }));
@@ -8638,6 +8714,338 @@ function autoCopyAfterAccountSwitch(sourceUid, targetUid, reason) {
   } catch (error) {
     log('[auto-copy] 切号后触发同步失败: ' + String((error && error.message) || error));
     return null;
+  }
+}
+
+/* ---------------- 切号「预同步 + 进度弹窗」（2026-09-30） ---------------- */
+//
+// 用户诉求（2026-09-30 定稿，方案见工作区《WorkDaddy-切号预同步与进度弹窗-设计与评估》）：
+//   ① 不论**自动切号**（限流续跑）还是**手动切号**，一律改成**先复制同步会话、再切号**；
+//   ② 过程中弹窗告知「正在同步、请勿操作」，且可主动关闭（关闭 = 立刻停剩下的）；
+//   ③ 弹窗内实时显示进度（同步中 → 切号中 → 续发中），**三阶段全成功**才自动消失。
+//
+// ⭐ 为什么「先同步」是**治根**、不是「加个提示」：
+//   切号 = Page.reload；reload 期间官方要 flush「旧账号正在用的会话」+ load「新账号的会话」，
+//   而这些**正是要被复制的文件** ⇒ 撞上 applySnapshot 的 CAS 保护（比 size/mtime/ctime）
+//   ⇒ 抛错回滚 → 记 failed → 作业 partial → UI 报「复制失败」。
+//   把复制提到切号前 = 挪出这个窗口，落在源账号还活着、尚未 reload 的**静默期**。
+//   （2026-09-29 那次只加了「退避重试」= 治症状；实测有会话每次切号都撞同一窗口，重试也过不去。）
+//
+// ⭐ 为什么可行（不需要任何新机制）：`POST /api/sessions/sync-now` 就是「**不切号**也能把会话
+//   复制到指定账号」—— 它内部直接 startAutoCopyJob(source, target, [], null, {force})，
+//   复用同一个 autoCopyJobs 队列与同一个 worker。那是日常在用的「立即同步」
+//   ⇒ 本功能只是**换个时机调用它**，不是新造一条复制通路。
+
+/**
+ * 弹窗状态域（活在 daemon 内存里，不落盘）。
+ *
+ * ⚠️ 为什么不落盘也能跨 reload：切号会 Page.reload，但 reload 的是 **renderer**；daemon 是独立
+ * node 进程，内存不受影响 —— 渲染层重新挂载后再读一次即可（与 /api/sessions/auto-copy/active
+ * 完全同一套做法，那正是原实现「切号后进度提示消失」的修法）。
+ *
+ * 进度**明细**（正在复制哪一条会话）**不塞进本对象** —— 渲染层继续轮询
+ * /api/sessions/auto-copy/active 拿 currentLabel / currentIndex（字段现成，不重复造）。
+ * 本对象只回答「现在处于哪个阶段」。
+ */
+let switchFlowState = null;
+/** 用户点了弹窗「关闭」⇒ 置位。预同步等待期间轮询它，实现「关闭即立刻停剩下的」。 */
+let switchFlowCancelRequested = false;
+/**
+ * 当前有几个**活跃的切号流程**（`/api/switch` 请求 + `preSyncBeforeSwitch` 各计一次，二者嵌套）。
+ *
+ * 用途（2026-09-30 修「终止按钮点了没反应」）：`requestSwitchFlowCancel` 传统上只**置标记**，
+ * 真正收尾靠流程自己在下一个检查点消费它。若流程已经退出（异常退出、或成功后忘了落终态），
+ * 标记就**永远没人消费** ⇒ 用户只能反复点、或重启 daemon。
+ * ⇒ 有了这个计数就能判「还有没有活跃消费者」：
+ *   · `> 0` ⇒ 正常路径，置标记 + 1.2 秒兜底；
+ *   · `=== 0` ⇒ 立刻收尾，不再让用户干等。
+ */
+let switchFlowRunners = 0;
+/** 进入一个切号流程；返回**幂等**的退出函数（重复调用不会把计数减成负）。 */
+function enterSwitchFlowRunner() {
+  switchFlowRunners += 1;
+  let left = false;
+  return () => {
+    if (left) return;
+    left = true;
+    switchFlowRunners = Math.max(0, switchFlowRunners - 1);
+  };
+}
+/** done / failed / cancelled 之后状态保留这么久，供渲染层读到并收尾（惰性清理，不起定时器）。 */
+const SWITCH_FLOW_TTL_MS = 120 * 1000;
+/**
+ * 预同步总时限（兜底）。
+ * ⚠️ **不能设小值** —— 2026-09-30 实测教训：`judge='content'` 判据下，**计划阶段**
+ * （逐会话算内容指纹）本身就要跑 60 秒以上（实测 42 条 / 1.3 GB 用时 **60.2 秒**），
+ * 而正文复制只要 1.5 秒。旧的 60 秒上限导致**每一次切号都超时失败**。
+ */
+const PRE_SYNC_WAIT_MAX_MS = 10 * 60 * 1000;
+/**
+ * 「停滞」判定：连续这么久**没有任何进度信号变化** ⇒ 才判卡死（而不是「慢」）。
+ * ⚠️ 必须与总时限**分开**：content 判据下 planning 阶段一分多钟没有任何进度信号，
+ * 只按总时长判会把「正常但慢」误判成「超时」——这正是本次踩的坑。
+ */
+const PRE_SYNC_STALL_MS = 2 * 60 * 1000;
+
+/**
+ * 写阶段。**先落状态、再动副作用**（切号会 reload，渲染层必须能读对阶段）。
+ * 终态（done/failed/cancelled）置 `active:false`，渲染层据此关闭弹窗。
+ */
+function setSwitchFlowPhase(phase, info) {
+  const name = String(phase || '').trim();
+  if (!name) return null;
+  const extra = info && typeof info === 'object' ? info : {};
+  const now = Date.now();
+  const prev = switchFlowState;
+  const terminal = (name === 'done' || name === 'failed' || name === 'cancelled');
+  const next = Object.assign({}, prev || {}, extra, { phase: name, updatedAt: now });
+  if (terminal) {
+    next.active = false;
+    next.finishedAt = now;
+    next.cancelled = name === 'cancelled';
+    next.error = name === 'failed' ? String(extra.error || '') : '';
+  } else {
+    next.active = true;
+    // ⭐ 起始时间的两条规则（2026-09-30 修「等待时间累积上一次切号耗时」）：
+    //    ① 显式传入 `extra.startedAt` 优先 —— 新流程的**第一个** syncing 会显式带它；
+    //    ② 否则只有「上一状态也是活跃态」才算**同一流程内**的阶段推进（syncing→switching→resuming），
+    //       沿用 startedAt 让「已等待 N 秒」跨阶段连续；
+    //       prev 为空 / 已是终态（done/failed/cancelled）⇒ 这是**新流程**，必须重置。
+    //    ⚠️ 旧实现只写 `(prev && prev.startedAt) || now`，一旦上一轮没落终态（曾经的 bug），
+    //       下一次切号就会把上轮耗时累加进「已等待」——用户实测：切回 186 时显示的是 186→177 那次的时长。
+    const explicitStart = Number(extra.startedAt) || 0;
+    const prevActive = !!(prev && prev.active);
+    next.startedAt = explicitStart || ((prevActive && prev.startedAt) || now);
+    next.finishedAt = 0;
+    next.cancelled = false;
+    next.error = '';
+  }
+  switchFlowState = next;
+  log('[switch-flow] ' + name + ' ' + JSON.stringify({
+    active: next.active,
+    from: String(next.sourceUid || '').slice(0, 8),
+    to: String(next.targetUid || '').slice(0, 8),
+    jobId: next.jobId || '',
+    error: next.error || '',
+  }));
+  return next;
+}
+
+/** 读状态（惰性过期：终态留 TTL 供渲染层读到，过期即清）。 */
+function readSwitchFlowState() {
+  const state = switchFlowState;
+  if (!state) return null;
+  if (!state.active && state.finishedAt && (Date.now() - state.finishedAt) > SWITCH_FLOW_TTL_MS) {
+    switchFlowState = null;
+    return null;
+  }
+  if (state.active && switchFlowCancelRequested) state.cancelled = true;
+  return state;
+}
+
+/** 「关闭弹窗」：置取消位 + 立刻请求中止复制（worker 在下个检查点收尾，不是硬停）。 */
+function requestSwitchFlowCancel() {
+  if (!switchFlowState || !switchFlowState.active) return { ok: false, error: '当前没有正在进行的切号流程' };
+  switchFlowCancelRequested = true;
+  const job = switchFlowState.jobId ? autoCopyJobs.get(String(switchFlowState.jobId)) : null;
+  if (job && (job.status === 'running' || job.status === 'queued')) {
+    job.cancelRequested = true;   // 与 POST /api/sessions/auto-copy/cancel 同一做法
+  }
+  // ⭐ 没有任何活跃流程 ⇒ 这个标记**不会有人消费** ⇒ 立刻收尾（别让用户干等 1.2 秒兜底）。
+  //    典型场景：切号其实**已经成功**（旧代码忘了落 done，状态停在 syncing），用户点「关闭并中止」
+  //    时若还要等兜底，就会觉得按钮没反应而反复点（用户实测「点两次才关」）。
+  if (switchFlowRunners === 0) {
+    setSwitchFlowPhase('cancelled', { reason: '用户取消（当时没有进行中的切号流程）' });
+    log('[switch-flow] 用户请求取消：无活跃流程 ⇒ 立刻收尾');
+    return { ok: true, phase: 'cancelled', note: '已关闭（当时没有进行中的切号流程）', jobId: job ? job.id : '' };
+  }
+  // ⭐⭐ 兜底（2026-09-30 真实故障）：本函数只**置标记**，真正收尾靠流程自己在下一个检查点消费它。
+  //     若流程已经异常退出（例如切号段抛错后走了 catch），标记就**永远没人消费**
+  //     ⇒ 用户点关闭**毫无反应**、弹窗永久卡在 active=true（实测连点三次无效，只能重启 daemon）。
+  //     ⇒ 加一个短定时器：到点若仍停在同一阶段且仍 active，判定「没有活跃消费者」，强制落 cancelled。
+  //     1.2 秒足够让正常路径先完成收尾（它每个 await 都会查标记，通常 200ms 内就切到 cancelled）。
+  const expectPhase = String(switchFlowState.phase || '');
+  const guard = setTimeout(() => {
+    try {
+      if (!switchFlowState || !switchFlowState.active) return;      // 已收尾 ⇒ 不用管
+      if (String(switchFlowState.phase || '') !== expectPhase) return; // 阶段变了 ⇒ 流程还活着，交给它自己收尾
+      setSwitchFlowPhase('cancelled', { reason: '用户取消（无活跃流程，已强制收尾）' });
+      log('[switch-flow] 兜底强制取消：置标记后 1.2 秒仍无人消费（流程已异常退出）');
+    } catch (_) {}
+  }, 1200);
+  if (guard.unref) guard.unref();
+  log('[switch-flow] 用户请求取消 ' + JSON.stringify({ jobId: job ? job.id : '' }));
+  return {
+    ok: true,
+    // ⚠️ 如实告知「哪些停不掉」：switching 之后 Page.reload 已发出、或续发已发出，都不可撤销。
+    phase: switchFlowState.phase,
+    note: switchFlowState.phase === 'syncing'
+      ? '已请求中止同步，之后不再切号'
+      : '已请求停止后续步骤（已开始的动作无法撤销）',
+    jobId: job ? job.id : '',
+  };
+}
+
+/**
+ * 等「会话正文同步完成」。
+ *
+ * ⭐ **只等 meta 阶段，不等整个任务**：phase 的取值是 planning → meta（会话正文）→ payload
+ * （产物目录）→ done，而 payload 动辄几分钟、几十万文件。若等整个任务才切号，用户要干等好几分钟
+ * ⇒ 需求直接不可用。会话正文（projects/*.jsonl）在 meta 阶段就搬完，够切号后续跑了。
+ *
+ * ⚠️ 判据**不能用 assertAutoCopySucceeded** —— 它要求 `status === 'done'`（整个任务跑完），
+ * 而这里在 payload 阶段就要放行。所以只取其失败语义的子集：failed / failedItems / partial。
+ * 分叉（conflicts）**不算失败** —— 那是保护性行为（两边都有独立修改时一份都不覆盖），
+ * 与本流程要拦的「内容没搬过去」不是一回事。
+ */
+async function waitPreSyncSettled(job, options) {
+  const extra = options && typeof options === 'object' ? options : {};
+  const isCancelled = typeof extra.isCancelled === 'function' ? extra.isCancelled : () => false;
+  if (!job) return { ok: false, error: '同步任务未创建' };
+  const deadline = Date.now() + PRE_SYNC_WAIT_MAX_MS;
+  // ⭐「在推进」判据：任一进度字段变化都算推进 ⇒ 重置停滞计时。
+  //   与「总时限」分开是必要的：真实复制在 payload 阶段可以有几分钟的合法长跑，
+  //   而卡死（字段一动不动）要能在 PRE_SYNC_STALL_MS 内被认出来。
+  let lastSignal = '';
+  let lastSignalAt = Date.now();
+  for (;;) {
+    if (job.cancelRequested || isCancelled()) return { ok: false, error: '已取消' };
+    const metaDone = job.phase === 'payload' || job.phase === 'done';
+    if (metaDone || isAutoCopyJobSettled(job.status)) break;
+    // ⚠️ 曾经的「planning 阶段豁免停滞判定」**已撤回**（2026-09-30 第四次修正，连错三次的复盘）：
+    //    前三次我都把「planning 卡 60~220 秒」当成「planning 很慢」⇒ 先加总时限、再调停滞阈值、
+    //    最后干脆给 planning 开豁免 —— **三次全错**。实测真相：
+    //      · 空闲时用**同一 job 路径**复制同样 42 条 / 1.3 GB ⇒ 规划阶段只用 **1 秒**
+    //        （分段计时：让步等待 1ms、取计划+排序 641ms）；
+    //      · 切号路径之所以不返回，是 `/api/switch` 在开头就占了 `rendererReloadPriorityPromise`，
+    //        而复制任务的第一步 `yieldAutoCopyToRenderer()` 要 await 它 ⇒ **死锁**（已在上游修掉）。
+    //    ⇒ 既然 planning 实测是**秒级**，就绝不该豁免：豁免的唯一效果是让将来同类死锁
+    //      无声无息地挂死（用户只能手动取消）。停滞判定对所有阶段一视同仁，这就是兜底网。
+    const signal = [job.phase, job.processed, job.currentIndex, job.payloadProcessed, job.copied, job.skipped].join('|');
+    if (signal !== lastSignal) { lastSignal = signal; lastSignalAt = Date.now(); }
+    if (Date.now() - lastSignalAt >= PRE_SYNC_STALL_MS) {
+      return { ok: false, error: '会话同步停滞（已 ' + Math.round(PRE_SYNC_STALL_MS / 60000) + ' 分钟无进展）' };
+    }
+    if (Date.now() >= deadline) {
+      return { ok: false, error: '会话同步超时（已等 ' + Math.round(PRE_SYNC_WAIT_MAX_MS / 60000) + ' 分钟）' };
+    }
+    await sleep(200);
+  }
+  const metaDone = job.phase === 'payload' || job.phase === 'done';
+  if (!metaDone) {
+    return { ok: false, error: '会话同步未成功（任务状态 ' + String(job.status || '未知') + '）' };
+  }
+  const bad = Number(job.failed || 0) + Number(job.failedItems || 0) + Number(job.partial || 0);
+  if (bad > 0) return { ok: false, error: '有 ' + bad + ' 个会话未能同步' };
+  return { ok: true, phase: job.phase, total: Number(job.total || 0), processed: Number(job.processed || 0), skipped: Number(job.skipped || 0) };
+}
+
+/**
+ * ⭐ **切号前的会话预同步** —— 本功能的共用入口：限流自动路经 `ports.preSyncTo` 走它，
+ * 手动切号（POST /api/switch）直接调它。**两条路同一个函数**，不各自实现一份
+ * （仓里既有纪律，见 POST /api/switch 里「避免三处各写一遍走样」那条注释）。
+ *
+ * 三条关键行为：
+ *   ① **闸门占位**：`assertAccountSwitchIdle()` 的语义是「同步在跑 ⇒ 禁止切号」，而本流程恰恰是
+ *      「同步跑完 → 就切号」⇒ 若不占位，切号会被自己的闸门拒掉（**必然发生**，不是偶发）。
+ *      占位复用同一个 `accountSwitchInProgress` 标志：既避免死锁，又顺带挡住别的路径插入。
+ *   ② 只等 meta（见 waitPreSyncSettled）。
+ *   ③ 失败**显式返回** ok:false，由调用方决定中止（限流路 = 中止整轮；手动路 = 中止切号）。
+ */
+async function preSyncBeforeSwitch(fromUid, toUid, meta) {
+  const source = String(fromUid || '').trim();
+  const target = String(toUid || '').trim();
+  const extra = meta && typeof meta === 'object' ? meta : {};
+  // 供 `requestSwitchFlowCancel` 判「还有没有活跃消费者」（幂等，可多次调用）。
+  const leaveRunner = enterSwitchFlowRunner();
+  if (!source || !target || source === target) {
+    leaveRunner();
+    return { ok: true, skipped: true, reason: 'no-source-or-same-account', jobId: '' };
+  }
+  const startedAt = Date.now();
+  switchFlowCancelRequested = false;
+  // 账号昵称：弹窗要显示「账号A → 账号B」，uid 前 8 位对用户没意义。
+  // 这里自己查一次，免得每个调用方都得记得传（switch-api 传的 targetNickname 作兜底）。
+  const flowAccounts = listAccounts(DATA_DIR);
+  const flowSource = flowAccounts.find((a) => String(a.uid || '') === source) || null;
+  const flowTarget = flowAccounts.find((a) => String(a.uid || '') === target) || null;
+  setSwitchFlowPhase('syncing', {
+    sourceUid: source,
+    targetUid: target,
+    sourceName: String((flowSource && flowSource.nickname) || ''),
+    targetName: String((flowTarget && flowTarget.nickname) || extra.targetNickname || ''),
+    reason: String(extra.reason || ''),
+    jobId: '',
+    // ⭐ 显式带上起始时间：这是**新流程**的第一个阶段，`setSwitchFlowPhase` 会优先用它
+    //   （否则在同一次会话里上一轮状态没落终态时，会把上轮耗时累加进「已等待 N 秒」）。
+    startedAt,
+  });
+  // ① 闸门占位。⚠️ 这里的失败文案要**改**：默认那句是「账号正在切换，请稍后重试」，
+  //    而此刻是「别的同步在跑」，说成「正在切换」会误导用户以为号已经在切了。
+  let releaseGate = null;
+  // ⭐ holdGate：成功时把闸门**移交调用方**（由它在切号结束后释放），本函数不释放。
+  let gateHandedOff = false;
+  try { releaseGate = assertAccountSwitchIdle(); }
+  catch (busy) {
+    const reason = '已有会话同步在进行，暂不能切号（请等它完成后再试）';
+    setSwitchFlowPhase('failed', { error: reason });
+    log('[switch-flow] 预同步未开始：' + String((busy && busy.message) || busy));
+    return { ok: false, error: reason };
+  }
+  let job = null;
+  try {
+    // 没有开启自动复制的规则、也没有待复制欠账 ⇒ 不必起任务（与 autoCopyAfterAccountSwitch 同判据）。
+    const rules = getAutoCopyRules(DATA_DIR, source) || {};
+    const hasRules = !!(rules.allSessions
+      || (Array.isArray(rules.sessionIds) && rules.sessionIds.length)
+      || (Array.isArray(rules.workspaces) && rules.workspaces.length));
+    if (!hasRules && !hasPendingAutoCopyTo(source)) {
+      log('[switch-flow] 预同步跳过：源账号没有开启自动复制的会话 ' + JSON.stringify({ from: source, to: target }));
+      return { ok: true, skipped: true, reason: 'no-rules', jobId: '', waitedMs: Date.now() - startedAt };
+    }
+    // skipSizeMeasure：预同步只要「内容先到位」，不需要进度条的速率分母。
+    // ⚠️ 别再相信「体积测量要 120 秒」这个旧说法 —— 2026-09-30 实测 42 条 / 1.3 GB / 20745 文件
+    // 只需 ~0.7 秒，真正让切号 2 分钟不返回的是 `/api/switch` 的 reload 优先权死锁（已修）。
+    // 保留跳过：预同步要尽快返回，省掉一次全盘递归不亏；`totalBytes` 置 null 按纪律不拿 0 冒充。
+    job = startAutoCopyJob(source, target, [], null, { skipSizeMeasure: true });
+    setSwitchFlowPhase('syncing', { jobId: job.id, sourceUid: source, targetUid: target });
+    log('[switch-flow] 预同步已发起 ' + JSON.stringify({ from: source, to: target, jobId: job.id, total: job.total }));
+    const outcome = await waitPreSyncSettled(job, { isCancelled: () => switchFlowCancelRequested });
+    if (!outcome.ok) {
+      const failed = outcome.error === '已取消' ? 'cancelled' : 'failed';
+      if (failed === 'cancelled') {
+        // 用户主动关闭 ⇒ 不切号（不是错误态，是「按你的要求停下了」）。
+        setSwitchFlowPhase('cancelled', { reason: '用户取消' });
+      } else {
+        setSwitchFlowPhase('failed', { error: outcome.error });
+      }
+      return { ok: false, error: outcome.error, cancelled: failed === 'cancelled', jobId: job.id };
+    }
+    log('[switch-flow] 预同步完成 ' + JSON.stringify({ jobId: job.id, waitedMs: Date.now() - startedAt, processed: outcome.processed, skipped: outcome.skipped }));
+    // ⭐ holdGate：闸门**移交调用方**，由它在切号结束后释放。
+    //    为什么必须移交（2026-09-30 真实故障）：预同步只等「正文同步完成（meta）」就返回，
+    //    此刻它起的 job 可能**还在收尾**（队列非空 / worker 未停）。调用方若再自己调一次
+    //    `assertAccountSwitchIdle()`，就会被**自己刚起的那个 job** 拒掉 ⇒ 抛 409 ⇒ 切号失败；
+    //    而那次失败发生在「预同步成功之后」，旧代码的失败出口**没有落终态**
+    //    ⇒ 弹窗永久停在 active=true，且 cancel 只置标记、没人消费 ⇒ 点关闭毫无反应。
+    //    移交后闸门语义不变（切号全程仍禁止别的同步/切号进来），只是不再自锁。
+    //    不传 holdGate（限流切号路径）⇒ 行为与此前逐字一致：那条路紧接着走
+    //    automationSwitchAccount，它自带串行 tail，本就不需要这把闸门。
+    if (extra.holdGate && releaseGate) {
+      gateHandedOff = true;
+      return { ok: true, jobId: job.id, waitedMs: Date.now() - startedAt, releaseGate };
+    }
+    return { ok: true, jobId: job.id, waitedMs: Date.now() - startedAt };
+  } catch (error) {
+    const message = String((error && error.message) || error);
+    setSwitchFlowPhase('failed', { error: message });
+    return { ok: false, error: message, jobId: job ? job.id : '' };
+  } finally {
+    // ② 释放闸门 —— **必须在切号之前**（切号自己会再占一次），否则会一直卡着别的路径。
+    //    ⚠️ holdGate 移交时置 null（所有权已属调用方），绝不在这里释放，否则闸门形同虚设。
+    if (gateHandedOff) releaseGate = null;
+    if (releaseGate) { try { releaseGate(); } catch (_) {} }
+    leaveRunner();
   }
 }
 
@@ -9116,6 +9524,10 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels, opts) {
     // 本次任务是否为「手动强制覆盖」（用户在「立即同步」里显式勾选）。
     // 只影响判据的**显式出口**：默认 undefined ⇒ 逐行为不变。
     force: !!(opts && opts.force),
+    // ⭐ 2026-09-30：跳过「计划规模的全量体积测量」（见下面 `readSessionSizes` 调用处）。
+    // 切号**预同步**用它 —— 那一步只为进度条的速率分母服务，实测却要 **120 秒**
+    // （递归遍历 42 条会话目录，单条 OpenASC 就 980 MB）。默认 false ⇒ 逐行为不变。
+    skipSizeMeasure: !!(opts && opts.skipSizeMeasure),
     sourceName: String(accountLabels.sourceName || ''),
     targetName: String(accountLabels.targetName || ''),
     plan: Array.isArray(plan) ? plan : [],
@@ -9202,13 +9614,17 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels, opts) {
     if (job.cancelRequested) { finishPaused(); return; }
     // 账号切换响应、CDP 导航和注入事件必须先有机会完成；Node SQLite 与文件复制
     // 的 Promise 可能同步结算，连续微任务会在 macOS 上长期饿死 I/O 事件。
+    const yieldAt = Date.now();
     await yieldAutoCopyToRenderer();
+    job.yieldMs = Date.now() - yieldAt;
     if (job.cancelRequested) { finishPaused(); return; }
     // A rapid switch chain may enqueue this job before the previous copy has
     // created the target rows. Re-plan after the queue reaches this job.
     // 排序：先分档（产物体积 / 产物文件数），档内仍按体积升序。取数优先用空间扫描
     // 派生出来的清单，缺口才现场测量 —— 详见 sortAutoCopyPlanBySize 的注释。
+    const planPhaseAt = Date.now();
     const sized = sortAutoCopyPlanBySize(await buildAutoCopyPlan(sourceUid, targetUid), wbHome, { uid: sourceUid });
+    job.planPhaseMs = Date.now() - planPhaseAt;
     job.plan = sized.plan;
     job.total = job.plan.length;
     job.planBytes = job.plan.reduce((sum, row) => sum + (row.sizeBytes || 0), 0);
@@ -9217,11 +9633,25 @@ function startAutoCopyJob(sourceUid, targetUid, plan, labels, opts) {
     // A7：读一次计划内全部会话的实际体积当分母。任一读不到（返回 null）就整体置 null ——
     // 分母缺角时给个偏小的数只会让「已同步 X / Y」看起来像超额完成，不如不显示分母。
     try {
-      const sizes = await autoCopyJudge.readSessionSizes(PROFILE.dataRoot, job.plan.map((src) => String(src.id || '')));
-      const values = job.plan.map((src) => sizes.get(String(src.id || '')));
-      job.totalBytes = values.every((value) => typeof value === 'number' && Number.isFinite(value) && value >= 0)
-        ? values.reduce((sum, value) => sum + value, 0) : null;
+      if (job.skipSizeMeasure) {
+        // ⚠️ 2026-09-30 修正：这里原先被当成「切号要 2 分钟」的元凶（理由是全量递归遍历会话目录），
+        // 实测**不成立** —— 42 条 / 1.3 GB / 20745 文件只需 ~0.7 秒。真正的元凶是
+        // `/api/switch` 开头占住 reload 优先权、与复制任务的让步等待形成的**死锁**（已修）。
+        // 仍保留跳过：预同步全程要尽快返回，省一次全盘递归不亏。
+        // 缺数按既有纪律给 null（**不拿 0 冒充** —— 0 会被面板读成「真的同步了 0 字节」）。
+        job.totalBytes = null;
+      } else {
+        const sizes = await autoCopyJudge.readSessionSizes(PROFILE.dataRoot, job.plan.map((src) => String(src.id || '')));
+        const values = job.plan.map((src) => sizes.get(String(src.id || '')));
+        job.totalBytes = values.every((value) => typeof value === 'number' && Number.isFinite(value) && value >= 0)
+          ? values.reduce((sum, value) => sum + value, 0) : null;
+      }
     } catch (_) { job.totalBytes = null; }
+    // ⭐ 规划阶段耗时打点：这一段（buildAutoCopyPlan + 体积测量）曾是「预同步超时/停滞」的
+    // 真凶，但日志里**完全不可见**（120 秒空白）⇒ 补一行，下次一眼看出来。
+    log('[sessions-auto-copy] 规划阶段完成 用时 ' + Math.round((Date.now() - (job.startedAt || Date.now())) / 1000)
+      + ' 秒（' + (job.skipSizeMeasure ? '已跳过体积测量' : '含体积测量')
+      + '，让步等待 ' + (job.yieldMs || 0) + 'ms，取计划+排序 ' + (job.planPhaseMs || 0) + 'ms）');
     job.phase = 'meta';
     log(`[sessions-auto-copy] ${sourceUid} -> ${targetUid} 计划 ${job.total} 个会话，合计 ${formatByteSize(job.planBytes)}`
       + `（档位 ${sized.tiers[0] || 0}/${sized.tiers[1] || 0}/${sized.tiers[2] || 0}/${sized.tiers[3] || 0}，清单命中 ${sized.stats.fromList}/${sized.stats.total}）`);
@@ -10234,6 +10664,41 @@ function readNoDisturbState() {
   return switches;
 }
 
+/**
+ * 「这些开关**实际**还在生效吗」—— 拿记录下来的**意图**（`wbs.noDisturb.state`）
+ * 与官方 `settings.sandbox.*` 的**现状**对账。2026-09-30 补。
+ *
+ * 为什么需要：意图与实际写在**两个地方**，会在下面这些场景脱节 ——
+ *   · 用户在官方 UI 的权限设置里改过（我们只回滚 `ns.added` 记录的**新增项**，不碰用户原有配置）；
+ *   · 关过再开、或配置被外部改写。
+ * 实测到过：`state.outsideWrite = true` 且 `added.outsideWrite` 记着 8 条路径，
+ * 但 `sandbox.extraAllowWrite` 里**那 8 条一条都不在** ⇒ 面板显示「已开启」而实际没生效。
+ *
+ * 纪律：**只读对账，绝不擅自改写配置**（改配置要走 `setNoDisturbSwitch` 那条有回滚记录的路径）。
+ * 对不了账的一律给 `false`（保守：让面板提示用户「重新应用」），`autoApprove` 给 `null`
+ * 因为它本来就不写 CLI 配置（由渲染层观察者体现），不参与对账。
+ *
+ * @returns {{[name:string]: boolean|null}}
+ */
+function readNoDisturbApplied() {
+  const settings = readWorkbuddySettings();
+  const sb = settings.sandbox && typeof settings.sandbox === 'object' ? settings.sandbox : {};
+  const ds = sb.dataSecurity && typeof sb.dataSecurity === 'object' ? sb.dataSecurity : {};
+  const hasAll = (key, items) => {
+    const cur = Array.isArray(sb[key]) ? sb[key] : [];
+    return items.length > 0 && items.every((x) => cur.includes(x));
+  };
+  return {
+    outsideWrite: hasAll('extraAllowWrite', WBS_EXTRA_ALLOW_WRITE),
+    commands: hasAll('excludedCommands', WBS_COMMON_EXCLUDED_CMDS),
+    systemTools: hasAll('excludedCommands', WBS_SYSTEM_LEVEL_TOOLS),
+    // 批量删除是双写（CLI 阈值 + 数据安全阈值），任一拉满即视为生效
+    bulkDelete: Number(sb.safeDeleteBulkThreshold) >= 99999
+      || Number(ds.batchDeleteApprovalThreshold) >= 99999,
+    autoApprove: null,
+  };
+}
+
 function removeListItems(arr, items) {
   if (!Array.isArray(arr)) return arr;
   const drop = new Set(items);
@@ -11013,6 +11478,209 @@ function accountBackupFile(uid) {
   return path.join(DATA_DIR, 'accounts', `${value}.info`);
 }
 
+/* ================= 反代网关（sidecar）：第三方 wb2api-panel 的集成层 =================
+ * 把「WorkBuddy 账号 → OpenAI 兼容 API」委托给第三方 Go 网关（MIT，见 api-gateway.js 头注释）。
+ * 本仓只做四件事：**下载校验 / 凭证桥 / 生成配置 / 启停与探活** —— 协议层不自己实现。
+ * ⭐ 价值点是「凭证桥」：本仓已持有同一批账号（accounts/*.info，5.6+ 是 $wbEncrypted 信封），
+ *   解密后直接喂给网关 ⇒ **用户不必再走一遍 OAuth 设备授权**。
+ * ⚠️ 风险面：该网关是「伪造客户端指纹直连上游」，与官方客户端行为不同（作者免责声明含封号风险）
+ *   ⇒ 本功能**默认不启用**，必须用户显式 install + start。
+ * ⚠️ 三条安全默认由 api-gateway.buildGatewayConfig 强制：回环监听 / api_key 必填 / 定时任务全关。
+ * ⚠️ 本段**不是切片沙箱**（普通模块级函数），可自由引用模块级标识符。
+ */
+let gatewayChild = null;
+let gatewayInstallInFlight = null;
+
+function gatewayStatus() {
+  const paths = apiGateway.gatewayPaths(DATA_DIR);
+  const state = apiGateway.readGatewayState(paths.stateFile);
+  const installed = fs.existsSync(paths.exe) && fs.existsSync(paths.config);
+  let accountCount = 0;
+  try { accountCount = fs.readdirSync(paths.authDir).filter((n) => /^workbuddy.*\.json$/.test(n)).length; } catch (_) {}
+  const running = !!(gatewayChild && gatewayChild.pid && gatewayChild.exitCode === null);
+  return Object.assign({}, state, {
+    paths: { root: paths.root, exe: paths.exe, config: paths.config, log: paths.log },
+    installed: installed,
+    running: running,
+    pid: running ? gatewayChild.pid : 0,
+    accountCount: accountCount,
+    panelUrl: 'http://127.0.0.1:' + (Number(state.port) || apiGateway.DEFAULT_PORT) + '/panel/',
+    // ⚠️ 只回指纹，绝不回 api_key 明文
+    apiKeyHint: state.apiKeyHint || '',
+  });
+}
+
+/** 读本仓已登录的账号并解密（**复用 lib.js 的 [wd-compat] 解密器**，不另写一份帧格式）。 */
+function gatewayCollectAccounts() {
+  const dir = path.join(DATA_DIR, 'accounts');
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.info')); } catch (_) { return { accounts: [], errors: ['账号目录不可读'] }; }
+  const accounts = [];
+  const errors = [];
+  for (const name of names) {
+    try {
+      const decrypted = wdCompatDecryptAuthJson(JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')));
+      const auth = (decrypted && decrypted.auth) || {};
+      const account = (decrypted && decrypted.account) || {};
+      const token = typeof auth.accessToken === 'string' ? auth.accessToken.trim() : '';
+      if (!token) { errors.push(name.slice(0, 8) + '：无可用 token（取钥失败或未登录）'); continue; }
+      accounts.push({
+        uid: String(account.uid || name.replace(/\.info$/, '')),
+        nickname: typeof account.nickname === 'string' ? account.nickname : '',
+        accessToken: token,
+        refreshToken: typeof auth.refreshToken === 'string' ? auth.refreshToken : '',
+        expiresAt: Number(auth.expiresAt) || 0,
+        domain: String(auth.domain || ''),
+      });
+    } catch (error) {
+      errors.push(name.slice(0, 8) + '：解析失败 ' + String((error && error.message) || error).slice(0, 60));
+    }
+  }
+  return { accounts: accounts, errors: errors };
+}
+
+/** 探活（/healthz 免鉴权）。null = 不可达。 */
+async function gatewayProbeHealth(port, timeoutMs) {
+  const ms = Number(timeoutMs) > 0 ? Number(timeoutMs) : 2000;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch('http://127.0.0.1:' + (Number(port) || apiGateway.DEFAULT_PORT) + '/healthz', { signal: ctrl.signal });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (_) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 下载 → SHA-256 校验 → 解压 → 凭证桥 → 生成 config。任一环节失败都不留半成品可用状态。 */
+async function gatewayInstall() {
+  if (gatewayInstallInFlight) return gatewayInstallInFlight;
+  const task = (async () => {
+    const paths = apiGateway.gatewayPaths(DATA_DIR);
+    fs.mkdirSync(paths.root, { recursive: true });
+    fs.mkdirSync(paths.authDir, { recursive: true });
+    fs.mkdirSync(paths.stateDir, { recursive: true });
+    // ⚠️ GitHub release 直连极慢（本机实测 ~0.06MB/s）⇒ 走公共镜像；镜像只改传输不改字节，靠 SHA-256 兜底。
+    const base = 'https://gh-proxy.com/https://github.com/' + apiGateway.GATEWAY_REPO
+      + '/releases/download/' + apiGateway.GATEWAY_VERSION + '/';
+    const zipRes = await fetch(base + apiGateway.ASSET_NAME);
+    if (!zipRes.ok) throw new Error('下载网关失败：HTTP ' + zipRes.status);
+    const zip = Buffer.from(await zipRes.arrayBuffer());
+    if (!zip.length) throw new Error('下载内容为空');
+    const sumRes = await fetch(base + apiGateway.CHECKSUMS_NAME);
+    const expected = sumRes.ok ? apiGateway.parseChecksums(await sumRes.text(), apiGateway.ASSET_NAME) : '';
+    if (!expected) throw new Error('拿不到官方 checksums.txt —— 拒绝在无校验的情况下安装');
+    const actual = apiGateway.sha256(zip);
+    if (actual !== expected) throw new Error('SHA-256 不匹配（期望 ' + expected.slice(0, 12) + '…，实际 ' + actual.slice(0, 12) + '…）—— 已中止');
+    const written = apiGateway.extractZipToDir(zip, paths.root, {
+      pick: (name) => name === 'wb2api.exe' || name === 'config.example.json',
+    });
+    if (written.indexOf('wb2api.exe') < 0) throw new Error('压缩包内没有 wb2api.exe');
+
+    // 凭证桥：解密本仓已登录账号 → 写 auths/<prefix>-<uid>.json
+    const collected = gatewayCollectAccounts();
+    const docs = collected.accounts.map(apiGateway.buildAuthDocument).filter(Boolean);
+    if (!docs.length) throw new Error('没有可用账号可桥接：' + (collected.errors[0] || '账号目录为空'));
+    const authWritten = apiGateway.writeAuthDocuments(paths.authDir, docs, {});
+
+    // 生成 config（三条安全默认在 buildGatewayConfig 内强制）
+    const apiKey = apiGateway.generateApiKey();
+    const template = JSON.parse(fs.readFileSync(paths.configExample, 'utf8'));
+    const cfg = apiGateway.buildGatewayConfig({
+      template: template,
+      port: apiGateway.DEFAULT_PORT,
+      apiKey: apiKey,
+      authDir: paths.authDir,
+      stateFile: path.join(paths.stateDir, 'state.json'),
+    });
+    replaceFileWithRetry(paths.config, JSON.stringify(cfg, null, 2) + '\n');
+    replaceFileWithRetry(paths.apiKeyFile, apiKey + '\n', 0o600);
+
+    const state = apiGateway.writeGatewayState(paths.stateFile, {
+      version: 1,
+      installed: true,
+      enabled: gatewayReadEnabled(),
+      versionTag: apiGateway.GATEWAY_VERSION,
+      gatewayVersion: apiGateway.GATEWAY_VERSION,
+      port: apiGateway.DEFAULT_PORT,
+      apiKeyHint: apiGateway.apiKeyHint(apiKey),
+      installedAt: Date.now(),
+      accounts: authWritten.map((a) => ({ uid: a.uid, nickname: a.nickname })),
+    });
+    log('[gateway] 安装完成 ' + JSON.stringify({ sha256: actual.slice(0, 12), accounts: authWritten.length, port: state.port }));
+    return { state: state, accountErrors: collected.errors, installed: written };
+  })();
+  gatewayInstallInFlight = task;
+  try { return await task; } finally { gatewayInstallInFlight = null; }
+}
+
+/** 「用户是否启用」是 WorkDaddy 侧意图，与「装没装」分开记（沿用免打扰开关的记法）。 */
+function gatewayReadEnabled() {
+  try {
+    const settings = readWorkbuddySettings();
+    return !!(settings.wbs && settings.wbs.gateway && settings.wbs.gateway.enabled);
+  } catch (_) { return false; }
+}
+
+function gatewaySetEnabled(enabled) {
+  const settings = readWorkbuddySettings();
+  if (!settings.wbs || typeof settings.wbs !== 'object') settings.wbs = {};
+  if (!settings.wbs.gateway || typeof settings.wbs.gateway !== 'object') settings.wbs.gateway = {};
+  settings.wbs.gateway.enabled = !!enabled;
+  writeWorkbuddySettings(settings);
+  const paths = apiGateway.gatewayPaths(DATA_DIR);
+  const state = apiGateway.readGatewayState(paths.stateFile);
+  apiGateway.writeGatewayState(paths.stateFile, Object.assign({}, state, { enabled: !!enabled }));
+  return !!enabled;
+}
+
+/** 启动网关子进程（stdio 用 ['ignore','pipe','pipe']：本环境给子进程建 stdin 管道会 EBUSY）。 */
+function gatewayStart() {
+  const paths = apiGateway.gatewayPaths(DATA_DIR);
+  if (gatewayChild && gatewayChild.exitCode === null) return { started: false, reason: 'already-running', pid: gatewayChild.pid };
+  if (!fs.existsSync(paths.exe) || !fs.existsSync(paths.config)) throw new Error('尚未安装：请先执行安装');
+  const out = fs.openSync(paths.logFile, 'a');
+  const child = spawn(paths.exe, ['-config', paths.config], {
+    cwd: paths.root,
+    detached: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  gatewayChild = child;
+  child.stdout.on('data', (b) => { try { fs.writeSync(out, b); } catch (_) {} });
+  child.stderr.on('data', (b) => { try { fs.writeSync(out, b); } catch (_) {} });
+  child.on('exit', (code) => {
+    try { fs.closeSync(out); } catch (_) {}
+    log('[gateway] 进程退出 code=' + code);
+    if (gatewayChild === child) gatewayChild = null;
+  });
+  child.on('error', (e) => { log('[gateway] 启动失败: ' + String((e && e.message) || e)); });
+  log('[gateway] 已启动 pid=' + child.pid + ' port=' + apiGateway.DEFAULT_PORT);
+  return { started: true, pid: child.pid };
+}
+
+function gatewayStop() {
+  const child = gatewayChild;
+  if (!child || child.exitCode !== null) return { stopped: false, reason: 'not-running' };
+  try { child.kill(); log('[gateway] 已请求停止 pid=' + child.pid); return { stopped: true, pid: child.pid }; }
+  catch (e) { return { stopped: false, reason: String((e && e.message) || e) }; }
+}
+
+/** 启动时：用户启用过就自动拉起（与 autoContinue 的「启动补写」同模式；未安装则静默跳过）。 */
+function refreshGatewayIfEnabled() {
+  try {
+    if (!gatewayReadEnabled()) return;
+    const paths = apiGateway.gatewayPaths(DATA_DIR);
+    if (!fs.existsSync(paths.exe) || !fs.existsSync(paths.config)) return;
+    gatewayStart();
+  } catch (error) {
+    log('[gateway] 启动自动拉起失败: ' + String((error && error.message) || error));
+  }
+}
+
 /* ================= 暂存提示词（stash）辅助 ================= */
 
 function stashDir() {
@@ -11119,21 +11787,35 @@ function deleteStashRecord(key) {
 function buildBusyExpr() {
   return `(function(){
     try {
-      var sels = [
+      // 2026-09-30 修复【BUG2】：判据从「全文档」收窄到**当前会话**的两块区域。
+      // 原实现用 document.querySelectorAll 扫全文档 —— 只要页面上任何位置有可见的「停止」
+      // 按钮或加载态（例如多会话监控下拉里**别的会话**正在跑），本会话就会被判成忙碌，
+      // 于是暂存提示词/快捷短语白等满 60 秒后被取消发送（用户报的「插不进进行中的任务」）。
+      //   · loading / typing / generating 一类 → 只在当前会话的消息列表内找
+      //   · 「停止」按钮                        → 只在当前会话的输入框容器内找
+      // 任一块拿不到容器（官方改版）都退回全文档 —— 宁可保守判忙，也不误判空闲：
+      // 误判空闲会在回复中输入，正文/图片回填容易失败，这是原设计刻意保守的原因。
+      function visibleIn(scope, sels) {
+        var root = scope || document;
+        for (var a = 0; a < sels.length; a++) {
+          var els = root.querySelectorAll(sels[a]);
+          for (var b = 0; b < els.length; b++) {
+            var r = els[b].getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) return true;
+          }
+        }
+        return false;
+      }
+      var msgRoot = document.querySelector('.cr-message-list') || document.querySelector('.cr-message-list-viewport');
+      if (visibleIn(msgRoot, [
         '.assistant-message[class*="loading"]',
         '[class*="_loadingMessage_"]',
         '[class*="_loadingText_"]',
         '[class*="typing"]',
-        '[class*="generating"]',
-        '[title*="停止"],[aria-label*="停止"]'
-      ];
-      for (var i = 0; i < sels.length; i++) {
-        var els = document.querySelectorAll(sels[i]);
-        for (var j = 0; j < els.length; j++) {
-          var r = els[j].getBoundingClientRect();
-          if (r.width > 0 && r.height > 0) return true;
-        }
-      }
+        '[class*="generating"]'
+      ])) return true;
+      var inputRoot = document.querySelector('.conversation-input') || document.querySelector('.cr-input-container');
+      if (visibleIn(inputRoot, ['[title*="停止"]', '[aria-label*="停止"]'])) return true;
       return false;
     } catch (e) { return false; }
   })()`;
@@ -13834,6 +14516,27 @@ function handleApiRoute(req, res) {
     });
   }
 
+  // 切号流程阶段（弹窗数据源）：GET /api/switch-flow
+  //   · 与 /api/sessions/auto-copy/active **分工明确**：本接口只回答「现在处于哪个阶段」
+  //     （syncing 同步中 / switching 切号中 / resuming 续发中 / done / failed / cancelled）；
+  //     「正在复制哪一条会话」仍由 auto-copy/active 的 currentLabel / currentIndex 提供
+  //     （字段现成，不重复造）。
+  //   · ⭐ 切号会 Page.reload、DOM 会被销毁，但**状态活在 daemon 内存里**（daemon 是独立 node
+  //     进程，不受 renderer reload 影响）⇒ 渲染层重新挂载后靠本接口把弹窗**重建**回来。
+  //     这就是原实现「切号后进度提示消失」那类断点的标准修法（与 auto-copy/active 完全同源）。
+  if (req.method === 'GET' && p === '/api/switch-flow') {
+    return json(res, 200, { ok: true, flow: readSwitchFlowState() });
+  }
+  // 关闭弹窗 = 立刻停剩下的：POST /api/switch-flow/cancel
+  //   ⚠️ 有两处**物理上停不掉**，已在返回值里如实说明（前端据此改按钮文案，不能让用户以为
+  //     「点了就全停了」）：
+  //     · switching —— Page.reload 已发出，不可撤销；只能停掉其后的「续发」；
+  //     · resuming  —— 续发那句若已发出，任务就在模型侧跑，要停得用官方停止按钮。
+  if (req.method === 'POST' && p === '/api/switch-flow/cancel') {
+    const result = requestSwitchFlowCancel();
+    return json(res, result.ok ? 200 : 409, result);
+  }
+
   if (req.method === 'GET' && p === '/api/limit-failover/status') {
     return (async () => {
       const task = findLimitFailoverTask();
@@ -14151,9 +14854,124 @@ function handleApiRoute(req, res) {
     });
   }
 
-  // 免打扰模块：GET /api/no-disturb（读全部开关状态）
+  // 反代网关（sidecar）：GET /api/gateway —— 状态 + /healthz 探活
+  if (req.method === 'GET' && p === '/api/gateway') {
+    const snapshot = gatewayStatus();
+    return gatewayProbeHealth(snapshot.port).then((health) => json(res, 200, {
+      ok: true,
+      gateway: Object.assign({}, snapshot, { health: health, healthy: !!(health && Number(health.healthy) > 0) }),
+    })).catch(() => json(res, 200, { ok: true, gateway: Object.assign({}, snapshot, { health: null, healthy: false }) }));
+  }
+
+  // 反代网关：GET /api/gateway/api-key —— **按需**取密钥明文（给面板的「复制密钥」按钮用）。
+  // ⚠️ 刻意不并进 /api/gateway 的状态返回里：状态会被随手 log / 展示 / 缓存，明文不该常驻。
+  //    这里走全局 X-WorkDaddy-Token 鉴权（与其它 /api/* 同一条），本机没有该 token 的程序拿不到。
+  if (req.method === 'GET' && p === '/api/gateway/api-key') {
+    try {
+      const paths = apiGateway.gatewayPaths(DATA_DIR);
+      const key = fs.readFileSync(paths.apiKeyFile, 'utf8').trim();
+      if (!key) return json(res, 404, { ok: false, error: '尚未生成密钥，请先安装' });
+      return json(res, 200, { ok: true, apiKey: key });
+    } catch (error) {
+      return json(res, 404, { ok: false, error: '读不到密钥文件：' + String((error && error.message) || error) });
+    }
+  }
+
+  // 反代网关：POST /api/gateway/install —— 下载 + SHA-256 校验 + 凭证桥 + 生成配置
+  if (req.method === 'POST' && p === '/api/gateway/install') {
+    return gatewayInstall()
+      .then((r) => json(res, 200, { ok: true, gateway: gatewayStatus(), accountErrors: r.accountErrors }))
+      .catch((e) => json(res, 400, { ok: false, error: String((e && e.message) || e) }));
+  }
+
+  // 反代网关：POST /api/gateway/start —— 拉起进程并记住「用户启用」
+  if (req.method === 'POST' && p === '/api/gateway/start') {
+    return readBody(req).then((body) => {
+      try {
+        if (!body || body.enabled !== false) gatewaySetEnabled(true);
+        const started = gatewayStart();
+        return json(res, 200, { ok: true, ...started, gateway: gatewayStatus() });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: String((e && e.message) || e) });
+      }
+    });
+  }
+
+  // 反代网关：POST /api/gateway/stop —— 停止进程并清掉「用户启用」
+  if (req.method === 'POST' && p === '/api/gateway/stop') {
+    return readBody(req).then((body) => {
+      if (!body || body.enabled !== false) gatewaySetEnabled(false);
+      const stopped = gatewayStop();
+      return json(res, 200, { ok: true, ...stopped, gateway: gatewayStatus() });
+    });
+  }
+
+  // 反代网关：POST /api/gateway/register-models —— 把网关模型注册进 ~/.workbuddy/models.json
+  //   body { remove: true } ⇒ 撤销（按上次登记的 id 名单摘掉）。
+  //   ⚠️ models.json 是**用户核心配置**：写前必先备份；只增删本插件写入的那批；结构原样保持。
+  if (req.method === 'POST' && p === '/api/gateway/register-models') {
+    return readBody(req).then(async (body) => {
+      try {
+        const paths = apiGateway.gatewayPaths(DATA_DIR);
+        const state = apiGateway.readGatewayState(paths.stateFile);
+        if (!state.installed) return json(res, 400, { ok: false, error: '尚未安装网关' });
+        const port = Number(state.port) || apiGateway.DEFAULT_PORT;
+        const modelsFile = path.join(PROFILE.dataRoot, 'models.json');
+        let raw = '[]';
+        try { raw = fs.readFileSync(modelsFile, 'utf8'); } catch (_) { return json(res, 400, { ok: false, error: '读不到 ' + modelsFile }); }
+        let parsed;
+        try { parsed = JSON.parse(raw); } catch (_) { return json(res, 400, { ok: false, error: 'models.json 不是合法 JSON，已中止（不动它）' }); }
+        const isArray = Array.isArray(parsed);
+        const list = isArray ? parsed : (parsed && Array.isArray(parsed.models) ? parsed.models : null);
+        if (!list) return json(res, 400, { ok: false, error: 'models.json 结构不认识（既不是数组也没有 models 数组），已中止' });
+
+        const backup = modelsFile + '.bak-gateway-' + new Date().toISOString().replace(/[:.]/g, '-');
+        fs.copyFileSync(modelsFile, backup);
+
+        let result;
+        let registeredIds = [];
+        if (body && body.remove === true) {
+          result = apiGateway.unmergeGatewayModels(list, state.registeredModelIds || []);
+        } else {
+          let apiKey = '';
+          try { apiKey = fs.readFileSync(paths.apiKeyFile, 'utf8').trim(); } catch (_) {}
+          if (!apiKey) return json(res, 400, { ok: false, error: '缺少网关 api_key，请先安装' });
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 15000);
+          let payload;
+          try {
+            const r = await fetch('http://127.0.0.1:' + port + '/v1/models', { headers: { Authorization: 'Bearer ' + apiKey }, signal: ctrl.signal });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            payload = await r.json();
+          } finally { clearTimeout(timer); }
+          const entries = (Array.isArray(payload && payload.data) ? payload.data : [])
+            .map((m) => apiGateway.toWorkbuddyModelEntry(m, {
+              baseUrl: 'http://127.0.0.1:' + port,
+              apiKey: apiKey,
+            }))
+            .filter(Boolean);
+          if (!entries.length) return json(res, 400, { ok: false, error: '网关没有返回可用模型（先启动它）' });
+          result = apiGateway.mergeGatewayModels(list, entries, {});
+          registeredIds = result.ids;
+        }
+
+        const next = isArray ? result.models : Object.assign({}, parsed, { models: result.models });
+        replaceFileWithRetry(modelsFile, JSON.stringify(next, null, 2) + '\n');
+        apiGateway.writeGatewayState(paths.stateFile, Object.assign({}, state, {
+          registeredModelIds: body && body.remove === true ? [] : registeredIds,
+          modelsBackup: backup,
+        }));
+        log('[gateway] 模型' + (body && body.remove === true ? '撤销' : '注册') + ' 完成 ' + JSON.stringify({ added: result.added, removed: result.removed }));
+        return json(res, 200, { ok: true, added: result.added, removed: result.removed, total: result.models.length, backup: backup });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: String((e && e.message) || e) });
+      }
+    });
+  }
+
+  // 免打扰模块：GET /api/no-disturb（读全部开关状态 + 与实际配置的对账结果）
   if (req.method === 'GET' && p === '/api/no-disturb') {
-    return json(res, 200, { ok: true, switches: readNoDisturbState() });
+    return json(res, 200, { ok: true, switches: readNoDisturbState(), applied: readNoDisturbApplied() });
   }
 
   // 免打扰模块：POST /api/no-disturb-set { name, enabled }
@@ -14161,7 +14979,8 @@ function handleApiRoute(req, res) {
     return readBody(req).then((body) => {
       try {
         const switches = setNoDisturbSwitch(String(body.name || ''), !!body.enabled);
-        return json(res, 200, { ok: true, switches });
+        // 顺带把对账结果回给面板：刚写完配置就能看出「这次是否真的落到 sandbox 上」
+        return json(res, 200, { ok: true, switches, applied: readNoDisturbApplied() });
       } catch (e) {
         return json(res, 500, { ok: false, error: e.message });
       }
@@ -17184,17 +18003,70 @@ function handleApiRoute(req, res) {
     return readBody(req).then(async (body) => {
       const uid = (body.uid || '').trim();
       if (!uid) return json(res, 400, { ok: false, error: '缺少 uid' });
-      const releaseRendererReload = body.reload ? beginRendererReloadPriority() : null;
+      // ⚠️⚠️ 2026-09-30 修**死锁**：这个「reload 优先权」**绝不能在处理器开头就占**。
+      //     机制：`beginRendererReloadPriority()` 会让**复制任务**在 `yieldAutoCopyToRenderer()`
+      //     里 await 它（本意是「reload 期间别让复制写盘」），而它只在处理器收尾的 finally 里释放。
+      //     若开头就占，则「预同步」（本身就是一个复制任务）会被它自己拦住
+      //     ⇒ **切号在等预同步、预同步在等切号，闭环死锁**。
+      //     实测判据：同一 job 路径空闲触发只要 **1 秒**，走切号却永不返回
+      //     （换成任意超时值都只是「换个时间点失败」，这就是连改三次阈值都没用的原因）。
+      //     ⇒ 改为**紧贴真正 reload 之前**才占，覆盖范围不变（switchTo → reloadWorkBuddyPage）。
+      let releaseRendererReload = null;
       let releaseAccountSwitch = null;
+      // 供 `requestSwitchFlowCancel` 判「还有没有活跃消费者」（整个请求期间算一个；幂等）。
+      const leaveRunner = enterSwitchFlowRunner();
       try {
-        // 只记录源账号；自动复制队列会在 renderer 刷新并完成组件注入后重新规划。
-        // 不在这里预规划，否则大量会话的同步 SQLite/文件扫描会让切换界面长时间无响应。
-        // A11：与自动切号/会话同步互斥 —— 同步正在写盘时不允许切换登录文件。
-        // 失败折成 409（handleApi 认 statusCode），让面板能区分「稍后重试」与真正的服务端错误。
-        try { releaseAccountSwitch = await assertAccountSwitchIdle(); }
-        catch (busy) { const conflict = new Error(busy.message); conflict.statusCode = 409; throw conflict; }
+        // ⚠️ 原注释（历史）：「只记录源账号；自动复制队列会在 renderer 刷新并完成组件注入后重新规划。
+        //    不在这里预规划，否则大量会话的同步 SQLite/文件扫描会让切换界面长时间无响应。」
+        // ⭐ 2026-09-30 起该决策**已被「先同步、再切号」取代**（用户明确要求，方案见工作区
+        //    《WorkDaddy-切号预同步与进度弹窗-设计与评估》）——「无响应」由阶段弹窗兜住；
+        //    而且把复制挪到 reload 之前，正是为了躲开「reload 期间官方在写这些文件」导致复制失败。
         const sourceAccount = currentAccount() || {};
         const sourceUid = String(sourceAccount.uid || '').trim();
+        // ⭐ CDP 前置检查（2026-09-30 真实故障）：客户端**没带 --remote-debugging-port 启动**时
+        //    （典型触发器：WorkBuddy 自动更新后自己裸重启），`reloadWorkBuddyPage` / 主题保留
+        //    这些 CDP 动作会失败或长时间挂住 ⇒ 整个切号流程半死不活，弹窗状态卡在 syncing。
+        //    与其等某个 await 拖死，不如**立刻**给出用户能照着做的错误。
+        //    判据用 `cdp.connected`（与 /api/status 同源）；只对需要刷新的请求设门槛。
+        if (body.reload && !(cdp && cdp.connected)) {
+          const offline = new Error('客户端未以调试端口启动（CDP 未连接），无法刷新窗口，已中止切号。'
+            + '请先用 WorkDaddy 重启一次 WorkBuddy（带 --remote-debugging-port）再试。');
+          offline.statusCode = 409;
+          try { setSwitchFlowPhase('failed', { error: offline.message }); } catch (_) {}
+          throw offline;
+        }
+        // ⭐ ① 切号**之前**先同步（与限流自动切号共用 preSyncBeforeSwitch 同一份实现 ——
+        //    「全部切号都用这一套做法」，不再分主动/被动）。
+        //    手动切号此前**完全不等同步**（旧代码在 reload 之后才发起复制，返回值只丢给前端展示）
+        //    ⇒ 这就是「手动切号后内容不全」比自动路更常见的原因。
+        //    预同步内部**自己占/放** assertAccountSwitchIdle 那道闸门，所以下面 ② 那道仍保留：
+        //    它保护的是「切号本身」；此刻预同步已结束、闸门已释放，能正常占上。
+        let preSyncedOnce = false;
+        if (sourceUid && sourceUid !== uid) {
+          const targetAccount = listAccounts(DATA_DIR).find((a) => String(a.uid || '') === uid) || null;
+          const pre = await preSyncBeforeSwitch(sourceUid, uid, {
+            targetNickname: String((targetAccount && targetAccount.nickname) || ''),
+            reason: 'switch-api',
+            holdGate: true, // ⭐ 闸门移交（原因见 preSyncBeforeSwitch 内的注释：重占必被自己的 job 拒掉）
+          });
+          if (!pre || pre.ok !== true) {
+            // 409 = 「环境暂不允许」，让面板能区分「稍后重试」与真正的服务端错误（沿用既有约定）。
+            const conflict = new Error(String((pre && pre.error) || '会话同步未完成，已中止切号'));
+            conflict.statusCode = 409;
+            throw conflict;
+          }
+          preSyncedOnce = true;
+          // ⭐ 沿用预同步占的那把闸门；**不要**再调 assertAccountSwitchIdle()（那是 2026-09-30
+          // 故障的直接原因：预同步只等正文（meta），job 可能还在收尾 ⇒ 队列非空 ⇒ 被自己的 job 拒掉）。
+          releaseAccountSwitch = pre.releaseGate || null;
+        }
+        // ② A11：与自动切号/会话同步互斥 —— 同步正在写盘时不允许切换登录文件。
+        // 只在「没有拿到预同步移交的闸门」时才自己占（同账号切换 / 源账号为空等跳过预同步的场合）。
+        // 失败折成 409（handleApi 认 statusCode），让面板能区分「稍后重试」与真正的服务端错误。
+        if (!releaseAccountSwitch) {
+          try { releaseAccountSwitch = await assertAccountSwitchIdle(); }
+          catch (busy) { const conflict = new Error(busy.message); conflict.statusCode = 409; throw conflict; }
+        }
         // A9（上游 1.2.6）：renderer 可以把「切换前正在看的会话」带过来。
         // ⚠️ 但那个 id 可能残留着**别的**账号的会话（投影未刷新时的常见残留）⇒
         // **必须**用会话索引证明它属于**正在被替换的源账号**才准用。
@@ -17214,6 +18086,14 @@ function handleApiRoute(req, res) {
           }
         }
         if (sourceUid !== uid) await preserveAccountSwitchTheme(uid);
+        // ⭐ 阶段推进：进入「切号中」。**手动切号路径此前从不置这个阶段** —— 后果是弹窗全程写着
+        //    「正在同步会话 · 请勿操作」（用户实测：切号其实早就成功，弹窗还写着同步中）。
+        //    放在 reload 之前，这样 reload 后新页面重建弹窗时读到的是「切号中」，不会退回「同步中」。
+        setSwitchFlowPhase('switching', { jobId: (switchFlowState && switchFlowState.jobId) || '' });
+        // ⭐ 优先权在这里才占（原在处理器开头 ⇒ 与预同步形成死锁，见上面的说明）。
+        //   位置刻意放在 `preserveAccountSwitchTheme` 之后、`switchTo` 之前：
+        //   前者是普通的 CDP 读写（不 reload），不需要被保护；后者到 reload 结束才是要保护的窗口。
+        releaseRendererReload = body.reload ? beginRendererReloadPriority() : null;
         const acct = switchTo(DATA_DIR, uid, log);
         const hint = '登录文件已切换，请重启 WorkBuddy 使新账号生效';
         let reloaded = false;
@@ -17287,7 +18167,13 @@ function handleApiRoute(req, res) {
         // 空间规则可能因切换前后的会话索引时序暂时无法生成初始计划，但规则本身仍需触发复制任务；
         // 任务规则通常能直接命中，所以旧逻辑只表现为“任务能复制、空间不复制”。
         // 与自动切号（限流收尾切回 / 闲置切回）共用同一份实现，避免三处各写一遍走样。
-        const autoCopyJob = autoCopyAfterAccountSwitch(sourceUid, uid, 'switch-api');
+        // ⭐ 2026-09-30：**已经预同步过就不再发起**（否则白跑一次全量扫描 + 生成 plan）。
+        // 复制本身幂等，但幂等省掉的是「重复复制」，省不掉那次读盘。
+        const autoCopyJob = preSyncedOnce ? null : autoCopyAfterAccountSwitch(sourceUid, uid, 'switch-api');
+        // ⭐⭐ 成功终态：手动切号**必须**落 done。旧代码从不落终态 ⇒ 状态永远停在 `syncing/active=true`
+        //     ⇒ 弹窗不消失（用户实测：切号成功、窗口一直挂着「正在同步会话」，只能手点两次「终止」）。
+        //    `done` 是终态：`setSwitchFlowPhase` 会置 active=false/finishedAt ⇒ 渲染层下一轮轮询即收掉弹窗。
+        setSwitchFlowPhase('done', { uid: acct.uid, nickname: acct.nickname || '', reloaded: reloaded === true });
         return json(res, 200, {
           ok: true,
           uid: acct.uid,
@@ -17297,10 +18183,24 @@ function handleApiRoute(req, res) {
           hint: reloaded ? '已切换并触发窗口刷新' : hint,
         });
       } catch (e) {
-        return json(res, 500, { ok: false, error: e.message });
+        // ⭐⭐ 失败**必须落终态**（2026-09-30 真实故障）：旧代码只回错误、不改 switchFlow 状态
+        //     ⇒ 弹窗永久停在 active=true（用户看到「切号失败」提示，但窗口关不掉），
+        //     而 cancel 只置标记、已经没有流程会去消费它 ⇒ 点关闭毫无反应，只能重启 daemon 脱身。
+        try {
+          if (switchFlowState && switchFlowState.active) {
+            const asCancelled = switchFlowCancelRequested === true
+              || /已取消|用户取消/.test(String((e && e.message) || ''));
+            setSwitchFlowPhase(asCancelled ? 'cancelled' : 'failed',
+              asCancelled ? { reason: '用户取消' } : { error: String((e && e.message) || e) });
+          }
+        } catch (_) {}
+        // 尊重路由抛出的 statusCode（409 = 「环境暂不允许」，面板据此提示「稍后重试」）。
+        const status = Number(e && e.statusCode) || 500;
+        return json(res, status, { ok: false, error: e.message });
       } finally {
         if (releaseRendererReload) releaseRendererReload();
         if (releaseAccountSwitch) releaseAccountSwitch();
+        leaveRunner();
       }
     });
   }
@@ -17718,6 +18618,7 @@ refreshAskModeIfEnabled();
 refreshZhReasoningIfEnabled();
 // 启动时补偿持续会话指令块（开关开启但 app-config 块缺失/被改写时补写）
 refreshAutoContinueIfEnabled();
+refreshGatewayIfEnabled();
 repairMissingSessionWorkspaces().catch((error) => log('[sessions-cwd-repair] 启动修复失败: ' + error.message));
 // 从磁盘上已有的空间扫描结果派生一份复制排队清单。这样升级到本版本之后不必为了
 // 让新排序生效而重扫一次空间页；若那份扫描结果是旧版（没有产物拆分），清单会如实

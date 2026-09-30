@@ -62,7 +62,23 @@ const SUITES = [
   ['test-upstream-127.js', 96],  // 上游 1.2.7 吸纳/批次 1+2+3：theme-patches 3 条新补丁（patch-102/103/104 逐条 CSS 片段 + 老条目未丢）+ usageModel 行为级四形状（旧代码是 [object Object]）+ 缓存版本 1→2（常量 + **行为级**：v1 忽略/v2 采纳）+ inject.js 六处定点 10 落点与 4 处旧形态消失 + toast 第四参向后兼容 + [F] Linux 三段（11 落点 + 上游 open-url 行为规范的 vm 真跑：三平台命令/参数/unref、非 http(s) 拒且不 spawn、缺 xdg-open 时 500 且**错误不回流 URL**）；含三条边界登记（数字 0 被 String(0) 采用 / usageModel(null) 抛 TypeError 但生产不可达 / 第二处 IS_WIN||IS_LINUX 属本地既有 CDP 路径）；2026-09-27 随 1.2.8 升到 100 条并加 A2b（patch-41 已按上游删除，不许回填）
   ['test-upstream-128.js', 62],  // 上游 1.2.8 吸纳（5 批全落地）：[A] 主题三件套必须同批（patch-105/106 + patch-41 已删 + theme-vars nebula 透明变量 + nebula theme.json）+ [B] 同步备份生命周期（prune/inspect 导出面、SYNC_BACKUP_DIR、changedTargetFiles 两处调用）+ [C] 模型限流表行为级（UPSERT/**过期自动清**/resetAt=null 只记不删/参数校验）+ [D] setAccountNote 行为级（原型污染串/白名单/2000 字/账号不存在/认证备份一字未动）+ [E] daemon 六路由与**直连 require session-sync**（漏了会 ReferenceError）+ [F] 本地红线与自研未被冲掉（无 firstTargetCopy / 无 mappingTargetLifecycleRevisionMatches / 4 个旧主题函数已删且无遗留调用 / 本地 5 处自研内容仍在 / 积分趋势仍 false）+ [G] 11 个关键文件行尾
   ['test-zh-reasoning.js', 29],  // 2026-09-29 中文思考开关（写入官方「全局自定义指令」settings.personalization.customPrompt）：vm 真跑纯函数 —— 块形状（起止标记精确包裹/首句直接思考指令/豁免代码命令路径/留语言出口）+ strip 安全性（空输入安全/无块不动/标记残缺不误删）+ ⭐ 开→关往返逐字节恢复用户内容 + 幂等（重复开启只一个块）+ ⭐ 与「决策弹窗」段共存互不干扰 + 两侧接线（daemon 两路由/启动刷新/关空时删键；inject 可见开关 + 失败回滚 UI 勾选态）
+  ['test-api-gateway.js', 68],  // 2026-09-30 反代网关集成（sidecar）：checksums 解析 + 凭证桥（毫秒→秒/realm 推断/缺字段拒绝/uid 清洗防穿越）+ config 三条安全默认（listen 锁回环 / api_key 非空强制 / 定时任务全关）+ 纯 JS zip 自解压（stored+deflate / zip slip 拒绝 / 非法压缩法拒绝 / 真实官方包 sha256 与 checksums 一致且解出 PE 头）+ 状态不落 api_key + 目录布局 + 模型闭环（id/name 加前缀让同名共存 / 重复注册幂等 / 裸 id 撞车由 occupied 保护 / 撤销后用户条目逐字节恢复）
+  ['test-switch-presync.js', 73],
+  ['test-skill-refs.js', 11],  // 2026-10-01 知识页「自愈」守卫：文件引用存在性 + 行号越界 + 反查表章节验真（借鉴 Hindsight Knowledge Pages 的 self-healing）  // 2026-09-30 切号「预同步+进度弹窗」：core 顺序重排（预同步先于切号 / 失败中止整轮不走 per-round catch / 可选端口守卫保证既有切片套件逐字等价 / 切片沙箱零标识符泄漏）+ 弹窗阶段机（惰性过期 / 取消复用既有中止机制 / 未活跃过不凭空造弹窗）+ 「只等 meta 阶段」判据 + 路由与 UI 静态守卫
 ];
+
+// ── 0) 代码索引保鲜（2026-10-01 新增）─────────────────────────────────────────
+// `CODE-INDEX.md` 是给「AI 定位函数」用的**生成物**（约 93 KB / 1527 个函数），但它会**腐烂**
+// —— 实测 2026-09-22 生成后 **8 天**没刷新，索引里的行号就全漂了。
+// 生成只要 **0.45 秒** ⇒ 每次跑回归顺带保鲜，不再依赖人记得。
+// 失败**不阻断**回归（只提示），避免"索引生成器坏了导致整套回归跑不了"。
+try {
+  const genOut = execFileSync(NODE, [path.join(ROOT, '.wd-analysis', 'gen-code-index.js')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const stamp = String(genOut).split(/\r?\n/).filter((l) => /合计|索引 ->/.test(l)).join(' | ').trim();
+  console.log('[index] 已刷新 CODE-INDEX.md   ' + stamp);
+} catch (e) {
+  console.log('[index] !! 刷新 CODE-INDEX.md 失败（不阻断回归）: ' + String((e && e.message) || e).slice(0, 160));
+}
 
 const out = [];
 let bad = 0;

@@ -2586,6 +2586,212 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     window.__wbsNotifyToast = receiveToast;
     registerDisposer(function () { if (window.__wbsNotifyToast === receiveToast) delete window.__wbsNotifyToast; });
 
+    /* ---------------- 切号流程弹窗（2026-09-30） ----------------
+       用户要求：切号期间（无论**自动**的限流续跑、还是**手动**切换账号）弹窗告知
+       「正在同步、请勿操作」，实时显示进度（同步中 → 切号中 → 续发中），可主动关闭
+       （关闭 = 立刻停剩下的）；**三阶段全成功**才自动消失。
+
+       ⚠️ 跨 reload 重建：切号会 Page.reload，DOM 全销毁。所以**阶段状态存在 daemon**
+       （GET /api/switch-flow），渲染层每次轮询按 active 决定「显示 / 重建 / 关闭」。
+       —— 这就是原实现「切号后进度提示消失」那类断点的标准修法（与 auto-copy/active 同源）。
+
+       ⚠️ 进度明细（正在复制哪一条会话）**不重复造字段** —— 仍取
+       /api/sessions/auto-copy/active 的 currentLabel / currentIndex（daemon 侧字段现成）。
+
+       ⚠️ i18n：整块标 data-wbs-i18n-skip。里面绝大多数是动态数据（账号名 / 会话名 / 进度数字），
+       按本仓「文案与数据分元素」的约定，这里整块当数据子树上报，避免被短词条撕成中英混杂。
+
+       三个函数各干一件：renderSwitchFlow（纯渲染，幂等）/ pollSwitchFlow（轮询+调度）/
+       cancelSwitchFlow（点关闭 → 请求 daemon 中止）。 */
+    var switchFlowTimer = null;
+    var switchFlowCancelling = false;
+    // ⭐ 取消请求的「复位兜底」定时器（2026-09-30）：用户实测「点了一次没反应，得点两次才关」。
+    //    原因是 `switchFlowCancelling` 一旦置 true 就**只在弹窗收掉时**复位；而那 1~1.2 秒内
+    //    按钮是灰的、再点会被 `if (switchFlowCancelling) return` 直接吃掉 ⇒ 用户以为按钮坏了。
+    //    ⇒ 3 秒仍未被收尾就解禁并改成「再点一次强制关闭」。
+    var switchFlowCancelTimer = null;
+
+    function switchFlowAccountLabel(uid, name) {
+      var label = String(name || '');
+      if (label) return label;
+      var key = String(uid || '');
+      return key ? '账号 ' + key.slice(0, 8) : '未知账号';
+    }
+
+    function switchFlowMaskEl() { return document.getElementById('wbs-switch-flow-mask'); }
+
+    function buildSwitchFlowMask() {
+      var mask = document.createElement('div');
+      mask.id = 'wbs-switch-flow-mask';
+      mask.className = 'wbs-modal-mask';
+      mask.setAttribute('data-wbs-i18n-skip', '');
+      mask.innerHTML =
+        '<div class="wbs-modal" style="width:420px;max-width:92vw">' +
+        '<div class="wbs-modal-title" id="wbs-switch-flow-title">正在同步会话 · 请勿操作</div>' +
+        '<div class="wbs-sess-copy-progress" id="wbs-switch-flow-progress" style="margin:4px 0 10px">' +
+        '<div class="wbs-sess-copy-head"><span class="wbs-sess-copy-count" id="wbs-switch-flow-count"></span></div>' +
+        '<div class="wbs-sess-copy-detail" id="wbs-switch-flow-detail">请勿操作</div>' +
+        '<div class="wbs-sess-copy-track" role="progressbar" aria-label="切号进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="wbs-sess-copy-fill" id="wbs-switch-flow-fill"></span></div>' +
+        '</div>' +
+        '<div class="wbs-modal-actions">' +
+        '<button class="wbs-modal-btn wbs-modal-ok" type="button" id="wbs-switch-flow-close">关闭并中止</button>' +
+        '</div>' +
+        '</div>';
+      // 阻断操作：冒泡阶段拦掉指针/键盘 —— ⚠️ **不含 click**，否则关闭按钮自己也点不到
+      // （既有 mask 都是这个写法：截 pointerdown 就够，click 是独立事件）。
+      ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'keyup', 'keypress', 'wheel', 'touchstart', 'touchmove']
+        .forEach(function (type) {
+          mask.addEventListener(type, function (ev) { ev.stopPropagation(); });
+        });
+      mask.querySelector('#wbs-switch-flow-close').addEventListener('click', function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        cancelSwitchFlow();
+      });
+      return mask;
+    }
+
+    function renderSwitchFlow(flow, copyJob) {
+      var active = !!(flow && flow.active);
+      var mask = switchFlowMaskEl();
+      if (!active) {
+        // done / failed / cancelled / 从未开始 ⇒ 收掉弹窗（幂等）
+        if (mask && mask.parentNode) mask.parentNode.removeChild(mask);
+        switchFlowCancelling = false;
+        return;
+      }
+      if (!mask) {
+        mask = buildSwitchFlowMask();
+        // 优先挂 .wbs-root：这样既有的 .wbs-modal / .wbs-sess-copy-* 样式与主题变量全都继承得到
+        // （.wbs-modal-mask 自己是 position:fixed;inset:0，不依赖祖先定位，挂哪都是全屏）。
+        var host = document.querySelector('.wbs-root') || document.body || document.documentElement;
+        host.appendChild(mask);
+      }
+      var phase = String(flow.phase || 'syncing');
+      var titleEl = mask.querySelector('#wbs-switch-flow-title');
+      var countEl = mask.querySelector('#wbs-switch-flow-count');
+      var detailEl = mask.querySelector('#wbs-switch-flow-detail');
+      var fillEl = mask.querySelector('#wbs-switch-flow-fill');
+      var track = mask.querySelector('.wbs-sess-copy-track');
+      var closeBtn = mask.querySelector('#wbs-switch-flow-close');
+      var from = switchFlowAccountLabel(flow.sourceUid, flow.sourceName);
+      var to = switchFlowAccountLabel(flow.targetUid, flow.targetName);
+      var percent = 0;
+      if (phase === 'syncing') {
+        // 只等「会话正文（meta 阶段）」就先切号，所以进度条可能停在中间就跳到「切号中」——
+        // 这是**设计如此**（产物搬运让它后台继续），文案上不承诺 100%。
+        var total = copyJob ? Number(copyJob.total) || 0 : 0;
+        var processed = copyJob ? Number(copyJob.processed) || 0 : 0;
+        percent = total ? Math.round(processed / total * 100) : 0;
+        // ⭐ 2026-09-30：`judge='content'` 判据下「计划阶段」要跑 60 秒以上、期间**没有任何
+        // 进度信号**（total 一直是 0）⇒ 必须显示「在动」，否则用户看到的就是"卡住了"。
+        var waitedSec = flow.startedAt ? Math.max(0, Math.round((Date.now() - flow.startedAt) / 1000)) : 0;
+        titleEl.textContent = '正在同步会话 · 请勿操作';
+        countEl.textContent = total
+          ? (processed + ' / ' + total + ' · 已等待 ' + waitedSec + ' 秒')
+          : ('正在扫描会话差异 · 已等待 ' + waitedSec + ' 秒');
+        detailEl.textContent = from + ' → ' + to +
+          (copyJob && copyJob.phase === 'planning' ? ' · 正在比对内容差异（这一步较慢，请稍候）' : '') +
+          (copyJob && copyJob.currentLabel ? ' · 正在复制 ' + copyJob.currentLabel : '');
+      } else if (phase === 'switching') {
+        percent = 100;
+        titleEl.textContent = '切号中 · 请勿操作';
+        countEl.textContent = '';
+        detailEl.textContent = from + ' → ' + to;
+      } else {
+        percent = 100;
+        titleEl.textContent = '续发中 · 请勿操作';
+        countEl.textContent = '';
+        detailEl.textContent = '正在 ' + to + ' 的副本会话里继续任务';
+      }
+      track.setAttribute('aria-valuenow', String(percent));
+      track.setAttribute('aria-valuetext', titleEl.textContent);
+      fillEl.style.width = percent + '%';
+      // ⚠️ 按钮文案必须**如实**（最容易被做错的一处）：
+      //   · switching —— Page.reload 已发出、**不可撤销**，点关闭也停不住切号本身（停的只是其后的续发）；
+      //     写成「已中止」是假的，用户会以为号没切过去。所以置灰 + 说明。
+      //   · resuming  —— 续发那句若已发出，任务就在模型侧跑，插件停不掉（要停得用官方停止按钮）。
+      if (switchFlowCancelling) {
+        closeBtn.disabled = true;
+        closeBtn.textContent = phase === 'syncing' ? '正在中止同步…' : '正在停止后续步骤…';
+      } else if (phase === 'switching') {
+        closeBtn.disabled = true;
+        closeBtn.textContent = '切号已开始，无法中止';
+      } else if (phase === 'resuming') {
+        closeBtn.disabled = false;
+        closeBtn.textContent = '不再等待响应';
+      } else {
+        closeBtn.disabled = false;
+        closeBtn.textContent = '关闭并中止';
+      }
+    }
+
+    function cancelSwitchFlow() {
+      if (switchFlowCancelling) return;
+      switchFlowCancelling = true;
+      var mask = switchFlowMaskEl();
+      if (mask) {
+        var btn = mask.querySelector('#wbs-switch-flow-close');
+        if (btn) { btn.disabled = true; btn.textContent = '正在中止同步…'; }
+      }
+      api('/api/switch-flow/cancel', { method: 'POST' }).then(function () {
+        // ⚠️ **不立刻移除遮罩**：中止要等「当前那条写盘落定」（daemon 在下个检查点收尾），
+        // 提前消失会让用户以为已经停了。由轮询读到 cancelled 后再收掉。
+        scheduleSwitchFlowPoll(400);
+      }).catch(function () { scheduleSwitchFlowPoll(1200); });
+      // ⭐ 3 秒复位：若到点弹窗还在（daemon 侧没收尾 / 响应丢了），解禁按钮并如实改文案，
+      //   避免「点一次就永久变灰」——用户实测把这种情况描述成「按钮点了没反应」。
+      if (switchFlowCancelTimer) clearTimeout(switchFlowCancelTimer);
+      switchFlowCancelTimer = setTimeout(function () {
+        switchFlowCancelTimer = null;
+        if (!switchFlowCancelling) return;      // 已经收尾过 ⇒ 不用管
+        switchFlowCancelling = false;
+        var mask2 = switchFlowMaskEl();
+        var btn2 = mask2 ? mask2.querySelector('#wbs-switch-flow-close') : null;
+        if (btn2) { btn2.disabled = false; btn2.textContent = '再点一次强制关闭'; }
+      }, 3000);
+    }
+
+    function scheduleSwitchFlowPoll(delay) {
+      if (switchFlowTimer) clearTimeout(switchFlowTimer);
+      switchFlowTimer = setTimeout(pollSwitchFlow, delay);
+    }
+
+    function pollSwitchFlow() {
+      switchFlowTimer = null;
+      api('/api/switch-flow').then(function (result) {
+        var flow = result && result.flow;
+        if (!flow || !flow.active) {
+          renderSwitchFlow(null, null);
+          scheduleSwitchFlowPoll(4000);   // 空闲低频：该接口只读一个内存对象，开销极小
+          return;
+        }
+        if (String(flow.phase) === 'syncing') {
+          // 同步阶段另取进度明细（正在复制哪一条会话）—— 不重复造字段
+          api('/api/sessions/auto-copy/active').then(function (second) {
+            renderSwitchFlow(flow, second && second.job);
+            scheduleSwitchFlowPoll(700);
+          }).catch(function () {
+            renderSwitchFlow(flow, null);
+            scheduleSwitchFlowPoll(1200);
+          });
+          return;
+        }
+        renderSwitchFlow(flow, null);
+        scheduleSwitchFlowPoll(900);
+      }).catch(function () {
+        scheduleSwitchFlowPoll(5000);     // daemon 不可达时别空转
+      });
+    }
+
+    // ⚠️ 必须注册 disposer：热更注入新副本时，旧副本的这个定时器要停掉，否则越积越多
+    // （本仓明载的「热更副本的全局监听器会堆叠」铁律）。
+    registerDisposer(function () {
+      if (switchFlowTimer) clearTimeout(switchFlowTimer);
+      if (switchFlowCancelTimer) clearTimeout(switchFlowCancelTimer);
+    });
+    pollSwitchFlow();
+
     function isVisibleHealthNode(node) {
       if (!node || !node.isConnected || (node.closest && node.closest('.wbs-root'))) return false;
       var r = node.getBoundingClientRect && node.getBoundingClientRect();
@@ -5180,6 +5386,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     //   · 无暂存项 → 解除暂停、停止守护。
     // 识别复用 stashedBySession/stashedIdsBySession；按会话独立守护，切换会话不影响其他会话的暂存项。
     var stashSendingSince = {}; // sid -> ts：该会话 sending 暂存项出现时间（判断是否空闲卡住）
+    // 2026-09-30【BUG5 修复】该会话「连续处于 paused」的起始时刻，以及卡死自救阈值。
+    // 只用于「有普通 pending 在等发送」时超时强制放行；纯暂存项**永不**因超时被发出去。
+    var stashPauseSince = {};   // sid -> ts
+    var STASH_PAUSE_STUCK_MS = 30000; // 30s：普通项被暂停挡住超过这个时长就放弃等排序守护
     // 顺序合规判定：按 order 排序的 pending 项中，第一个不是暂存项（即普通项在最前）
     function stashOrderValid(items, sessionId) {
       var arr = stashSigs(sessionId), ids = stashIds(sessionId);
@@ -5271,20 +5481,49 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             //     （普通在前、暂存在后由排序守护 enforceStashOrder 保证，activate 永远先取普通项）；
             //   · 只剩暂存 pending 项 → 暂停，挡住暂存项被自动发送；
             //   · 已无本插件暂存项 → 解除暂停、停止守护。
+            // 2026-09-30【BUG5 修复】`paused` 是**渲染进程内存态**，一旦无人解除，用户就只能
+            // 彻底退出 WorkBuddy。实测（daemon.log 的 breadcrumb）：`pause:ok` 出现 6 次、
+            // `guard:sending-resume` 6 次，而主恢复路径 `guard:auto-send-resume` **0 次**
+            // ⇒ 恢复条件太窄（卡在 stashOrderValid）就会永久卡死。三条加固：
+            //   ① 有普通项在等发送 ⇒ 顺序不合规也允许「超时强制放行」；
+            //   ② resume 是**异步**的 ⇒ 没确认恢复正常之前**不撤守护**（原来删了登记就再没人补一次）；
+            //   ③ 只有纯暂存项 ⇒ 永远保持暂停（超时也不放行，否则等于把暂存内容自动发出去）。
+            var pauseStuckMs = Date.now() - (Number(stashPauseSince[sid]) || 0);
+            if (q.runtime.paused) {
+              if (!stashPauseSince[sid]) stashPauseSince[sid] = Date.now();
+            } else {
+              delete stashPauseSince[sid];
+            }
+            var resumeQueue = function (tag) {
+              try {
+                Promise.resolve(adapter.resumeConversationMessageQueue(sid))
+                  .then(function () { crumb(tag); })
+                  .catch(function () { crumb(tag + '-fail'); });
+              } catch (e) { crumb(tag + '-throw'); }
+            };
             if (hasNormalPending) {
-              // 防御：仅当「第一个 pending 项是普通项」时放行——顺序违规时先等 enforceStashOrder 修正，本轮不 resume，
-              // 避免 resume 后官方 activate 误取到排在前面的暂存项
+              // 有「会自动发送」的普通项在等 ⇒ 必须让路（这是用户真实的发送意图）。
               if (q.runtime.paused && stashOrderValid(q.items, sid)) {
-                try { adapter.resumeConversationMessageQueue(sid); crumb('guard:auto-send-resume'); } catch (e) {}
+                // 防御：仅当「第一个 pending 项是普通项」时放行——顺序违规时先等 enforceStashOrder 修正，
+                // 避免 resume 后官方 activate 误取到排在前面的暂存项
+                resumeQueue('guard:auto-send-resume');
+              } else if (q.runtime.paused && pauseStuckMs > STASH_PAUSE_STUCK_MS) {
+                // 顺序一直修不动（reorder RPC 会让渲染进程崩溃，见 enforceStashOrder 注释）⇒ 放弃等待、强制放行。
+                // 代价：排在前面的暂存项可能被官方先取走；但「发不出话、必须重启客户端」严重得多。
+                crumb('guard:pause-stuck[' + Math.round(pauseStuckMs / 1000) + 's]');
+                resumeQueue('guard:pause-stuck-resume');
               }
               if (hasStashPending) {
                 enforceStashOrder(sid, q.items, arr);
-              } else {
-                // 普通项还在但已无本插件暂存项：交给官方正常调度，停止守护
+              } else if (!q.runtime.paused) {
+                // 普通项还在、但已无本插件暂存项、且**确认**队列没在暂停 ⇒ 交给官方正常调度，停止守护。
+                // ⚠️ 必须带 `!q.runtime.paused` 这个前提：resume 是异步的，立刻撤会让失败的那次无人重试。
                 delete stashedBySession[sid];
                 delete stashedIdsBySession[sid];
+                delete stashPauseSince[sid];
               }
             } else if (hasStashPending) {
+              // 只剩暂存项：保持暂停（这是暂存语义本身要求的，**不做超时放行**）
               if (!q.runtime.paused) {
                 try {
                   adapter.pauseConversationMessageQueue(sid, 'manual');
@@ -5293,11 +5532,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
               }
             } else {
               // 队列中已无本插件暂存项（用户已手动发送/移除）：解除暂停，恢复正常队列行为
-              if (q.runtime.paused) {
-                try { adapter.resumeConversationMessageQueue(sid); crumb('guard:resume'); } catch (e) {}
+              if (q.runtime.paused) resumeQueue('guard:resume');
+              if (!q.runtime.paused) {
+                delete stashedBySession[sid];
+                delete stashedIdsBySession[sid];
+                delete stashPauseSince[sid];
               }
-              delete stashedBySession[sid];
-              delete stashedIdsBySession[sid];
             }
           }).catch(function () {});
         })(sids[gi]);
@@ -12277,7 +12517,110 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         });
       }
     }
+    /* ===== API 网关（反代）卡片 —— 2026-09-30 =====
+     * 把第三方 wb2api 的 sidecar 集成暴露到面板上：安装（下载+SHA 校验+凭证桥）/ 启停 / 注册模型 / 打开网关自带面板。
+     * 纪律：① 用 insertAdjacentHTML 追加，**不碰 buildEnhancePane 里既有的大段 HTML 拼接**；
+     *       ② 按钮样式内联（不新增 CSS 类，避免与既有选择器打架）；③ 所有动作都走 daemon 的 /api/gateway*，
+     *       面板只负责展示与触发 —— 判据与实现全在 scripts/api-gateway.js。 */
+    function gwCardEl() { return enhancePane && enhancePane.querySelector('#wbs-gw-card'); }
+    function gwBtn(text, attrs) {
+      return '<button type="button" style="margin:2px 4px 0 0;padding:4px 10px;border-radius:6px;'
+        + 'border:1px solid var(--wb-border-subtle,rgba(0,0,0,.16));background:transparent;color:inherit;'
+        + 'font-size:12px;cursor:pointer" ' + attrs + '>' + text + '</button>';
+    }
+    function gwRender(status) {
+      var card = gwCardEl();
+      if (!card) return;
+      var s = status || {};
+      var state = !s.installed ? '未安装' : (s.running ? (s.healthy ? '运行中' : '已启动（未探活）') : '已安装 · 未运行');
+      var sub = card.querySelector('#wbs-gw-sub');
+      if (sub) sub.textContent = state + (s.installed ? '（' + (s.accountCount || 0) + ' 个账号）' : '');
+      var info = card.querySelector('#wbs-gw-info');
+      if (info) {
+        info.textContent = s.installed
+          ? ('监听 127.0.0.1:' + (s.port || '') + '　密钥 ' + (s.apiKeyHint || '') + '　账号 ' + (s.accountCount || 0))
+          : '尚未安装（安装时会自动用本机已登录账号生成凭证，无需再登录一次）';
+      }
+      var open = card.querySelector('#wbs-gw-open');
+      if (open) { open.disabled = !s.installed; open.setAttribute('data-url', s.panelUrl || ''); }
+    }
+    function gwRefresh() {
+      api('/api/gateway').then(function (d) {
+        if (d && d.ok) gwRender(d.gateway);
+      }).catch(function () {});
+    }
+    function gwAction(path, label, confirmText) {
+      if (confirmText && !window.confirm(confirmText)) return;
+      toast(label + '中…', false, root);
+      api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+        .then(function (d) {
+          if (!d || !d.ok) throw new Error((d && d.error) || '失败');
+          toast(label + '完成', false, root);
+          gwRefresh();
+        })
+        .catch(function (e) {
+          toast(label + '失败: ' + ((e && e.message) || e), true, root);
+          gwRefresh();
+        });
+    }
+    function buildGatewayCard() {
+      if (!enhancePane || gwCardEl()) return;
+      enhancePane.insertAdjacentHTML('beforeend',
+        '<div class="wbs-pcard" id="wbs-gw-card">' +
+        '<div class="wbs-pcard-title"><span>API 网关</span><span class="wbs-pcard-sub" id="wbs-gw-sub">读取中…</span></div>' +
+        '<div class="wbs-nd-row"><span class="wbs-nd-hint" id="wbs-gw-info"></span></div>' +
+        '<div class="wbs-nd-row">' +
+        gwBtn('复制密钥', 'data-gw="key"') +
+        gwBtn('安装 / 更新', 'data-gw="install"') +
+        gwBtn('启动', 'data-gw="start"') +
+        gwBtn('停止', 'data-gw="stop"') +
+        gwBtn('注册模型', 'data-gw="models"') +
+        gwBtn('打开网关面板', 'id="wbs-gw-open"') +
+        '</div>' +
+        '<div class="wbs-nd-row"><span class="wbs-nd-hint">把账号额度暴露成本地 OpenAI 兼容接口（/v1/chat/completions）。'
+        + '⚠️ 该网关以伪造客户端指纹直连上游，存在账号风控风险；仅限自用，请勿分发额度。</span></div>' +
+        '</div>');
+      var card = gwCardEl();
+      if (!card) return;
+      card.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest('[data-gw],#wbs-gw-open') : null;
+        if (!btn) return;
+        if (btn.id === 'wbs-gw-open') {
+          var url = btn.getAttribute('data-url');
+          if (url) { try { window.open(url, '_blank'); } catch (err) { /* 被拦就静默 */ } }
+          return;
+        }
+        var act = btn.getAttribute('data-gw');
+        if (act === 'key') {
+          // 2026-09-30 用户要求：面板上直接复制密钥（先前只做在说明 HTML 里）。
+          // 密钥**按需**从 daemon 取（不常驻在卡片状态里），并复用面板既有的 copyPlainText 封装
+          // （它已做 clipboard → execCommand 双保险，与「导出账号」等处一致）。
+          if (typeof copyPlainText !== 'function') { toast('复制功能未就绪，请重开面板', true, root); return; }
+          api('/api/gateway/api-key').then(function (d) {
+            if (!d || !d.ok || !d.apiKey) throw new Error((d && d.error) || '取不到密钥');
+            return copyPlainText(d.apiKey);
+          }).then(function () {
+            toast('密钥已复制到剪贴板', false, root);
+          }).catch(function (e) {
+            toast('复制密钥失败: ' + ((e && e.message) || e), true, root);
+          });
+        } else if (act === 'install') {
+          gwAction('/api/gateway/install', '安装网关',
+            '将下载并校验官方二进制（约 3.4MB，SHA-256 比对），并用本机已登录账号自动生成凭证。继续？');
+        } else if (act === 'start') {
+          gwAction('/api/gateway/start', '启动网关');
+        } else if (act === 'stop') {
+          gwAction('/api/gateway/stop', '停止网关');
+        } else if (act === 'models') {
+          gwAction('/api/gateway/register-models', '注册模型',
+            '将把网关模型写入 WorkBuddy 的 models.json（写前自动备份，可一键撤销）。继续？');
+        }
+      });
+      gwRefresh();
+    }
+
     function wireEnhancePane() {
+      try { buildGatewayCard(); } catch (e) { /* 卡片失败不影响既有面板 */ }
       // 决策弹窗开关
       askSwitch = enhancePane.querySelector('#wbs-ask-switch');
       if (askSwitch) {
@@ -13180,9 +13523,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     function ndEl() {
       return enhancePane && enhancePane.querySelector('#wbs-nd-count');
     }
-    function ndRefreshCount() {
+    function ndRefreshCount(staleCount) {
       var el = ndEl();
-      if (el) el.textContent = '已开启 ' + ndEnabledCount + ' / ' + ND_DEFS.length;
+      if (!el) return;
+      var staleN = Number(staleCount) > 0 ? Number(staleCount) : 0;
+      el.textContent = '已开启 ' + ndEnabledCount + ' / ' + ND_DEFS.length
+        + (staleN > 0 ? '（其中 ' + staleN + ' 项未生效）' : '');
+      // 悬停给出可操作的解释（2026-09-30 补：意图与实际配置脱节时不让用户去猜）
+      if (staleN > 0) el.setAttribute('title', '有开关显示已开启，但官方权限配置里没有对应项 —— 实际未生效；关一次再打开可重新应用。');
+      else el.removeAttribute('title');
     }
     function ndSwitchEl(id) {
       return enhancePane && enhancePane.querySelector('#' + id);
@@ -13294,6 +13643,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<div class="wbs-modal">' +
         '<div class="wbs-modal-title">' + def.confirmTitle + '</div>' +
         '<div class="wbs-modal-body" style="white-space:pre-line">' + def.confirmBody + '</div>' +
+        // 2026-09-30【BUG3 修复】：这些开关不是「插件自己的提示」，而是**直接改写 WorkBuddy 的权限配置**
+        // （见 daemon 的 applyNoDisturbSwitch）。开启后官方**不会再弹出**对应的授权/确认选项 ——
+        // 审批是在配置层被绕过的，不是弹窗被谁吞掉。用户报的「该弹选项时不弹」绝大多数就是它，
+        // 所以必须在「开启前」把后果写清楚，而不是等用户以为是故障。
+        '<div class="wbs-modal-body" style="white-space:pre-line;margin-top:8px;padding:8px 10px;border-radius:6px;'
+        + 'background:rgba(255,193,7,.14);border:1px solid rgba(255,193,7,.38);font-size:12px">'
+        + '开启后，WorkBuddy 将<b>不再弹出</b>对应的授权 / 确认选项（本开关直接改写官方权限配置）。</div>' +
         '<div class="wbs-modal-actions">' +
         '<button class="wbs-modal-btn" type="button" data-nd-act="cancel">再想想</button>' +
         '<button class="wbs-modal-btn wbs-modal-danger" type="button" data-nd-act="ok">' + def.confirmAction + '</button>' +
@@ -13318,22 +13674,34 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     function syncNoDisturb() {
       api('/api/no-disturb')
         .then(function (d) {
-          if (d && d.ok && d.switches) applyNoDisturbState(d.switches);
+          if (d && d.ok && d.switches) applyNoDisturbState(d.switches, d.applied);
         })
         .catch(function () {});
     }
-    function applyNoDisturbState(switches) {
+    function applyNoDisturbState(switches, applied) {
       if (!switches || typeof switches !== 'object') return;
       var n = 0;
+      var stale = 0;
       for (var i = 0; i < ND_DEFS.length; i++) {
         var def = ND_DEFS[i];
         var sw = ndSwitchEl(def.id);
         var on = !!switches[def.name];
         if (sw) sw.checked = on;
         if (on) n++;
+        // 2026-09-30【BUG3 修复】：`switches` 是「意图」（settings.wbs.noDisturb.state），
+        // `applied` 是「官方配置里到底有没有对应项」。两者会脱节 —— 实测到过
+        // state.outsideWrite=true 而 sandbox.extraAllowWrite 里一条都不在，面板却显示「已开启」
+        // ⇒ 用户以为开了、实际没生效。这里**只做提示**，绝不擅自改写配置。
+        var notApplied = !!(on && applied && applied[def.name] === false);
+        if (notApplied) stale++;
+        var wrap = sw && sw.closest ? sw.closest('label,.wbs-switch,.wbs-nd-row,.wbs-row') : null;
+        if (wrap) {
+          if (notApplied) wrap.setAttribute('title', '显示为已开启，但官方权限配置里没有对应项 —— 该开关实际未生效；关一次再打开可重新应用。');
+          else wrap.removeAttribute('title');
+        }
       }
       ndEnabledCount = n;
-      ndRefreshCount();
+      ndRefreshCount(stale);
       // 批量总开关：全部开启时才为 true
       var allSw = enhancePane && enhancePane.querySelector('#wbs-nd-all');
       if (allSw) allSw.checked = n === ND_DEFS.length;
@@ -18280,6 +18648,22 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (!button) return;
       if (isHealthStopControl(button) && sessionHealth.observed) {
         sessionHealth.manualStop = true;
+        // 2026-09-30【BUG5 修复】用户主动停止后紧接着往往就要发新指令，而暂存功能的「暂停守护」
+        // 可能把当前会话的队列一直按在 paused（实测严重到必须彻底退出客户端才能恢复）。
+        // 这里在「停止」这个明确时间点顺手解除一次暂停 —— 守护负责稳态维持，这里负责该时刻立刻放行。
+        // 纪律：① 只读 window.__wbsAdapter，拿不到就静默跳过；② **不** preventDefault/stopPropagation，
+        //       绝不干扰官方停止逻辑；③ 不引用会话模块内的变量（跨作用域会是 ReferenceError 且被静默吞掉）。
+        try {
+          var wbsStopAdapter = window.__wbsAdapter;
+          if (wbsStopAdapter && typeof wbsStopAdapter.resumeConversationMessageQueue === 'function') {
+            var wbsStopSid = wbsStopAdapter.currentActiveSessionId;
+            if (wbsStopSid) {
+              Promise.resolve(wbsStopAdapter.resumeConversationMessageQueue(wbsStopSid))
+                .then(function () { try { if (typeof crumb === 'function') crumb('stop:queue-resume'); } catch (e2) {} })
+                .catch(function () {});
+            }
+          }
+        } catch (e) { /* 绝不因为兜底逻辑影响官方点击 */ }
         return;
       }
       if (isHealthSendControl(button)) markHealthGeneration();

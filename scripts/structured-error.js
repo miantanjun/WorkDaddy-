@@ -115,6 +115,31 @@ function scanStructuredError(value, options) {
 }
 
 /**
+ * 从横幅 / 错误文案里解析官方给出的**权威解封时刻**（本地时区，毫秒时间戳）。
+ *
+ * 为什么需要（2026-09-30 补）：官方限流横幅原文形如
+ *   `当前您在Deepseek-V4.1-Flash模型的使用量已超出频率限制，可在2026-09-30 10:20:43重置后使用。`
+ * 而 `account-health.js` 的 `resolveUntil()` **本来就优先采用 `observation.resetAt`**，
+ * 只是之前没人把这个时刻填进观测对象 ⇒ 只能退回固定 10 分钟窗口（`DEFAULT_RATE_WINDOW_MS`）。
+ * 实测后果（`account-health.json` 现网数据）：插件记的解封时间比官方文案**早约 4 分钟**
+ * ⇒ 到点重试又撞墙 ⇒ 再记一次 ⇒ 表现成「正常用着突然弹限流」。
+ *
+ * 解析规则与渲染层 `inject.js` 上报 `/api/model-rate-limit` 的那段**保持一致**
+ * （同一正则 + 同一套时区处理），避免同一段文案在两处得出不同结论。
+ *
+ * @param {string} text 横幅拼接文本或结构化 message
+ * @returns {number} 毫秒时间戳；解析不出返回 0（调用方据此**不加**字段，保持逐字兼容）
+ */
+function parseResetAt(text) {
+  const raw = String(text || '');
+  const match = /(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+UTC[+-]\d{1,2})?)/i.exec(raw);
+  if (!match) return 0;
+  const normalized = match[1].replace(' UTC+8', '+08:00').replace(' UTC+0800', '+08:00').replace(' ', 'T');
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+/**
  * 合成一条 health 观测（纯函数，daemon 与测试共用同一份判据）。
  *
  * **零行为变化保证**：`structured` 为空（当前常态）时，返回对象与 F2 之前**逐字相同**
@@ -156,6 +181,10 @@ function observationFrom(structured, options) {
   };
   if (bizCode) observation.bizCode = bizCode;
   if (httpStatus) observation.httpStatus = httpStatus;
+  // 只在**真解析出**解封时刻时才加字段：文案里没有时间 ⇒ 返回对象与 F2 之前**逐字相同**
+  // （`test-structured-error.js` 的 B1/B2/B3 把这条当硬约束）。
+  const resetAt = parseResetAt(observation.text);
+  if (resetAt > 0) observation.resetAt = resetAt;
   return observation;
 }
 
@@ -264,6 +293,7 @@ module.exports = {
   RENDERER_SLOT,
   RING_MAX,
   scanStructuredError,
+  parseResetAt,
   observationFrom,
   structuredErrorProbeExpression,
   structuredErrorUninstallExpression,

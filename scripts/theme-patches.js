@@ -85,7 +85,11 @@ module.exports = [
   {
     id: 'patch-18',
     desc: '会话消息加载骨架（_loadingMessage 模块）：用户要求直接隐藏（不显示骨架屏）',
-    css: 'html[data-theme="dark"] [class*="_loadingWithCredit_"],html[data-theme="dark"] [class*="_loadingMessage_"]{display:none !important;}',
+    // ⚠️ 2026-09-30 收窄：原选择器还含 `[class*="_loadingWithCredit_"]`（类名字面含 Credit），
+    //    该组件同时承载「加载中 + 本次积分」展示 ⇒ 暗色主题下会被一并 display:none，
+    //    现象就是「用完了不显示本次花费积分」。骨架屏本体的类名是 _loadingMessage_，
+    //    单独隐藏它即可满足「不显示骨架屏」的原始诉求，不再牵连积分展示。
+    css: 'html[data-theme="dark"] [class*="_loadingMessage_"]{display:none !important;}',
   },
   {
     id: 'patch-19',
