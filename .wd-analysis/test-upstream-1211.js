@@ -27,6 +27,27 @@ function ok(cond, label, extra) {
 }
 function section(t) { console.log('\n--- ' + t + ' ---'); }
 
+/**
+ * 剥掉注释再检查 —— 否则「我在注释里写了某个函数名」会被误判成「已引入该函数」。
+ * （C1 就是这么误报的：daemon 注释里为防漏更而点名了 reloadIdeWorkbenchWindows。）
+ */
+function codeOnly(src) {
+  return String(src)
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+}
+
+/** 极简 semver 比较（只处理 x.y.z 三段数字）。a >= b ⇒ true */
+function semverGte(a, b) {
+  const pa = String(a || '').split('.').map((x) => Number(x) || 0);
+  const pb = String(b || '').split('.').map((x) => Number(x) || 0);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return true;
+    if ((pa[i] || 0) < (pb[i] || 0)) return false;
+  }
+  return true;
+}
+
 /* ============ A. 吸纳项：行内「同步到其他账号」按钮 ============ */
 section('A. 吸纳：会话列表行内同步按钮（上游 1.2.11）');
 
@@ -80,14 +101,15 @@ ok(/hint: reloaded \? '已切换并触发窗口刷新' : hint/.test(daemon),
 /* ============ C. 保持不动项（防误吸纳） ============ */
 section('C. 保持不动（上游 1.2.11 有，本地**明确不吸纳**）');
 
-ok(!/reloadIdeWorkbenchWindows/.test(daemon),
+ok(!/reloadIdeWorkbenchWindows/.test(codeOnly(daemon)),
   'C1 ⭐ 未吸纳 reloadIdeWorkbenchWindows —— 它依赖本地不存在的 IDE 浮层管理器（idePages），'
-  + '且整个分支有 codebuddy 守卫，对本机是死代码');
-ok(!/idePages\s*=\s*new Map\(\)/.test(daemon),
+  + '且整个分支有 codebuddy 守卫，对本机是死代码'
+  + '（⚠️ 用 codeOnly 检查：注释里点名它是为了防漏更，不算引入）');
+ok(!/idePages\s*=\s*new Map\(\)/.test(codeOnly(daemon)),
   'C2 ⭐ 未引入 IDE 浮层管理器（上一轮已判定保持不动，勿重复评估）');
-ok(!/wbs-ide-menu-dedupe-style/.test(inject),
+ok(!/wbs-ide-menu-dedupe-style/.test(codeOnly(inject)),
   'C3 未引入 IDE 账号菜单去重样式（codebuddy workbench 专用，本机无该页面）');
-ok(!/PREVENT_DUP|preventDuplicateSessions/.test(daemon),
+ok(!/PREVENT_DUP|preventDuplicateSessions/.test(codeOnly(daemon)),
   'C4 未吸纳「防重复会话」的 reloadWorkBuddyPage 改造 —— 本地该函数本来就是简化版、'
   + '没有那段「重载后主动刷新列表」逻辑 ⇒ 那个 bug 在本地不存在');
 
@@ -98,6 +120,31 @@ ok(daemon.indexOf("const DAEMON_VERSION = '") > 0,
   'D1 daemon 版本号常量在位');
 const v = (/const DAEMON_VERSION = '([^']+)';/.exec(daemon) || [])[1];
 ok(/^\d+\.\d+\.\d+$/.test(v || ''), 'D2 版本号是三段式', v);
+
+/* ============ E. ⭐⭐ 上游基线版本号（这个漏更过一次，必须锁死） ============ */
+section('E. 上游基线版本号（v1.9.5 / v1.9.6 连续两次漏更）');
+
+const up = (/const UPSTREAM_VERSION = '([^']+)';/.exec(daemon) || [])[1];
+ok(!!up, 'E1 UPSTREAM_VERSION 常量可提取', up);
+ok(/^\d+\.\d+\.\d+$/.test(up || ''), 'E2 上游基线是三段式', up);
+
+// ⭐ 核心断言：已吸纳的上游版本必须**等于**我们实际同步到的版本。
+//    v1.9.5 吸纳了 1.2.10、v1.9.6 吸纳了 1.2.11，但两次都忘了改这个常量，
+//    于是 semverCompare(latest, 1.2.8) 恒 > 0 ⇒ 面板永远误报「上游有新版」。
+ok(up === '1.2.11',
+  'E3 ⭐⭐ 上游基线 = 1.2.11（与已吸纳的 1.2.10 / 1.2.11 对齐）', up);
+
+// 防止倒退：基线不该低于本轮实际吸纳的版本
+ok(semverGte(up, '1.2.11'),
+  'E4 ⭐ 上游基线不得低于 1.2.11（不许倒退）', up);
+
+// 提醒：常量附近的注释必须写清「每次吸纳都要改这里」
+const around = daemon.slice(Math.max(0, daemon.indexOf("const UPSTREAM_VERSION = '") - 2600),
+  daemon.indexOf("const UPSTREAM_VERSION = '"));
+ok(/必须同时改这里|每次吸纳上游新版/.test(around),
+  'E5 ⭐ 常量旁留有「每次吸纳都要同步改这里」的提醒注释（防止第三次漏更）');
+ok(/session-sync\.js.*fixture.*1\.2\.8|fixture.*基线.*1\.2\.8/.test(around),
+  'E6 ⭐ 注释里区分了「发布版本基线」与「session-sync fixture 基线」是两件事');
 
 console.log('\n===== 结果：' + pass + ' 通过 / ' + failures.length + ' 失败 =====');
 if (failures.length) {

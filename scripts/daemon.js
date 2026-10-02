@@ -557,7 +557,20 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 const DAEMON_VERSION = '1.9.6';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
-const UPSTREAM_VERSION = '1.2.8';
+//
+// ⚠️⚠️ 2026-10-02 修正：这个常量**漏更了三个版本**，导致面板一直误报「上游有新版」——
+//   v1.9.5 吸纳了上游 1.2.10、v1.9.6 吸纳了 1.2.11，但这两次都只改了本修改版号，
+//   忘了同步这里 ⇒ semverCompare(latest=1.2.11, UPSTREAM_VERSION=1.2.8) > 0 恒成立。
+//   ⇒ **每次吸纳上游新版，必须同时改这里**，否则「检查更新」永远说有新版。
+// 1.2.9 吸纳：v1.9.3 前后（子 Agent 记录通用化那次）。
+// 1.2.10 吸纳（v1.9.5）：会话复制 transcript 身份重绑 / 积分段到期取最早值 /
+//         成长容器二值填充 / 消息导航 Markdown 详情浮层（新增 markdown-preview.js）/ token cacheWrite 别名。
+// 1.2.11 吸纳（v1.9.6）：会话列表行内「同步到其他账号」按钮 / 切号提示文案改为「请刷新窗口」。
+//         保持不动（codebuddy / mac 专用）：IDE 状态栏浮层、selectIdeTargets、
+//         patch-44 状态弹层排除、reloadIdeWorkbenchWindows、IDE 账号菜单去重样式。
+// ⚠️ 另注：`scripts/session-sync.js` 的 fixture 基线**仍是 1.2.8**（那是产物溯源用的真实原文，
+//    逐字节可 diff），它与这里的「发布版本基线」是两件事，不要混为一谈。
+const UPSTREAM_VERSION = '1.2.11';
 // 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.5）。
 // 本机 fork 用自己的修改版版本号（当前 1.8.x = 上游 1.2.6 基线 + 本地增强），否则更新检查会误判。
 // 1.5.0-b：省 token 专项批次 —— 账号页通用折叠卡片（自动切换 / 换号续跑 / 上下文体检三卡默认收起，

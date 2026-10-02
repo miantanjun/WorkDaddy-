@@ -1,645 +1,645 @@
 # 代码索引（自动生成，勿手改）
 
-> 由 `.wd-analysis/gen-code-index.js` 生成 · 2026-10-02 10:36:22
+> 由 `.wd-analysis/gen-code-index.js` 生成 · 2026-10-02 22:31:47
 > 用途：定位大文件里的函数，**替代「grep 整个文件」**（索引按需读，不常驻上下文）。
 > 查法：`node .wd-analysis/gen-code-index.js --grep <关键词>`
 
-## scripts/daemon.js  （19272 行 / 632 个函数）
+## scripts/daemon.js  （19285 行 / 632 个函数）
 
 | 行 | 函数 | 类型 | 摘要 |
 |---|---|---|---|
 | 56 | `resolveDaemonPrivilege` | fn |  |
 | 268 | `readAutomationsTolerant` | fn |  |
-| 690 | `persistScheduleLedger` | fn |  |
-| 700 | `noteScheduleSlot` | fn | 槽位命中时登记「这一刻本该发生一次发送」（由 createScheduleTicker 的 onSlot 回调触发） |
-| 720 | `recordScheduleSlotOutcome` | fn | 运行结束后回填结果。只有登记过的槽位才回填（手动/事件/interval 运行不带 slot） |
-| 740 | `scheduleVerifyNotify` | fn |  |
-| 750 | `runScheduleVerify` | fn | 一拍：找出「该发而没发成」的槽位 → 写桌面人话报告 + 弹一次汇总提示 + 标记已上报 |
-| 757 | `nameOf` | const |  |
-| 800 | `loadApiToken` | fn | 用 wx + 重读避免两个 watchdog 进程启动竞态时各自生成一枚 token。 |
-| 801 | `valid` | const |  |
-| 826 | `diagnosticsEnabled` | fn |  |
-| 834 | `redactDiagnosticText` | fn |  |
-| 847 | `shouldPersistBreadcrumb` | fn |  |
-| 853 | `validCdpPort` | fn |  |
-| 857 | `readCdpPortFile` | fn |  |
-| 866 | `writeCdpPortFile` | fn |  |
-| 881 | `readUiPortFile` | fn |  |
-| 885 | `writeUiPortFile` | fn |  |
-| 900 | `cdpPortCandidates` | fn |  |
-| 902 | `add` | const |  |
-| 910 | `isLocalPortAvailable` | fn |  |
-| 914 | `finish` | const |  |
-| 929 | `findAvailableCdpPort` | fn |  |
-| 936 | `selectCdpPort` | fn |  |
-| 1012 | `updateSourceOrder` | fn | 源尝试顺序：粘性源优先，其余按 UPDATE_SOURCES 定义顺序补齐 |
-| 1017 | `updateDebug` | fn |  |
-| 1018 | `scrub` | const |  |
-| 1048 | `writeUpdateAttempt` | fn |  |
-| 1059 | `macWorkDaddyAppPath` | fn |  |
-| 1082 | `resolveApplyUpdateVbs` | fn |  |
-| 1101 | `semverCompare` | fn | 简单 semver 比较：a > b → 1，a < b → -1，相等 → 0（忽略预发布后缀） |
-| 1114 | `hardTimeout` | fn | 这里用独立定时器到点强制 destroy + reject，保证「检查更新」不会长时间挂着。返回取消函数。 |
-| 1126 | `httpsGet` | fn | 带超时的 HTTPS GET（返回 statusCode + body + headers） |
-| 1155 | `githubAuthHeaders` | fn |  |
-| 1165 | `latestTagViaHtml` | fn | 这条路径不消耗 GitHub API 配额，是 API 被限流时的兜底检测手段（拿不到资产名与 SHA-256）。 |
-| 1189 | `deterministicAssetURL` | fn | 用于 API 被限流、只剩「网页检测」时的下载兜底；URL 可用不代表有 SHA-256。 |
-| 1191 | `fileName` | const |  |
-| 1196 | `updateApiErrorText` | fn | API 不可用时的统一提示语（区分限流/超时/不可见，便于判断是网络、代理还是仓库问题） |
-| 1210 | `isNetworkFailure` | fn | 再试网页兜底只是白等一次超时，直接走缓存兜底。 |
-| 1219 | `parseSha256` | fn | 注：GitHub 现在会为上传的资产自动给出 digest，正常路径走 asset.digest，这里只是兜底。 |
-| 1233 | `parseSha256Map` | fn | Gitee 镜像没有 asset.digest 字段，多资产发布必须在 notes 里逐文件给哈希。 |
-| 1243 | `normalizeAssetSha256` | fn |  |
-| 1248 | `expectedUpdateSha256` | fn |  |
-| 1253 | `checkUpdate` | fn | 检查更新：按源降级链请求 Releases API（GitHub 失败自动降级 Gitee），比对版本，结果写缓存（内存 + 文件） |
-| 1290 | `assets` | const | 的 /releases/download/ 路径，防止响应里的任意地址被当作安装包来源。 |
-| 1334 | `applyCache` | const | 二次兜底：读上次成功缓存。只认同一仓库的缓存，避免换源后读到旧数据。 |
-| 1393 | `checkUpstreamUpdate` | fn | 上游官方安装包不含本修改版补丁，装上去等于退回官方状态，因此这里只提示、不下载安装。 |
-| 1426 | `readUpstreamCache` | const |  |
-| 1474 | `checkUpdateBoth` | fn | 面板「检查更新」按钮与后台定时检查统一走这里，保证两个版本号一次刷新到位。 |
-| 1482 | `versionCheckPayload` | fn | 「关于」页需要的版本汇总字段（两个版本号 + 任一有更新即 anyUpdate） |
-| 1508 | `downloadUpdate` | fn | 同一 daemon 内只允许一个下载流程，避免并发请求互相删除/覆盖固定目标文件。 |
-| 1517 | `downloadUpdateInternal` | fn |  |
-| 1575 | `cleanupTemp` | const |  |
-| 1577 | `failDownload` | const |  |
-| 1663 | `sha256File` | fn | 计算文件 SHA-256 |
-| 1667 | `inspectPackagedApp` | fn |  |
-| 1684 | `packagedAppVersionError` | fn |  |
-| 1698 | `validateUpdateArtifact` | fn | 和旧版残留文件都可能留下普通文件。hdiutil imageinfo 是 macOS UDIF 的确定性预检。 |
-| 1752 | `normTs` | fn | 时间戳归一化：秒/毫秒/字符串 → 毫秒；无效返回 null |
-| 1760 | `httpJson` | fn | 带超时的 JSON 请求（返回解析后的 JSON；解析失败回退 {code,message}） |
-| 1800 | `buildSeamlessAuthFile` | fn | （{account, auth, accounts, allAccounts}，与 lib.js switchTo 写回的格式一致） |
-| 1867 | `scheduleOAuthStateCleanup` | fn |  |
-| 1873 | `saveSeamlessAccount` | fn | 把无感登录采集到的账号写入 accounts/<uid>.info 备份（不触碰当前登录文件） |
-| 1894 | `oauthPollOnce` | fn | 轮询一次授权结果：未完成返回 {done:false}；完成则入库并返回账号信息 |
-| 1923 | `accData` | const |  |
-| 1935 | `extractAppFromDmg` | fn | 从 dmg 中解出 WorkDaddy.app 到 UPDATE_DIR（挂载→拷贝→卸载），返回 app 目录 |
-| 1983 | `applyUpdate` | fn | 由 Inno Setup 确认 WorkBuddy 已退出、替换文件并启动新版。 |
-| 2008 | `markAttemptFailure` | const |  |
-| 2017 | `markSpawnFailure` | const |  |
-| 2139 | `rotateLogsIfNeeded` | fn | logWriteCount 声明在文件前部（模块初始化阶段也要能写日志，见那里的注释） |
-| 2154 | `log` | fn |  |
-| 2165 | `isLockPermissionError` | fn |  |
-| 2169 | `reportDaemonLockFallback` | fn |  |
-| 2179 | `isCurrentWindowsDaemonProcess` | fn |  |
-| 2214 | `acquireDaemonLock` | fn | Windows 数据目录锁不可写时，使用同一台机器用户临时目录中的哈希锁继续保证单实例。 |
-| 2271 | `releaseDaemonLock` | fn |  |
-| 2284 | `scheduleBackup` | fn |  |
-| 2355 | `settlePendingReloadInjection` | fn |  |
-| 2367 | `armPendingReloadInjection` | fn |  |
-| 2389 | `runPendingReloadInjection` | fn |  |
-| 2416 | `findCdpEndpoint` | fn |  |
-| 2425 | `ports` | const | 不会退化成「只看标题」的猜测，也就不会误连兄弟端。 |
-| 2460 | `targetsBelongToProfile` | fn |  |
-| 2480 | `isWorkBuddyCdpTarget` | fn |  |
-| 2486 | `getPageTarget` | fn |  |
-| 2492 | `cleanupForeignInjectedTargets` | fn |  |
-| 2500 | `cleanupForeignInjectedTarget` | fn |  |
-| 2509 | `finish` | const |  |
-| 2552 | `cdpFocusDiagnostics` | fn |  |
-| 2566 | `cdpMouseClick` | fn |  |
-| 2589 | `cdpSend` | fn |  |
-| 2607 | `cdpActivatePage` | fn | 激活页面（强制 lifecycle active + 置前），供 cdpSend 自动恢复与 devtools-proxy 保活复用 |
-| 2608 | `raw` | const |  |
-| 2620 | `connectCdp` | fn |  |
-| 2697 | `waitForPageReadyThenDispatch` | fn |  |
-| 2699 | `retry` | const |  |
-| 2712 | `dispatchAutomationEvent` | fn |  |
-| 2748 | `onCdpEvent` | fn |  |
-| 2751 | `url` | const |  |
-| 2832 | `cdpLoop` | fn |  |
-| 2845 | `reloadWorkBuddyPage` | fn |  |
-| 2847 | `withTimeout` | const |  |
-| 2889 | `autoFocusSessionByTitle` | fn | 并自动展开折叠的分组；最长约 26s，找不到则静默放弃。 |
-| 3012 | `queryWindowsWorkBuddyProcesses` | fn |  |
-| 3026 | `resolveWorkBuddyBinary` | fn |  |
-| 3029 | `tryFile` | const |  |
-| 3041 | `psCmd` | const |  |
-| 3070 | `addCandidate` | const |  |
-| 3114 | `psQuote` | const |  |
-| 3131 | `runCommand` | fn |  |
-| 3138 | `finish` | const |  |
-| 3162 | `restoreWorkBuddyWindow` | fn | Windows 的 WorkBuddy 可能记住“最小化到托盘”状态；重启后显式恢复主窗口，避免只看到托盘图标。 |
-| 3191 | `verifiedWindowsWorkBuddyProcesses` | fn |  |
-| 3207 | `revalidateWindowsWorkBuddyProcess` | fn |  |
-| 3224 | `linuxWorkBuddyPids` | fn |  |
-| 3248 | `workBuddyRunning` | fn |  |
-| 3265 | `waitForWorkBuddyExit` | fn |  |
-| 3280 | `waitForWorkBuddyExitTolerant` | fn |  |
-| 3292 | `quitWorkBuddy` | fn | 退出 WorkBuddy，并确认进程已经消失；失败时拒绝继续登录切换。 |
-| 3338 | `detail` | const |  |
-| 3370 | `findWorkDaddyApp` | fn | 探测 WorkDaddy.app 位置（macOS 专用：退出登录后打开它，由其 launcher 以 CDP 模式重启 WorkBuddy 并注入组件） |
-| 3396 | `resolveLauncherHome` | fn |  |
-| 3406 | `resolveLinuxLaunchTarget` | fn |  |
-| 3421 | `relaunchWorkBuddy` | fn | 重新启动 WorkBuddy：macOS 优先走 WorkDaddy.app launcher；Windows 直接带 CDP 参数重启 exe |
-| 3500 | `clickByText` | fn |  |
-| 3546 | `findByText` | fn |  |
-| 3575 | `CLAIM_TEXTS` | const | ================= 自动领取积分（轮询点击"立即领取"） ================= |
-| 3581 | `claimDebugFile` | fn | 临时调试日志：把领取查找过程写到 /tmp，方便排查"明明有按钮却识别不到" |
-| 3584 | `claimLog` | fn |  |
-| 3592 | `sleep` | fn |  |
-| 3597 | `waitPageLoaded` | fn | 等待页面加载完成（reload 后调用），超时返回 false |
-| 3644 | `automationStateFile` | const |  |
-| 3645 | `readAutomationState` | fn |  |
-| 3648 | `writeAutomationState` | fn |  |
-| 3654 | `automationAccountStatus` | fn |  |
-| 3688 | `automationDeepLocatorExpression` | fn |  |
-| 3703 | `first` | fn |  |
-| 3708 | `choose` | fn |  |
-| 3709 | `firstByAttribute` | fn |  |
-| 3719 | `automationDomAction` | fn |  |
-| 3720 | `assertActive` | const |  |
-| 3728 | `read` | const |  |
-| 3784 | `automationHttpRequest` | fn |  |
-| 3807 | `automationPublicRun` | fn |  |
-| 3815 | `automationPanelSetInputActive` | fn | 运行结束若运行前面板本是展开的，再走「点机器人按钮」同一条 setOpen(true) 恢复。全程可逆。 |
-| 3826 | `automationPanelSetOpen` | fn |  |
-| 3834 | `automationPanelIsOpen` | fn | 读当前面板是否展开（.wbs-panel 是否带 .show，且视觉可见） |
-| 3843 | `automationClearStaleHideTag` | fn | daemon 重启/运行中断可能残留，页面会一直面板不可见）。无 tag 时是 no-op，不影响面板开合状态。 |
-| 3856 | `automationMarkerProbeExpression` | fn | 返回值 { lastText, lastDone, rowCount } |
-| 3871 | `automationNotifyToast` | fn |  |
-| 3901 | `isAutoCopyJobSettled` | fn | 本地作业模型：status ∈ queued\|running\|done\|partial\|conflict\|error\|paused，没有完成 Promise。 |
-| 3902 | `assertAutoCopySucceeded` | fn |  |
-| 3908 | `recordAccountSyncResult` | fn |  |
-| 3920 | `assertAccountSwitchIdle` | fn |  |
-| 3926 | `automationSwitchProgress` | fn |  |
-| 3934 | `waitAutomationSyncBounded` | fn | 等入向同步「落定且成功」。被停止时立刻抛出（让上层走收尾），超时抛错而不是无限等。 |
-| 3951 | `drainAutoCopyJobBounded` | fn | 停止后仍要等正在写盘的作业落定再释放账号锁 —— 提前释放会让「还原账号」与文件提交撞车。 |
-| 3957 | `acquireAutomationAccountSwitch` | fn | 抢账号锁：忙碌时**有界等待**（上游是无限轮询），超时抛错。 |
-| 4004 | `limitFailoverManualPublic` | fn |  |
-| 4023 | `readLimitFailoverState` | fn |  |
-| 4032 | `writeLimitFailoverState` | fn |  |
-| 4043 | `limitFailoverAccounts` | fn | 全量账号（保证顺序）+ 已缓存的积分段（若该账号被查过积分）。 |
-| 4057 | `orderCheckinAccounts` | fn | 未知到期时间排最后；到期时间相同保持原顺序（稳定排序，同上游 accountCreditCache.order 语义）。 |
-| 4073 | `runCdpExpression` | fn |  |
-| 4084 | `readLimitBanner` | fn |  |
-| 4097 | `readStructuredError` | fn |  |
-| 4101 | `readLiveModel` | fn |  |
-| 4105 | `setLiveModel` | fn |  |
-| 4109 | `readLastUserTaskText` | fn |  |
-| 4117 | `readFailoverSnapshot` | fn |  |
-| 4133 | `pickWorkbuddyDaemonClient` | fn |  |
-| 4135 | `walk` | fn |  |
-| 4172 | `cloudAgentCallExpression` | fn | 拼一次「渲染层调用 daemonClient[method](params)」的自包含表达式。 |
-| 4187 | `cloudAgentCall` | fn | 调一次云侧能力，永不外抛 —— 失败以 `{ok:false,error}` 返回，便于上层分类。 |
-| 4204 | `edgeSyncMappingDbPath` | fn |  |
-| 4219 | `getEdgeSyncDb` | fn |  |
-| 4232 | `readEdgeSyncRows` | fn |  |
-| 4245 | `listLocalSessionIds` | fn | 本地仍存在的会话 id 集合（跨全部账号）——只有「本地已没了」的才算残留。 |
-| 4271 | `probeCloudConversations` | fn |  |
-| 4298 | `collectCloudGhosts` | fn |  |
-| 4336 | `purgeCloudConversations` | fn |  |
-| 4370 | `purgeCloudCopiesAfterLocalDelete` | fn |  |
-| 4387 | `waitCloudClientReady` | fn | 切号会让页面整页 reload，React 树随之重建 —— 等 daemon 客户端重新挂上再动手。 |
-| 4405 | `purgeCloudGhostsSwitching` | fn |  |
-| 4414 | `switchBack` | const |  |
-| 4455 | `limitReplyStartedExpression` | fn | 续跑是否已经"跑起来"：消息流里出现流式请求，或最后一条是 assistant。 |
-| 4465 | `limitReplyStarted` | fn |  |
-| 4470 | `taskHasFailoverStep` | fn | 找出启用中、且带 account.failoverContinue 步骤的任务（不写死 id，用户改名换 id 也能用）。 |
-| 4477 | `findLimitFailoverTask` | fn |  |
-| 4481 | `runningLimitFailoverRun` | fn |  |
-| 4485 | `waitLimitVerdict` | fn |  |
-| 4510 | `runLimitFailoverCore` | fn |  |
-| 4541 | `hits` | const |  |
-| 4830 | `buildLimitFailoverPorts` | fn |  |
-| 4915 | `limitFailoverDesktopLogDir` | fn |  |
-| 4924 | `writeAccountSwitchDesktopLog` | fn | 写桌面日志。**任何情况下都不抛**：日志写不出来不能影响切号本身。 |
-| 4938 | `limitFailoverNotify` | fn |  |
-| 4946 | `readLimitReplyIdle` | fn |  |
-| 4950 | `limitFailoverAccountByUid` | fn |  |
-| 4956 | `limitFailoverPrimaryUid` | fn |  |
-| 4964 | `limitFailoverBlockedUntil` | fn | 两处一旦口径分叉，「选备选账号」与「等主账号窗口」就会各按各的时间走。 |
-| 4970 | `limitFailoverLiveRole` | fn | 当前账号相对这次切号计划的状态：target(还在续跑账号) / primary(已经回到主账号) / other / unknown |
-| 4979 | `cancelLimitFailoverSwitchBack` | fn |  |
-| 4992 | `limitFailoverPlanCancelled` | fn |  |
-| 4996 | `finishLimitFailoverSwitchBack` | fn |  |
-| 5019 | `waitLimitFailoverChunks` | fn | 分片等待：期间随时可被「新一轮切号 / 手动切号 / 取消」打断 |
-| 5034 | `runLimitFailoverSwitchBack` | fn |  |
-| 5035 | `isCancelled` | const |  |
-| 5036 | `elapsedMs` | const |  |
-| 5037 | `stopIfUnsafe` | const |  |
-| 5157 | `scheduleLimitFailoverSwitchBack` | fn |  |
-| 5192 | `handleLimitFailoverOutcome` | fn | 注意 skip 不算「触发」，不写日志也不排切回。 |
-| 5254 | `idleSwitchbackBusy` | fn | 此刻是否「不该抢账号」：任何任务在跑、切号在飞、切回计划待执行都算 |
-| 5264 | `readSessionActivity` | fn |  |
-| 5269 | `idleSwitchbackPublicState` | fn |  |
-| 5302 | `runIdleSwitchBack` | fn | 真正执行一次「闲置切回」。切之前把所有前置条件再确认一遍（等待期间世界可能已经变了）。 |
-| 5362 | `idleSwitchbackTick` | fn |  |
-| 5421 | `startIdleSwitchbackTicker` | fn |  |
-| 5433 | `automationSwitchAccount` | fn |  |
-| 5492 | `readAutomationTurnState` | fn | ⚠️ hydration 不算「在飞」：历史还在加载时切号是安全的（v1.3.16 的教训）。 |
-| 5499 | `waitForAutomationReplySettle` | fn | 等「当前会话没有在生成的回合」，最长 maxMs。ok:false 表示等满预算仍在生成。 |
-| 5517 | `automationSwitchAccountWithSync` | fn | 行为与改动前完全一致 —— 闸门只加在「切完号要跑 steps」这一条路径上。 |
-| 5530 | `runSwitch` | const | 会把其它运行的 DOM/发送步骤一起堵死（withInput 是模块级共享闸门）。 |
-| 5553 | `automationRestoreAccountDeferring` | fn | 而硬切会掐死在跑的定时任务；代价不对等。 |
-| 5565 | `automationAccountSwitchGuarded` | fn |  |
-| 5587 | `startAutomationRun` | fn |  |
-| 5603 | `isCancelled` | const |  |
-| 5606 | `appendRunLog` | const |  |
-| 5617 | `panelPrepare` | const |  |
-| 5629 | `withInput` | const |  |
-| 5646 | `unconfirmedSendError` | const | ⚠️ 语义对齐 daemon.js 里那条既有政策：Do not retry an unconfirmed send. |
-| 5656 | `readSession` | const | 必须保持原语义，否则会波及后面的「发送是否被受理」判定）。 |
-| 5664 | `sessionAction` | const |  |
-| 5672 | `openedUid` | const |  |
-| 5703 | `accountUid` | const |  |
-| 5799 | `completionReport` | const |  |
-| 5826 | `publicAccounts` | const |  |
-| 5827 | `publicCurrent` | const |  |
-| 5830 | `sessionActionWithReceipt` | const | 定时任务核验台账把它当成 success 的凭据存起来（不改任何发送行为，只是旁路记录）。 |
-| 5898 | `resumeAutomationAfterNavigation` | fn |  |
-| 5909 | `todayStr` | fn |  |
-| 5911 | `z` | const |  |
-| 5915 | `loadCheckinCache` | fn |  |
-| 5922 | `saveCheckinCache` | fn |  |
-| 5934 | `refreshAccountBackupToken` | fn | 刷新备份账号凭证：临期惰性刷新，或距上次刷新超过一天时执行保活。 |
-| 5988 | `dailyCheckin` | fn |  |
-| 6037 | `claimDailyForUid` | fn |  |
-| 6046 | `performAccountCheckin` | fn |  |
-| 6092 | `injectWidget` | fn | 通过 CDP 把右下角组件注入到 WorkBuddy 渲染进程（幂等，可反复调用） |
-| 6156 | `desc` | const |  |
-| 6201 | `buildInjectScript` | fn |  |
-| 6246 | `injectWidgetManual` | fn |  |
-| 6254 | `readCdpTargets` | fn |  |
-| 6265 | `readLogTail` | fn |  |
-| 6276 | `collectDiagnostics` | fn |  |
-| 6301 | `writeDiagnosticsSnapshot` | fn |  |
-| 6322 | `sqliteRun` | fn |  |
-| 6328 | `codeBuddySessionRows` | fn |  |
-| 6343 | `sqlParamAt` | fn |  |
-| 6346 | `sqliteQuery` | fn |  |
-| 6388 | `officialSlotOf` | fn | 本地时区槽位 `YYYY-MM-DDTHH:MM`（与 scheduled-send 的 localSlot 同格式）。 |
-| 6389 | `pad` | const |  |
-| 6406 | `readOfficialAutomations` | fn |  |
-| 6417 | `items` | const |  |
-| 6451 | `findOfficialSlotConflicts` | fn |  |
-| 6480 | `sessionPayloadExists` | fn | 会话载荷确实存在，并逐级拒绝符号链接/普通文件后再创建缺失目录。 |
-| 6499 | `createDirectoryNoFollow` | fn |  |
-| 6518 | `repairMissingSessionWorkspaces` | fn |  |
-| 6544 | `sessionRangeMs` | fn |  |
-| 6561 | `copySessionFiles` | fn | workspace/sessions/<id>/ 产物目录留到第二阶段单独复制，避免单条会话堵死整条串行队列。 |
-| 6565 | `copyOne` | const |  |
-| 6591 | `onlyCopyable` | const | 要拦的只有 socket / FIFO / 字符设备 / 块设备这类**根本无法复制**的特殊文件。 |
-| 6699 | `sessionBodyMtime` | fn |  |
-| 6716 | `sessionContentMtime` | fn |  |
-| 6720 | `visit` | const |  |
-| 6754 | `directoryStats` | fn |  |
-| 6783 | `measurePathBytes` | fn | 单条路径的体积：文件取 stat.size，目录递归求和。与 directoryStats 同口径（跳过符号链接）。 |
-| 6794 | `sessionBucketPaths` | fn | 会话的全部本地路径，供体积统计与产物复制复用。 |
-| 6820 | `sessionContentSize` | fn | 会话总体积 + 其中「产物目录」（workspace/sessions/<id>/）的体积。 |
-| 6835 | `formatByteSize` | fn | 人类可读体积，用于日志与进度提示。 |
-| 6846 | `autoCopySessionLabel` | fn | 会话展示名，用于进度条上「正在处理哪个会话」。 |
-| 6866 | `sortAutoCopyPlanBySize` | fn |  |
-| 6885 | `readCopyManifestCache` | fn |  |
-| 6896 | `invalidateCopyManifestCache` | fn | 让缓存失效（写完清单后必须调，否则下一次排序还会拿到旧解析结果）。 |
-| 6905 | `deriveCopyManifestFromCache` | fn |  |
-| 6932 | `workspaceLinkMode` | fn | 读取 meta.autoCopy.workspaceLinkMode（'link' \| 'copy'），缺省为 link。 |
-| 6943 | `detectWorkspaceLinkSupport` | fn | 一次性探测：当前卷是否支持硬链接。失败则本进程内永久回落复制。 |
-| 6965 | `emptyWorkspaceCounters` | fn |  |
-| 6973 | `transferWorkspaceTree` | fn |  |
-| 6981 | `copyFileAt` | const |  |
-| 7074 | `copySessionWorkspacePayload` | fn |  |
-| 7096 | `outcome` | const |  |
-| 7108 | `yieldAutoCopyToRenderer` | fn | reliable source of truth; choose the freshest on-disk snapshot first. |
-| 7129 | `syncAutoCopyLineage` | fn | 不变量 I-1：全表 status='archived' 的行只允许属于主账号。 |
-| 7250 | `changedSinceBaseline` | const | 若还让它拦在前面 return，内容判据永远走不到 —— 两条判据同时存在只会互相打架。 |
-| 7272 | `forcedSource` | const | 真分叉下「最新」并不等于「用户想要的那份」，按时间选会静默丢另一边的内容。 |
-| 7284 | `trackPayload` | const |  |
-| 7342 | `sleepMs` | const |  |
-| 7453 | `autoCopyConflictSnapshot` | fn | 硬合会产出重复/错序的 tool_call 配对 —— 宁可让用户选一份，也不自动产出坏会话。 |
-| 7499 | `listAutoCopyConflicts` | fn |  |
-| 7512 | `dismissAutoCopyConflict` | fn | 只推进标尺、不碰会话内容 —— 这是「默认安全」的那一半：解掉自锁，数据一个字节都不动。 |
-| 7526 | `preferAutoCopyConflict` | fn | 「以某个账号为准覆盖其余」——会丢数据，只在用户显式选择时调用。 |
-| 7552 | `deleteSessionsCore` | fn | 删主账号的会话 → 向下级联，其他账号的同源副本一起删；删非主账号 → 只删本账号那一份。 |
-| 7652 | `readNativeDeleteSweep` | fn |  |
-| 7659 | `saveNativeDeleteSweep` | fn |  |
-| 7672 | `pendingNativeDeletes` | fn | 水位线之后的待处理软删（只读，供进度展示与 sweep 使用） |
-| 7679 | `sweepNativeSessionDeletes` | fn |  |
-| 7751 | `readArchiveIsolation` | fn |  |
-| 7758 | `saveArchiveIsolation` | fn |  |
-| 7772 | `archiveIsolationEnabled` | fn |  |
-| 7777 | `collectArchivedCopyState` | fn | 只读：全表 archived 活行 + 血缘登记索引（判定「这份副本在主账号那边还在不在」用） |
-| 7793 | `members` | const |  |
-| 7861 | `listArchivedCrossAccountCopies` | fn | 只读报告：主账号该留的 / 其他账号该清的 / 归类不明只上报的 |
-| 7910 | `purgeLocalSessionCopyCore` | fn |  |
-| 7942 | `purgeArchivedCrossAccountCopies` | fn |  |
-| 7993 | `sweepArchivedCopies` | fn | 常驻拍子：只在「当前登录账号 ≠ 主账号」时删该账号名下的归档行（判定链见段首注释） |
-| 8070 | `summarizeSessionImportErrors` | fn |  |
-| 8080 | `archiveRelativePath` | fn |  |
-| 8084 | `collectSessionArchiveFiles` | fn |  |
-| 8087 | `collect` | const |  |
-| 8127 | `ensureArchiveParentNoFollow` | fn |  |
-| 8146 | `restoreSessionArchiveFiles` | fn |  |
-| 8169 | `restoreStagedSessionArchiveFiles` | fn | from a JSON API payload or an unverified archive entry. |
-| 8200 | `getSessionSyncCache` | fn |  |
-| 8223 | `scheduleSessionSyncCacheSave` | fn | timer.unref() —— 缓存是尽力而为的，绝不允许它拖住 daemon 退出。 |
-| 8239 | `isTaskSessionRecord` | fn |  |
-| 8244 | `sqlPlaceholders` | fn |  |
-| 8248 | `insertCopiedSession` | fn |  |
-| 8278 | `createForkSession` | fn |  |
-| 8311 | `prepareSessionExport` | fn |  |
-| 8328 | `exportSessions` | fn |  |
-| 8342 | `validImportedSessionUid` | fn |  |
-| 8348 | `importSessions` | fn |  |
-| 8352 | `importSessionArchives` | fn |  |
-| 8400 | `adoptExistingCopyTarget` | fn |  |
-| 8444 | `copySessionRecord` | fn |  |
-| 8461 | `perform` | const |  |
-| 8582 | `getSessionDirtyIndex` | fn |  |
-| 8590 | `scheduleSessionDirtySave` | fn |  |
-| 8607 | `markSessionDirty` | fn | 记一条脏标记；**只有真变化才置脏**（同一时刻的重复通知不写盘）。 |
-| 8618 | `markSessionDirtyBaseline` | fn | renderer 建立基线（`body.ready`）。未建基线的账号一律 fail-open = 全当脏。 |
-| 8623 | `clearSessionDirty` | fn | 清一条脏标记；`expectedAt` 不匹配就不清（**并发到来的新事件不许被旧的在飞清理抹掉**）。 |
-| 8632 | `autoCopyDirtyFastpathEnabled` | fn | 批次 3 的开关：**默认关**（文件缺失 / 内容不是 {enabled:true} 都算关）。每次规划读一次。 |
-| 8648 | `isAutoCopyRowCleanByDirty` | fn |  |
-| 8653 | `lineageId` | const |  |
-| 8662 | `buildAutoCopyPlan` | fn |  |
-| 8745 | `isAutoCopyPausedError` | fn |  |
-| 8752 | `beginRendererReloadPriority` | fn |  |
-| 8767 | `hasPendingAutoCopyTo` | fn |  |
-| 8776 | `pruneAutoCopyJobs` | fn |  |
-| 8786 | `runAutoCopyQueue` | fn |  |
-| 8816 | `autoCopyAfterAccountSwitch` | fn | 三个调用点统一走这里，别再各写一份（写散了必然漏）。 |
-| 8883 | `enterSwitchFlowRunner` | fn | 进入一个切号流程；返回**幂等**的退出函数（重复调用不会把计数减成负）。 |
-| 8912 | `setSwitchFlowPhase` | fn |  |
-| 8918 | `terminal` | const |  |
-| 8953 | `readSwitchFlowState` | fn | 读状态（惰性过期：终态留 TTL 供渲染层读到，过期即清）。 |
-| 8965 | `requestSwitchFlowCancel` | fn | 「关闭弹窗」：置取消位 + 立刻请求中止复制（worker 在下个检查点收尾，不是硬停）。 |
-| 9019 | `waitPreSyncSettled` | fn |  |
-| 9073 | `preSyncBeforeSwitch` | fn |  |
-| 9175 | `resolveSyncNowSources` | fn |  |
-| 9176 | `all` | const |  |
-| 9212 | `limitFailoverSyncWaitMs` | fn |  |
-| 9247 | `openConversationById` | fn |  |
-| 9271 | `fastExpr` | const |  |
-| 9356 | `sidebarProbe` | const |  |
-| 9526 | `prepareFailoverContinuation` | fn |  |
-| 9532 | `degrade` | const |  |
-| 9634 | `startAutoCopyJob` | fn |  |
-| 9707 | `run` | const |  |
-| 9715 | `finishPaused` | const | 任务（复制本身幂等：已完成的行按 mapping 判 skipped），重跑等于只搬剩下的。 |
-| 9999 | `activeAutoCopyJob` | fn |  |
-| 10012 | `publicAutoCopyJob` | fn |  |
-| 10094 | `publicSpaceScanJob` | fn |  |
-| 10118 | `buildSpaceScanResolvers` | fn |  |
-| 10164 | `readSpaceScanCache` | fn | 读缓存：面板打开时先用旧结果秒出，再决定要不要重扫。 |
-| 10176 | `startSpaceScanJob` | fn |  |
-| 10266 | `isValidSessionId` | fn |  |
-| 10275 | `matchedSessionIds` | fn |  |
-| 10280 | `resolveManagedSessionTarget` | fn |  |
-| 10293 | `isManagedDirectoryNoFollow` | fn |  |
-| 10317 | `removeSessionAppCache` | fn | app/sessions.json 是共享窗口缓存，只移除所选会话的条目，不删除整个文件或 app 目录。 |
-| 10351 | `deleteSessionFiles` | fn | tasks/<id>/、file-history/<id>/、artifact-index/<id>.json（全部按会话 id 精确删除，不可恢复） |
-| 10357 | `delOne` | const |  |
-| 10401 | `json` | fn |  |
-| 10430 | `isAllowedApiOrigin` | fn |  |
-| 10450 | `hasApiToken` | fn |  |
-| 10457 | `isApiRequestAuthorized` | fn |  |
-| 10466 | `isAllowedDevtoolsOrigin` | fn |  |
-| 10506 | `readBody` | fn |  |
-| 10511 | `ignoreLateError` | const |  |
-| 10512 | `cleanup` | const |  |
-| 10522 | `finish` | const |  |
-| 10528 | `fail` | fn |  |
-| 10534 | `onData` | fn |  |
-| 10547 | `onEnd` | fn |  |
-| 10558 | `onError` | fn |  |
-| 10561 | `onIncomplete` | fn |  |
-| 10593 | `workbuddySettingsPath` | fn |  |
-| 10597 | `readWorkbuddySettings` | fn |  |
-| 10605 | `writeWorkbuddySettings` | fn |  |
-| 10611 | `buildAskRuleBlock` | fn |  |
-| 10616 | `stripAskRule` | fn | 从 customPrompt 中移除 wbs 规则段（保留用户其它内容） |
-| 10626 | `getAskModeState` | fn |  |
-| 10628 | `customPrompt` | const |  |
-| 10641 | `setAskMode` | fn |  |
-| 10656 | `refreshAskModeIfEnabled` | fn | 启动时调用：如已启用决策弹窗，把旧的 ASK_MODE_RULE 替换为最新版本（用 ASK_MODE_TAG_START/END 精确识别） |
-| 10698 | `buildZhReasoningBlock` | fn |  |
-| 10703 | `stripZhReasoning` | fn | 从 customPrompt 中移除中文思考段（保留用户其它内容与决策弹窗段） |
-| 10713 | `getZhReasoningState` | fn |  |
-| 10715 | `customPrompt` | const |  |
-| 10731 | `setZhReasoning` | fn |  |
-| 10751 | `refreshZhReasoningIfEnabled` | fn | 启动时调用：如已启用中文思考，把旧的规则段替换为最新版本（用标记精确识别） |
-| 10802 | `deriveAgentHealth` | fn |  |
-| 10840 | `buildAgentHintRule` | fn |  |
-| 10890 | `buildAgentHintBlock` | fn |  |
-| 10902 | `stripAgentHint` | fn | 从 customPrompt 中移除子 Agent 提示段（保留用户其它内容，**且不改动用户原文一个字节**）。 |
-| 10917 | `getAgentHintState` | fn |  |
-| 10919 | `customPrompt` | const |  |
-| 10936 | `setAgentHint` | fn |  |
-| 10974 | `refreshAgentHintAfterCatalogChange` | fn |  |
-| 10990 | `refreshAgentHintIfEnabled` | fn | 启动时调用：如已开启，把旧的提示规则替换为最新版本（用标记精确识别）。 |
-| 11019 | `collectAgentUsage` | fn |  |
-| 11075 | `readNoDisturbState` | fn |  |
-| 11078 | `state` | const |  |
-| 11100 | `readNoDisturbApplied` | fn |  |
-| 11104 | `hasAll` | const |  |
-| 11119 | `removeListItems` | fn |  |
-| 11125 | `ensureSandboxObj` | fn |  |
-| 11134 | `applyNoDisturbSwitch` | fn |  |
-| 11138 | `recordAndMerge` | const | 关闭：仅回滚「本次新增」，绝不删除用户原有项。 |
-| 11144 | `rollback` | const |  |
-| 11192 | `setNoDisturbSwitch` | fn | 读-改-写（整文件原子替换），并维护 wbs.noDisturb.state |
-| 11207 | `noDisturbAudit` | fn |  |
-| 11242 | `acAppConfigPath` | fn |  |
-| 11245 | `readAppConfig` | fn |  |
-| 11253 | `writeAppConfig` | fn | 原子写 app-config.json：目录自动创建、0644、临时文件 + rename，写后由调用方读回校验 |
-| 11258 | `acBlock` | fn |  |
-| 11265 | `stripACBlocks` | fn |  |
-| 11271 | `applyACBlock` | fn | 开启=追加（幂等：先剥离再追加，最终只保留一个最新 v1 块）；关闭=剥离 |
-| 11277 | `acCustomPromptPresent` | fn |  |
-| 11282 | `readAutoContinueState` | fn |  |
-| 11297 | `setAutoContinue` | fn | 开启：先写 app-config（指令块），再持久化开关状态；关闭：先删除指令块，再持久化关闭状态 |
-| 11314 | `refreshAutoContinueIfEnabled` | fn | 启动时调用：开关开启但指令块缺失/被外部改写 → 补写最新 v1 块；失败仅记录脱敏错误 |
-| 11328 | `acDispatchEnter` | fn | 且内容非空时 Slate 自动隐藏占位符（解决 execCommand 模拟输入导致的占位符重叠/事件不生效）。 |
-| 11345 | `acSendCurrentInput` | fn | 通过 CDP 直接发送「当前输入框已有内容」：仅聚焦 + 真实 Enter（不写入任何文字） |
-| 11365 | `sessBuild` | fn |  |
-| 11373 | `readSessionState` | fn |  |
-| 11375 | `ns` | const |  |
-| 11376 | `st` | const |  |
-| 11408 | `writeSessionState` | fn |  |
-| 11410 | `prior` | const |  |
-| 11419 | `setSessionSwitch` | fn |  |
-| 11427 | `addQuickPhrase` | fn |  |
-| 11439 | `updateQuickPhrase` | fn |  |
-| 11449 | `deleteQuickPhrases` | fn |  |
-| 11456 | `normalizeQuickPhraseIds` | fn |  |
-| 11468 | `exportQuickPhrases` | fn |  |
-| 11484 | `importQuickPhrases` | fn |  |
-| 11509 | `acSendPhrase` | fn | 通过 CDP 发送指定短语：聚焦 composer → 全选 → 真实输入短语 → 真实 Enter（replace 式发送，多行短语按段落插入） |
-| 11518 | `selectAutomationModelById` | fn |  |
-| 11531 | `confirmAutomationModel` | fn |  |
-| 11539 | `restoreAutomationNewTaskPreference` | fn |  |
-| 11547 | `automationAgentSurfaceExpression` | fn |  |
-| 11549 | `visible` | fn |  |
-| 11550 | `isNewTask` | fn |  |
-| 11551 | `composerText` | fn |  |
-| 11578 | `readAutomationAgentSurface` | fn |  |
-| 11586 | `ensureAutomationNewTask` | fn |  |
-| 11646 | `openNewAutomationAgentTask` | fn |  |
-| 11665 | `currentAccount` | fn |  |
-| 11671 | `a` | const |  |
-| 11700 | `readAccountHealth` | fn |  |
-| 11708 | `writeAccountHealth` | fn |  |
-| 11724 | `recordAccountHealth` | fn |  |
-| 11740 | `mergeLiveHealth` | fn |  |
-| 11760 | `accountHealthRecords` | fn | 它只保留「今天签到成功」的记录，签到失败的 401 会被投影成 null，健康判据就断了。 |
-| 11768 | `accountHealthBadges` | fn | 返回 `{ uid: 健康视图 }`。statusOnly=true 时去掉 uid 明细，只给状态接口用。 |
-| 11785 | `groupAccountHealth` | fn | 按 state 分组 + 计数（`/api/account-health` 与面板概览用）。 |
-| 11804 | `accountHealthSummary` | fn | 把健康视图投影成 /api/status 要的紧凑形状（**不带 uid 明细**）。 |
-| 11820 | `sweepAccountHealth` | fn |  |
-| 11839 | `buildFailoverHealthFilter` | fn |  |
-| 11867 | `accountHealthUidOf` | fn | A8 端点的入参校验（与其他路由同一条 uid 口径）。 |
-| 11877 | `accountHealthEcho` | fn |  |
-| 11890 | `accountBackupFile` | fn |  |
-| 11911 | `gatewayStatus` | fn |  |
-| 11931 | `gatewayCollectAccounts` | fn | 读本仓已登录的账号并解密（**复用 lib.js 的 [wd-compat] 解密器**，不另写一份帧格式）。 |
-| 11940 | `auth` | const |  |
-| 11941 | `account` | const |  |
-| 11960 | `gatewayProbeHealth` | fn | 探活（/healthz 免鉴权）。null = 不可达。 |
-| 11976 | `gatewayInstall` | fn | 下载 → SHA-256 校验 → 解压 → 凭证桥 → 生成 config。任一环节失败都不留半成品可用状态。 |
-| 11978 | `task` | const |  |
-| 12038 | `gatewayReadEnabled` | fn | 「用户是否启用」是 WorkDaddy 侧意图，与「装没装」分开记（沿用免打扰开关的记法）。 |
-| 12045 | `gatewaySetEnabled` | fn |  |
-| 12058 | `gatewayStart` | fn | 启动网关子进程（stdio 用 ['ignore','pipe','pipe']：本环境给子进程建 stdin 管道会 EBUSY）。 |
-| 12082 | `gatewayStop` | fn |  |
-| 12090 | `refreshGatewayIfEnabled` | fn | 启动时：用户启用过就自动拉起（与 autoContinue 的「启动补写」同模式；未安装则静默跳过）。 |
-| 12103 | `stashDir` | fn | ================= 暂存提示词（stash）辅助 ================= |
-| 12108 | `safeKey` | fn | 与 /api/stash 写入时相同的 key 生成规则：safe(uid) + '__' + safe(conversationId) |
-| 12113 | `listStashRecords` | fn | 扫描 stash 目录，返回全部暂存记录（按 savedAt 倒序）及 uid -> nickname 映射 |
-| 12140 | `stashFilePath` | fn | key 文件名校验：替换非法字符但不截断（key 本身由 safe() 逐段限制长度，可能超过 80 字符） |
-| 12146 | `stashRecordByKey` | fn |  |
-| 12153 | `fetchConvNames` | fn | 通过 CDP 抓取侧边栏会话列表，返回 conversationId -> 会话名 映射（用于筛选下拉展示会话名而非 id） |
-| 12181 | `deleteStashRecord` | fn | 删除单条暂存记录（删文件 + 同步 stash-index.json） |
-| 12204 | `buildBusyExpr` | fn |  |
-| 12215 | `visibleIn` | fn | 误判空闲会在回复中输入，正文/图片回填容易失败，这是原设计刻意保守的原因。 |
-| 12242 | `waitAiIdle` | fn | 等待 AI 空闲；超时返回 false |
-| 12253 | `busy` | const |  |
-| 12284 | `resolveUsageBoardPython` | fn | 解析可用的 python：环境变量 → 托管 venv → 托管 base（版本目录）→ PATH 兜底。 |
-| 12306 | `latestUsageBoardHtml` | fn | usage-board 目录里最新一份看板 HTML 文件名；没有则返回 null。 |
-| 12317 | `latestUsageUnifiedHtml` | fn | 统一用量看板的产物：unified-board-<stamp>.html。 |
-| 12331 | `creditUsageQuery` | fn |  |
-| 12339 | `readUsageStatusJson` | fn |  |
-| 12344 | `runUsageStatusExtractor` | fn | 跑一次第三方抽取器（只为补充指标）。失败/超时都只返回 ok:false，绝不抛。 |
-| 12350 | `done` | const |  |
-| 12372 | `builtinAssetsDir` | fn |  |
-| 12388 | `builtinWallpaperSource` | fn |  |
-| 12397 | `initBuiltinAssets` | fn |  |
-| 12632 | `listThemes` | fn | 主题列表（内置 + 用户自定义；自定义文件与内置同名时以文件为准，不重复列出） |
-| 12659 | `getTheme` | fn | 取主题完整定义（含 colors）。优先读 themes/ 目录的自定义文件（可覆盖内置同名主题），否则回退内置 |
-| 12689 | `accountSwitchThemeExpression` | fn | 会被启动时的旧云端选择覆盖。这里不安装 hook，也不改其他账号或皮肤 CSS。 |
-| 12734 | `preserveAccountSwitchTheme` | fn |  |
-| 12751 | `nativeAppearanceSyncExpression` | fn | 的 CSS 资源；浅色/深色仍由 WorkBuddy 原生状态负责。 |
-| 12754 | `removeNativeSheet` | fn |  |
-| 12762 | `setAttr` | fn |  |
-| 12767 | `setMode` | fn |  |
-| 12778 | `sync` | fn |  |
-| 12823 | `startNativeAppearanceSyncByCdp` | fn |  |
-| 12828 | `releaseThemeByCdp` | fn |  |
-| 12842 | `restoreNativeAppearanceByCdp` | fn |  |
-| 12846 | `uid` | const |  |
-| 12919 | `restoreSavedTheme` | fn | 恢复已保存的主题（CDP 连接/页面刷新后调用）：读取 current-theme.json 重新应用，保证深浅色在重启/刷新后仍生效 |
-| 12963 | `loadThemePatches` | fn |  |
-| 12979 | `themeExtrasCss` | fn | 主题附加样式：从 theme-patches.js 热加载，不硬编码在此 |
-| 12991 | `loadThemeVars` | fn |  |
-| 13007 | `themeVarsCss` | fn | 生成变量别名 CSS：isDark 时 darkOnly 条目加 html[data-theme="dark"] 前缀；浅色主题跳过 darkOnly 条目 |
-| 13011 | `declOf` | const |  |
-| 13022 | `lead` | const |  |
-| 13030 | `readBackgroundBlur` | fn |  |
-| 13041 | `applyThemeByCdp` | fn |  |
-| 13075 | `uid` | const |  |
-| 13077 | `colors` | const |  |
-| 13200 | `wbsBuiltinAppearance` | fn | 让 WorkBuddy 内部 useTheme hook / 组件 theme prop 实时跟随，等价调用原生 setTheme()。 |
-| 13212 | `wbsSnapshotNativeAppearance` | fn |  |
-| 13236 | `wbsClearNativeCustomCss` | fn |  |
-| 13275 | `wbsWriteAppearanceState` | fn |  |
-| 13283 | `wbsSyncAppearanceKeys` | fn |  |
-| 13310 | `wbsPrepareNativeAppearance` | fn |  |
-| 13318 | `wbsSyncNativeTheme` | fn |  |
-| 13332 | `wbsSyncNativeThemeQuiet` | fn | wbsSyncNativeThemeIdempotent：250ms 守护/keeper 的周期调用路径，属性同值时不写。 |
-| 13387 | `keepSelectedTheme` | fn |  |
-| 13425 | `wbsHasSpecialNativeAppearance` | fn |  |
-| 13450 | `wbsHoldNativeAppearance` | fn |  |
-| 13522 | `clearComposerByCdp` | fn |  |
-| 13575 | `fnv1a32` | fn |  |
-| 13592 | `composerDraftHash` | fn |  |
-| 13609 | `composerDraftExpr` | fn |  |
-| 13649 | `composerDraftConsumed` | fn |  |
-| 13680 | `composerSendExpr` | const |  |
-| 13684 | `fiberOf` | fn |  |
-| 13692 | `isStore` | fn |  |
-| 13749 | `sendStashToComposer` | fn |  |
-| 13755 | `guardedSend` | const |  |
-| 13758 | `allItems` | const |  |
-| 13767 | `s` | const |  |
-| 13920 | `countBlocks` | const |  |
-| 13930 | `pasteAndVerify` | const | 通用「合成 paste 后轮询验证 contentblock 增加」 |
-| 13976 | `name` | const |  |
-| 13992 | `disp` | const |  |
-| 14003 | `visible` | fn |  |
-| 14075 | `probeSendButton` | const | React may need more than one frame to enable the official send button. |
-| 14089 | `readDraft` | const |  |
-| 14097 | `draftConsumed` | const |  |
-| 14100 | `awaitDraftConsumed` | const | 点击 / 接口调用之后统一的「草稿被吃掉了吗」等待（两条路径共用同一个判据）。 |
-| 14197 | `fetchResource` | fn |  |
-| 14231 | `data` | const |  |
-| 14234 | `accounts` | const |  |
-| 14266 | `fetchEnterpriseResource` | fn |  |
-| 14312 | `robustFetchEnterpriseResource` | fn |  |
-| 14335 | `resolveEnterpriseId` | fn |  |
-| 14363 | `retryDelay` | const |  |
-| 14367 | `robustFetchResource` | fn | 重试耗尽仍失败才抛出，由上层按现有错误路径处理。 |
-| 14399 | `fetchCredits` | fn |  |
-| 14457 | `refreshCreditRotationAccounts` | fn |  |
-| 14481 | `rememberCreditRotation` | fn |  |
-| 14493 | `cachedCreditRotationAccounts` | fn |  |
-| 14505 | `listDailyUsage` | fn |  |
-| 14511 | `syncCurrentCreditUsage` | fn |  |
-| 14514 | `task` | const |  |
-| 14555 | `exportSecretKey` | fn |  |
-| 14559 | `decryptLegacyExport` | fn |  |
-| 14570 | `handleApiRoute` | fn |  |
-| 14889 | `currentHealth` | const |  |
-| 15289 | `code` | const | ⚠️「没有可委派的模型」是**用户可修正**的状态 ⇒ 400，不是 500 |
-| 15635 | `uid` | const |  |
-| 15698 | `d` | const |  |
-| 15772 | `html` | const |  |
-| 15998 | `uid` | const |  |
-| 16135 | `dayOf` | const | 积分窗口与 token 窗口取同一个区间：分子分母同区间，否则 credit/1k 会被拉偏。 |
-| 16192 | `finish` | const |  |
-| 16269 | `pad` | const |  |
-| 16277 | `prune` | const |  |
-| 16470 | `worker` | const |  |
-| 16507 | `uid` | const |  |
-| 17102 | `probeModelEndpoint` | fn | 2xx/3xx/401/403/400/405 视为端点真实命中并立即返回；404/5xx/网络错误则继续尝试下一个候选。 |
-| 17449 | `run` | const |  |
-| 17699 | `targetUid` | const |  |
-| 17728 | `targetUid` | const |  |
-| 18079 | `id` | const |  |
-| 18366 | `uid` | const |  |
-| 18367 | `conv` | const |  |
-| 18368 | `safe` | const |  |
-| 18374 | `items` | const |  |
-| 18437 | `key` | const |  |
+| 703 | `persistScheduleLedger` | fn |  |
+| 713 | `noteScheduleSlot` | fn | 槽位命中时登记「这一刻本该发生一次发送」（由 createScheduleTicker 的 onSlot 回调触发） |
+| 733 | `recordScheduleSlotOutcome` | fn | 运行结束后回填结果。只有登记过的槽位才回填（手动/事件/interval 运行不带 slot） |
+| 753 | `scheduleVerifyNotify` | fn |  |
+| 763 | `runScheduleVerify` | fn | 一拍：找出「该发而没发成」的槽位 → 写桌面人话报告 + 弹一次汇总提示 + 标记已上报 |
+| 770 | `nameOf` | const |  |
+| 813 | `loadApiToken` | fn | 用 wx + 重读避免两个 watchdog 进程启动竞态时各自生成一枚 token。 |
+| 814 | `valid` | const |  |
+| 839 | `diagnosticsEnabled` | fn |  |
+| 847 | `redactDiagnosticText` | fn |  |
+| 860 | `shouldPersistBreadcrumb` | fn |  |
+| 866 | `validCdpPort` | fn |  |
+| 870 | `readCdpPortFile` | fn |  |
+| 879 | `writeCdpPortFile` | fn |  |
+| 894 | `readUiPortFile` | fn |  |
+| 898 | `writeUiPortFile` | fn |  |
+| 913 | `cdpPortCandidates` | fn |  |
+| 915 | `add` | const |  |
+| 923 | `isLocalPortAvailable` | fn |  |
+| 927 | `finish` | const |  |
+| 942 | `findAvailableCdpPort` | fn |  |
+| 949 | `selectCdpPort` | fn |  |
+| 1025 | `updateSourceOrder` | fn | 源尝试顺序：粘性源优先，其余按 UPDATE_SOURCES 定义顺序补齐 |
+| 1030 | `updateDebug` | fn |  |
+| 1031 | `scrub` | const |  |
+| 1061 | `writeUpdateAttempt` | fn |  |
+| 1072 | `macWorkDaddyAppPath` | fn |  |
+| 1095 | `resolveApplyUpdateVbs` | fn |  |
+| 1114 | `semverCompare` | fn | 简单 semver 比较：a > b → 1，a < b → -1，相等 → 0（忽略预发布后缀） |
+| 1127 | `hardTimeout` | fn | 这里用独立定时器到点强制 destroy + reject，保证「检查更新」不会长时间挂着。返回取消函数。 |
+| 1139 | `httpsGet` | fn | 带超时的 HTTPS GET（返回 statusCode + body + headers） |
+| 1168 | `githubAuthHeaders` | fn |  |
+| 1178 | `latestTagViaHtml` | fn | 这条路径不消耗 GitHub API 配额，是 API 被限流时的兜底检测手段（拿不到资产名与 SHA-256）。 |
+| 1202 | `deterministicAssetURL` | fn | 用于 API 被限流、只剩「网页检测」时的下载兜底；URL 可用不代表有 SHA-256。 |
+| 1204 | `fileName` | const |  |
+| 1209 | `updateApiErrorText` | fn | API 不可用时的统一提示语（区分限流/超时/不可见，便于判断是网络、代理还是仓库问题） |
+| 1223 | `isNetworkFailure` | fn | 再试网页兜底只是白等一次超时，直接走缓存兜底。 |
+| 1232 | `parseSha256` | fn | 注：GitHub 现在会为上传的资产自动给出 digest，正常路径走 asset.digest，这里只是兜底。 |
+| 1246 | `parseSha256Map` | fn | Gitee 镜像没有 asset.digest 字段，多资产发布必须在 notes 里逐文件给哈希。 |
+| 1256 | `normalizeAssetSha256` | fn |  |
+| 1261 | `expectedUpdateSha256` | fn |  |
+| 1266 | `checkUpdate` | fn | 检查更新：按源降级链请求 Releases API（GitHub 失败自动降级 Gitee），比对版本，结果写缓存（内存 + 文件） |
+| 1303 | `assets` | const | 的 /releases/download/ 路径，防止响应里的任意地址被当作安装包来源。 |
+| 1347 | `applyCache` | const | 二次兜底：读上次成功缓存。只认同一仓库的缓存，避免换源后读到旧数据。 |
+| 1406 | `checkUpstreamUpdate` | fn | 上游官方安装包不含本修改版补丁，装上去等于退回官方状态，因此这里只提示、不下载安装。 |
+| 1439 | `readUpstreamCache` | const |  |
+| 1487 | `checkUpdateBoth` | fn | 面板「检查更新」按钮与后台定时检查统一走这里，保证两个版本号一次刷新到位。 |
+| 1495 | `versionCheckPayload` | fn | 「关于」页需要的版本汇总字段（两个版本号 + 任一有更新即 anyUpdate） |
+| 1521 | `downloadUpdate` | fn | 同一 daemon 内只允许一个下载流程，避免并发请求互相删除/覆盖固定目标文件。 |
+| 1530 | `downloadUpdateInternal` | fn |  |
+| 1588 | `cleanupTemp` | const |  |
+| 1590 | `failDownload` | const |  |
+| 1676 | `sha256File` | fn | 计算文件 SHA-256 |
+| 1680 | `inspectPackagedApp` | fn |  |
+| 1697 | `packagedAppVersionError` | fn |  |
+| 1711 | `validateUpdateArtifact` | fn | 和旧版残留文件都可能留下普通文件。hdiutil imageinfo 是 macOS UDIF 的确定性预检。 |
+| 1765 | `normTs` | fn | 时间戳归一化：秒/毫秒/字符串 → 毫秒；无效返回 null |
+| 1773 | `httpJson` | fn | 带超时的 JSON 请求（返回解析后的 JSON；解析失败回退 {code,message}） |
+| 1813 | `buildSeamlessAuthFile` | fn | （{account, auth, accounts, allAccounts}，与 lib.js switchTo 写回的格式一致） |
+| 1880 | `scheduleOAuthStateCleanup` | fn |  |
+| 1886 | `saveSeamlessAccount` | fn | 把无感登录采集到的账号写入 accounts/<uid>.info 备份（不触碰当前登录文件） |
+| 1907 | `oauthPollOnce` | fn | 轮询一次授权结果：未完成返回 {done:false}；完成则入库并返回账号信息 |
+| 1936 | `accData` | const |  |
+| 1948 | `extractAppFromDmg` | fn | 从 dmg 中解出 WorkDaddy.app 到 UPDATE_DIR（挂载→拷贝→卸载），返回 app 目录 |
+| 1996 | `applyUpdate` | fn | 由 Inno Setup 确认 WorkBuddy 已退出、替换文件并启动新版。 |
+| 2021 | `markAttemptFailure` | const |  |
+| 2030 | `markSpawnFailure` | const |  |
+| 2152 | `rotateLogsIfNeeded` | fn | logWriteCount 声明在文件前部（模块初始化阶段也要能写日志，见那里的注释） |
+| 2167 | `log` | fn |  |
+| 2178 | `isLockPermissionError` | fn |  |
+| 2182 | `reportDaemonLockFallback` | fn |  |
+| 2192 | `isCurrentWindowsDaemonProcess` | fn |  |
+| 2227 | `acquireDaemonLock` | fn | Windows 数据目录锁不可写时，使用同一台机器用户临时目录中的哈希锁继续保证单实例。 |
+| 2284 | `releaseDaemonLock` | fn |  |
+| 2297 | `scheduleBackup` | fn |  |
+| 2368 | `settlePendingReloadInjection` | fn |  |
+| 2380 | `armPendingReloadInjection` | fn |  |
+| 2402 | `runPendingReloadInjection` | fn |  |
+| 2429 | `findCdpEndpoint` | fn |  |
+| 2438 | `ports` | const | 不会退化成「只看标题」的猜测，也就不会误连兄弟端。 |
+| 2473 | `targetsBelongToProfile` | fn |  |
+| 2493 | `isWorkBuddyCdpTarget` | fn |  |
+| 2499 | `getPageTarget` | fn |  |
+| 2505 | `cleanupForeignInjectedTargets` | fn |  |
+| 2513 | `cleanupForeignInjectedTarget` | fn |  |
+| 2522 | `finish` | const |  |
+| 2565 | `cdpFocusDiagnostics` | fn |  |
+| 2579 | `cdpMouseClick` | fn |  |
+| 2602 | `cdpSend` | fn |  |
+| 2620 | `cdpActivatePage` | fn | 激活页面（强制 lifecycle active + 置前），供 cdpSend 自动恢复与 devtools-proxy 保活复用 |
+| 2621 | `raw` | const |  |
+| 2633 | `connectCdp` | fn |  |
+| 2710 | `waitForPageReadyThenDispatch` | fn |  |
+| 2712 | `retry` | const |  |
+| 2725 | `dispatchAutomationEvent` | fn |  |
+| 2761 | `onCdpEvent` | fn |  |
+| 2764 | `url` | const |  |
+| 2845 | `cdpLoop` | fn |  |
+| 2858 | `reloadWorkBuddyPage` | fn |  |
+| 2860 | `withTimeout` | const |  |
+| 2902 | `autoFocusSessionByTitle` | fn | 并自动展开折叠的分组；最长约 26s，找不到则静默放弃。 |
+| 3025 | `queryWindowsWorkBuddyProcesses` | fn |  |
+| 3039 | `resolveWorkBuddyBinary` | fn |  |
+| 3042 | `tryFile` | const |  |
+| 3054 | `psCmd` | const |  |
+| 3083 | `addCandidate` | const |  |
+| 3127 | `psQuote` | const |  |
+| 3144 | `runCommand` | fn |  |
+| 3151 | `finish` | const |  |
+| 3175 | `restoreWorkBuddyWindow` | fn | Windows 的 WorkBuddy 可能记住“最小化到托盘”状态；重启后显式恢复主窗口，避免只看到托盘图标。 |
+| 3204 | `verifiedWindowsWorkBuddyProcesses` | fn |  |
+| 3220 | `revalidateWindowsWorkBuddyProcess` | fn |  |
+| 3237 | `linuxWorkBuddyPids` | fn |  |
+| 3261 | `workBuddyRunning` | fn |  |
+| 3278 | `waitForWorkBuddyExit` | fn |  |
+| 3293 | `waitForWorkBuddyExitTolerant` | fn |  |
+| 3305 | `quitWorkBuddy` | fn | 退出 WorkBuddy，并确认进程已经消失；失败时拒绝继续登录切换。 |
+| 3351 | `detail` | const |  |
+| 3383 | `findWorkDaddyApp` | fn | 探测 WorkDaddy.app 位置（macOS 专用：退出登录后打开它，由其 launcher 以 CDP 模式重启 WorkBuddy 并注入组件） |
+| 3409 | `resolveLauncherHome` | fn |  |
+| 3419 | `resolveLinuxLaunchTarget` | fn |  |
+| 3434 | `relaunchWorkBuddy` | fn | 重新启动 WorkBuddy：macOS 优先走 WorkDaddy.app launcher；Windows 直接带 CDP 参数重启 exe |
+| 3513 | `clickByText` | fn |  |
+| 3559 | `findByText` | fn |  |
+| 3588 | `CLAIM_TEXTS` | const | ================= 自动领取积分（轮询点击"立即领取"） ================= |
+| 3594 | `claimDebugFile` | fn | 临时调试日志：把领取查找过程写到 /tmp，方便排查"明明有按钮却识别不到" |
+| 3597 | `claimLog` | fn |  |
+| 3605 | `sleep` | fn |  |
+| 3610 | `waitPageLoaded` | fn | 等待页面加载完成（reload 后调用），超时返回 false |
+| 3657 | `automationStateFile` | const |  |
+| 3658 | `readAutomationState` | fn |  |
+| 3661 | `writeAutomationState` | fn |  |
+| 3667 | `automationAccountStatus` | fn |  |
+| 3701 | `automationDeepLocatorExpression` | fn |  |
+| 3716 | `first` | fn |  |
+| 3721 | `choose` | fn |  |
+| 3722 | `firstByAttribute` | fn |  |
+| 3732 | `automationDomAction` | fn |  |
+| 3733 | `assertActive` | const |  |
+| 3741 | `read` | const |  |
+| 3797 | `automationHttpRequest` | fn |  |
+| 3820 | `automationPublicRun` | fn |  |
+| 3828 | `automationPanelSetInputActive` | fn | 运行结束若运行前面板本是展开的，再走「点机器人按钮」同一条 setOpen(true) 恢复。全程可逆。 |
+| 3839 | `automationPanelSetOpen` | fn |  |
+| 3847 | `automationPanelIsOpen` | fn | 读当前面板是否展开（.wbs-panel 是否带 .show，且视觉可见） |
+| 3856 | `automationClearStaleHideTag` | fn | daemon 重启/运行中断可能残留，页面会一直面板不可见）。无 tag 时是 no-op，不影响面板开合状态。 |
+| 3869 | `automationMarkerProbeExpression` | fn | 返回值 { lastText, lastDone, rowCount } |
+| 3884 | `automationNotifyToast` | fn |  |
+| 3914 | `isAutoCopyJobSettled` | fn | 本地作业模型：status ∈ queued\|running\|done\|partial\|conflict\|error\|paused，没有完成 Promise。 |
+| 3915 | `assertAutoCopySucceeded` | fn |  |
+| 3921 | `recordAccountSyncResult` | fn |  |
+| 3933 | `assertAccountSwitchIdle` | fn |  |
+| 3939 | `automationSwitchProgress` | fn |  |
+| 3947 | `waitAutomationSyncBounded` | fn | 等入向同步「落定且成功」。被停止时立刻抛出（让上层走收尾），超时抛错而不是无限等。 |
+| 3964 | `drainAutoCopyJobBounded` | fn | 停止后仍要等正在写盘的作业落定再释放账号锁 —— 提前释放会让「还原账号」与文件提交撞车。 |
+| 3970 | `acquireAutomationAccountSwitch` | fn | 抢账号锁：忙碌时**有界等待**（上游是无限轮询），超时抛错。 |
+| 4017 | `limitFailoverManualPublic` | fn |  |
+| 4036 | `readLimitFailoverState` | fn |  |
+| 4045 | `writeLimitFailoverState` | fn |  |
+| 4056 | `limitFailoverAccounts` | fn | 全量账号（保证顺序）+ 已缓存的积分段（若该账号被查过积分）。 |
+| 4070 | `orderCheckinAccounts` | fn | 未知到期时间排最后；到期时间相同保持原顺序（稳定排序，同上游 accountCreditCache.order 语义）。 |
+| 4086 | `runCdpExpression` | fn |  |
+| 4097 | `readLimitBanner` | fn |  |
+| 4110 | `readStructuredError` | fn |  |
+| 4114 | `readLiveModel` | fn |  |
+| 4118 | `setLiveModel` | fn |  |
+| 4122 | `readLastUserTaskText` | fn |  |
+| 4130 | `readFailoverSnapshot` | fn |  |
+| 4146 | `pickWorkbuddyDaemonClient` | fn |  |
+| 4148 | `walk` | fn |  |
+| 4185 | `cloudAgentCallExpression` | fn | 拼一次「渲染层调用 daemonClient[method](params)」的自包含表达式。 |
+| 4200 | `cloudAgentCall` | fn | 调一次云侧能力，永不外抛 —— 失败以 `{ok:false,error}` 返回，便于上层分类。 |
+| 4217 | `edgeSyncMappingDbPath` | fn |  |
+| 4232 | `getEdgeSyncDb` | fn |  |
+| 4245 | `readEdgeSyncRows` | fn |  |
+| 4258 | `listLocalSessionIds` | fn | 本地仍存在的会话 id 集合（跨全部账号）——只有「本地已没了」的才算残留。 |
+| 4284 | `probeCloudConversations` | fn |  |
+| 4311 | `collectCloudGhosts` | fn |  |
+| 4349 | `purgeCloudConversations` | fn |  |
+| 4383 | `purgeCloudCopiesAfterLocalDelete` | fn |  |
+| 4400 | `waitCloudClientReady` | fn | 切号会让页面整页 reload，React 树随之重建 —— 等 daemon 客户端重新挂上再动手。 |
+| 4418 | `purgeCloudGhostsSwitching` | fn |  |
+| 4427 | `switchBack` | const |  |
+| 4468 | `limitReplyStartedExpression` | fn | 续跑是否已经"跑起来"：消息流里出现流式请求，或最后一条是 assistant。 |
+| 4478 | `limitReplyStarted` | fn |  |
+| 4483 | `taskHasFailoverStep` | fn | 找出启用中、且带 account.failoverContinue 步骤的任务（不写死 id，用户改名换 id 也能用）。 |
+| 4490 | `findLimitFailoverTask` | fn |  |
+| 4494 | `runningLimitFailoverRun` | fn |  |
+| 4498 | `waitLimitVerdict` | fn |  |
+| 4523 | `runLimitFailoverCore` | fn |  |
+| 4554 | `hits` | const |  |
+| 4843 | `buildLimitFailoverPorts` | fn |  |
+| 4928 | `limitFailoverDesktopLogDir` | fn |  |
+| 4937 | `writeAccountSwitchDesktopLog` | fn | 写桌面日志。**任何情况下都不抛**：日志写不出来不能影响切号本身。 |
+| 4951 | `limitFailoverNotify` | fn |  |
+| 4959 | `readLimitReplyIdle` | fn |  |
+| 4963 | `limitFailoverAccountByUid` | fn |  |
+| 4969 | `limitFailoverPrimaryUid` | fn |  |
+| 4977 | `limitFailoverBlockedUntil` | fn | 两处一旦口径分叉，「选备选账号」与「等主账号窗口」就会各按各的时间走。 |
+| 4983 | `limitFailoverLiveRole` | fn | 当前账号相对这次切号计划的状态：target(还在续跑账号) / primary(已经回到主账号) / other / unknown |
+| 4992 | `cancelLimitFailoverSwitchBack` | fn |  |
+| 5005 | `limitFailoverPlanCancelled` | fn |  |
+| 5009 | `finishLimitFailoverSwitchBack` | fn |  |
+| 5032 | `waitLimitFailoverChunks` | fn | 分片等待：期间随时可被「新一轮切号 / 手动切号 / 取消」打断 |
+| 5047 | `runLimitFailoverSwitchBack` | fn |  |
+| 5048 | `isCancelled` | const |  |
+| 5049 | `elapsedMs` | const |  |
+| 5050 | `stopIfUnsafe` | const |  |
+| 5170 | `scheduleLimitFailoverSwitchBack` | fn |  |
+| 5205 | `handleLimitFailoverOutcome` | fn | 注意 skip 不算「触发」，不写日志也不排切回。 |
+| 5267 | `idleSwitchbackBusy` | fn | 此刻是否「不该抢账号」：任何任务在跑、切号在飞、切回计划待执行都算 |
+| 5277 | `readSessionActivity` | fn |  |
+| 5282 | `idleSwitchbackPublicState` | fn |  |
+| 5315 | `runIdleSwitchBack` | fn | 真正执行一次「闲置切回」。切之前把所有前置条件再确认一遍（等待期间世界可能已经变了）。 |
+| 5375 | `idleSwitchbackTick` | fn |  |
+| 5434 | `startIdleSwitchbackTicker` | fn |  |
+| 5446 | `automationSwitchAccount` | fn |  |
+| 5505 | `readAutomationTurnState` | fn | ⚠️ hydration 不算「在飞」：历史还在加载时切号是安全的（v1.3.16 的教训）。 |
+| 5512 | `waitForAutomationReplySettle` | fn | 等「当前会话没有在生成的回合」，最长 maxMs。ok:false 表示等满预算仍在生成。 |
+| 5530 | `automationSwitchAccountWithSync` | fn | 行为与改动前完全一致 —— 闸门只加在「切完号要跑 steps」这一条路径上。 |
+| 5543 | `runSwitch` | const | 会把其它运行的 DOM/发送步骤一起堵死（withInput 是模块级共享闸门）。 |
+| 5566 | `automationRestoreAccountDeferring` | fn | 而硬切会掐死在跑的定时任务；代价不对等。 |
+| 5578 | `automationAccountSwitchGuarded` | fn |  |
+| 5600 | `startAutomationRun` | fn |  |
+| 5616 | `isCancelled` | const |  |
+| 5619 | `appendRunLog` | const |  |
+| 5630 | `panelPrepare` | const |  |
+| 5642 | `withInput` | const |  |
+| 5659 | `unconfirmedSendError` | const | ⚠️ 语义对齐 daemon.js 里那条既有政策：Do not retry an unconfirmed send. |
+| 5669 | `readSession` | const | 必须保持原语义，否则会波及后面的「发送是否被受理」判定）。 |
+| 5677 | `sessionAction` | const |  |
+| 5685 | `openedUid` | const |  |
+| 5716 | `accountUid` | const |  |
+| 5812 | `completionReport` | const |  |
+| 5839 | `publicAccounts` | const |  |
+| 5840 | `publicCurrent` | const |  |
+| 5843 | `sessionActionWithReceipt` | const | 定时任务核验台账把它当成 success 的凭据存起来（不改任何发送行为，只是旁路记录）。 |
+| 5911 | `resumeAutomationAfterNavigation` | fn |  |
+| 5922 | `todayStr` | fn |  |
+| 5924 | `z` | const |  |
+| 5928 | `loadCheckinCache` | fn |  |
+| 5935 | `saveCheckinCache` | fn |  |
+| 5947 | `refreshAccountBackupToken` | fn | 刷新备份账号凭证：临期惰性刷新，或距上次刷新超过一天时执行保活。 |
+| 6001 | `dailyCheckin` | fn |  |
+| 6050 | `claimDailyForUid` | fn |  |
+| 6059 | `performAccountCheckin` | fn |  |
+| 6105 | `injectWidget` | fn | 通过 CDP 把右下角组件注入到 WorkBuddy 渲染进程（幂等，可反复调用） |
+| 6169 | `desc` | const |  |
+| 6214 | `buildInjectScript` | fn |  |
+| 6259 | `injectWidgetManual` | fn |  |
+| 6267 | `readCdpTargets` | fn |  |
+| 6278 | `readLogTail` | fn |  |
+| 6289 | `collectDiagnostics` | fn |  |
+| 6314 | `writeDiagnosticsSnapshot` | fn |  |
+| 6335 | `sqliteRun` | fn |  |
+| 6341 | `codeBuddySessionRows` | fn |  |
+| 6356 | `sqlParamAt` | fn |  |
+| 6359 | `sqliteQuery` | fn |  |
+| 6401 | `officialSlotOf` | fn | 本地时区槽位 `YYYY-MM-DDTHH:MM`（与 scheduled-send 的 localSlot 同格式）。 |
+| 6402 | `pad` | const |  |
+| 6419 | `readOfficialAutomations` | fn |  |
+| 6430 | `items` | const |  |
+| 6464 | `findOfficialSlotConflicts` | fn |  |
+| 6493 | `sessionPayloadExists` | fn | 会话载荷确实存在，并逐级拒绝符号链接/普通文件后再创建缺失目录。 |
+| 6512 | `createDirectoryNoFollow` | fn |  |
+| 6531 | `repairMissingSessionWorkspaces` | fn |  |
+| 6557 | `sessionRangeMs` | fn |  |
+| 6574 | `copySessionFiles` | fn | workspace/sessions/<id>/ 产物目录留到第二阶段单独复制，避免单条会话堵死整条串行队列。 |
+| 6578 | `copyOne` | const |  |
+| 6604 | `onlyCopyable` | const | 要拦的只有 socket / FIFO / 字符设备 / 块设备这类**根本无法复制**的特殊文件。 |
+| 6712 | `sessionBodyMtime` | fn |  |
+| 6729 | `sessionContentMtime` | fn |  |
+| 6733 | `visit` | const |  |
+| 6767 | `directoryStats` | fn |  |
+| 6796 | `measurePathBytes` | fn | 单条路径的体积：文件取 stat.size，目录递归求和。与 directoryStats 同口径（跳过符号链接）。 |
+| 6807 | `sessionBucketPaths` | fn | 会话的全部本地路径，供体积统计与产物复制复用。 |
+| 6833 | `sessionContentSize` | fn | 会话总体积 + 其中「产物目录」（workspace/sessions/<id>/）的体积。 |
+| 6848 | `formatByteSize` | fn | 人类可读体积，用于日志与进度提示。 |
+| 6859 | `autoCopySessionLabel` | fn | 会话展示名，用于进度条上「正在处理哪个会话」。 |
+| 6879 | `sortAutoCopyPlanBySize` | fn |  |
+| 6898 | `readCopyManifestCache` | fn |  |
+| 6909 | `invalidateCopyManifestCache` | fn | 让缓存失效（写完清单后必须调，否则下一次排序还会拿到旧解析结果）。 |
+| 6918 | `deriveCopyManifestFromCache` | fn |  |
+| 6945 | `workspaceLinkMode` | fn | 读取 meta.autoCopy.workspaceLinkMode（'link' \| 'copy'），缺省为 link。 |
+| 6956 | `detectWorkspaceLinkSupport` | fn | 一次性探测：当前卷是否支持硬链接。失败则本进程内永久回落复制。 |
+| 6978 | `emptyWorkspaceCounters` | fn |  |
+| 6986 | `transferWorkspaceTree` | fn |  |
+| 6994 | `copyFileAt` | const |  |
+| 7087 | `copySessionWorkspacePayload` | fn |  |
+| 7109 | `outcome` | const |  |
+| 7121 | `yieldAutoCopyToRenderer` | fn | reliable source of truth; choose the freshest on-disk snapshot first. |
+| 7142 | `syncAutoCopyLineage` | fn | 不变量 I-1：全表 status='archived' 的行只允许属于主账号。 |
+| 7263 | `changedSinceBaseline` | const | 若还让它拦在前面 return，内容判据永远走不到 —— 两条判据同时存在只会互相打架。 |
+| 7285 | `forcedSource` | const | 真分叉下「最新」并不等于「用户想要的那份」，按时间选会静默丢另一边的内容。 |
+| 7297 | `trackPayload` | const |  |
+| 7355 | `sleepMs` | const |  |
+| 7466 | `autoCopyConflictSnapshot` | fn | 硬合会产出重复/错序的 tool_call 配对 —— 宁可让用户选一份，也不自动产出坏会话。 |
+| 7512 | `listAutoCopyConflicts` | fn |  |
+| 7525 | `dismissAutoCopyConflict` | fn | 只推进标尺、不碰会话内容 —— 这是「默认安全」的那一半：解掉自锁，数据一个字节都不动。 |
+| 7539 | `preferAutoCopyConflict` | fn | 「以某个账号为准覆盖其余」——会丢数据，只在用户显式选择时调用。 |
+| 7565 | `deleteSessionsCore` | fn | 删主账号的会话 → 向下级联，其他账号的同源副本一起删；删非主账号 → 只删本账号那一份。 |
+| 7665 | `readNativeDeleteSweep` | fn |  |
+| 7672 | `saveNativeDeleteSweep` | fn |  |
+| 7685 | `pendingNativeDeletes` | fn | 水位线之后的待处理软删（只读，供进度展示与 sweep 使用） |
+| 7692 | `sweepNativeSessionDeletes` | fn |  |
+| 7764 | `readArchiveIsolation` | fn |  |
+| 7771 | `saveArchiveIsolation` | fn |  |
+| 7785 | `archiveIsolationEnabled` | fn |  |
+| 7790 | `collectArchivedCopyState` | fn | 只读：全表 archived 活行 + 血缘登记索引（判定「这份副本在主账号那边还在不在」用） |
+| 7806 | `members` | const |  |
+| 7874 | `listArchivedCrossAccountCopies` | fn | 只读报告：主账号该留的 / 其他账号该清的 / 归类不明只上报的 |
+| 7923 | `purgeLocalSessionCopyCore` | fn |  |
+| 7955 | `purgeArchivedCrossAccountCopies` | fn |  |
+| 8006 | `sweepArchivedCopies` | fn | 常驻拍子：只在「当前登录账号 ≠ 主账号」时删该账号名下的归档行（判定链见段首注释） |
+| 8083 | `summarizeSessionImportErrors` | fn |  |
+| 8093 | `archiveRelativePath` | fn |  |
+| 8097 | `collectSessionArchiveFiles` | fn |  |
+| 8100 | `collect` | const |  |
+| 8140 | `ensureArchiveParentNoFollow` | fn |  |
+| 8159 | `restoreSessionArchiveFiles` | fn |  |
+| 8182 | `restoreStagedSessionArchiveFiles` | fn | from a JSON API payload or an unverified archive entry. |
+| 8213 | `getSessionSyncCache` | fn |  |
+| 8236 | `scheduleSessionSyncCacheSave` | fn | timer.unref() —— 缓存是尽力而为的，绝不允许它拖住 daemon 退出。 |
+| 8252 | `isTaskSessionRecord` | fn |  |
+| 8257 | `sqlPlaceholders` | fn |  |
+| 8261 | `insertCopiedSession` | fn |  |
+| 8291 | `createForkSession` | fn |  |
+| 8324 | `prepareSessionExport` | fn |  |
+| 8341 | `exportSessions` | fn |  |
+| 8355 | `validImportedSessionUid` | fn |  |
+| 8361 | `importSessions` | fn |  |
+| 8365 | `importSessionArchives` | fn |  |
+| 8413 | `adoptExistingCopyTarget` | fn |  |
+| 8457 | `copySessionRecord` | fn |  |
+| 8474 | `perform` | const |  |
+| 8595 | `getSessionDirtyIndex` | fn |  |
+| 8603 | `scheduleSessionDirtySave` | fn |  |
+| 8620 | `markSessionDirty` | fn | 记一条脏标记；**只有真变化才置脏**（同一时刻的重复通知不写盘）。 |
+| 8631 | `markSessionDirtyBaseline` | fn | renderer 建立基线（`body.ready`）。未建基线的账号一律 fail-open = 全当脏。 |
+| 8636 | `clearSessionDirty` | fn | 清一条脏标记；`expectedAt` 不匹配就不清（**并发到来的新事件不许被旧的在飞清理抹掉**）。 |
+| 8645 | `autoCopyDirtyFastpathEnabled` | fn | 批次 3 的开关：**默认关**（文件缺失 / 内容不是 {enabled:true} 都算关）。每次规划读一次。 |
+| 8661 | `isAutoCopyRowCleanByDirty` | fn |  |
+| 8666 | `lineageId` | const |  |
+| 8675 | `buildAutoCopyPlan` | fn |  |
+| 8758 | `isAutoCopyPausedError` | fn |  |
+| 8765 | `beginRendererReloadPriority` | fn |  |
+| 8780 | `hasPendingAutoCopyTo` | fn |  |
+| 8789 | `pruneAutoCopyJobs` | fn |  |
+| 8799 | `runAutoCopyQueue` | fn |  |
+| 8829 | `autoCopyAfterAccountSwitch` | fn | 三个调用点统一走这里，别再各写一份（写散了必然漏）。 |
+| 8896 | `enterSwitchFlowRunner` | fn | 进入一个切号流程；返回**幂等**的退出函数（重复调用不会把计数减成负）。 |
+| 8925 | `setSwitchFlowPhase` | fn |  |
+| 8931 | `terminal` | const |  |
+| 8966 | `readSwitchFlowState` | fn | 读状态（惰性过期：终态留 TTL 供渲染层读到，过期即清）。 |
+| 8978 | `requestSwitchFlowCancel` | fn | 「关闭弹窗」：置取消位 + 立刻请求中止复制（worker 在下个检查点收尾，不是硬停）。 |
+| 9032 | `waitPreSyncSettled` | fn |  |
+| 9086 | `preSyncBeforeSwitch` | fn |  |
+| 9188 | `resolveSyncNowSources` | fn |  |
+| 9189 | `all` | const |  |
+| 9225 | `limitFailoverSyncWaitMs` | fn |  |
+| 9260 | `openConversationById` | fn |  |
+| 9284 | `fastExpr` | const |  |
+| 9369 | `sidebarProbe` | const |  |
+| 9539 | `prepareFailoverContinuation` | fn |  |
+| 9545 | `degrade` | const |  |
+| 9647 | `startAutoCopyJob` | fn |  |
+| 9720 | `run` | const |  |
+| 9728 | `finishPaused` | const | 任务（复制本身幂等：已完成的行按 mapping 判 skipped），重跑等于只搬剩下的。 |
+| 10012 | `activeAutoCopyJob` | fn |  |
+| 10025 | `publicAutoCopyJob` | fn |  |
+| 10107 | `publicSpaceScanJob` | fn |  |
+| 10131 | `buildSpaceScanResolvers` | fn |  |
+| 10177 | `readSpaceScanCache` | fn | 读缓存：面板打开时先用旧结果秒出，再决定要不要重扫。 |
+| 10189 | `startSpaceScanJob` | fn |  |
+| 10279 | `isValidSessionId` | fn |  |
+| 10288 | `matchedSessionIds` | fn |  |
+| 10293 | `resolveManagedSessionTarget` | fn |  |
+| 10306 | `isManagedDirectoryNoFollow` | fn |  |
+| 10330 | `removeSessionAppCache` | fn | app/sessions.json 是共享窗口缓存，只移除所选会话的条目，不删除整个文件或 app 目录。 |
+| 10364 | `deleteSessionFiles` | fn | tasks/<id>/、file-history/<id>/、artifact-index/<id>.json（全部按会话 id 精确删除，不可恢复） |
+| 10370 | `delOne` | const |  |
+| 10414 | `json` | fn |  |
+| 10443 | `isAllowedApiOrigin` | fn |  |
+| 10463 | `hasApiToken` | fn |  |
+| 10470 | `isApiRequestAuthorized` | fn |  |
+| 10479 | `isAllowedDevtoolsOrigin` | fn |  |
+| 10519 | `readBody` | fn |  |
+| 10524 | `ignoreLateError` | const |  |
+| 10525 | `cleanup` | const |  |
+| 10535 | `finish` | const |  |
+| 10541 | `fail` | fn |  |
+| 10547 | `onData` | fn |  |
+| 10560 | `onEnd` | fn |  |
+| 10571 | `onError` | fn |  |
+| 10574 | `onIncomplete` | fn |  |
+| 10606 | `workbuddySettingsPath` | fn |  |
+| 10610 | `readWorkbuddySettings` | fn |  |
+| 10618 | `writeWorkbuddySettings` | fn |  |
+| 10624 | `buildAskRuleBlock` | fn |  |
+| 10629 | `stripAskRule` | fn | 从 customPrompt 中移除 wbs 规则段（保留用户其它内容） |
+| 10639 | `getAskModeState` | fn |  |
+| 10641 | `customPrompt` | const |  |
+| 10654 | `setAskMode` | fn |  |
+| 10669 | `refreshAskModeIfEnabled` | fn | 启动时调用：如已启用决策弹窗，把旧的 ASK_MODE_RULE 替换为最新版本（用 ASK_MODE_TAG_START/END 精确识别） |
+| 10711 | `buildZhReasoningBlock` | fn |  |
+| 10716 | `stripZhReasoning` | fn | 从 customPrompt 中移除中文思考段（保留用户其它内容与决策弹窗段） |
+| 10726 | `getZhReasoningState` | fn |  |
+| 10728 | `customPrompt` | const |  |
+| 10744 | `setZhReasoning` | fn |  |
+| 10764 | `refreshZhReasoningIfEnabled` | fn | 启动时调用：如已启用中文思考，把旧的规则段替换为最新版本（用标记精确识别） |
+| 10815 | `deriveAgentHealth` | fn |  |
+| 10853 | `buildAgentHintRule` | fn |  |
+| 10903 | `buildAgentHintBlock` | fn |  |
+| 10915 | `stripAgentHint` | fn | 从 customPrompt 中移除子 Agent 提示段（保留用户其它内容，**且不改动用户原文一个字节**）。 |
+| 10930 | `getAgentHintState` | fn |  |
+| 10932 | `customPrompt` | const |  |
+| 10949 | `setAgentHint` | fn |  |
+| 10987 | `refreshAgentHintAfterCatalogChange` | fn |  |
+| 11003 | `refreshAgentHintIfEnabled` | fn | 启动时调用：如已开启，把旧的提示规则替换为最新版本（用标记精确识别）。 |
+| 11032 | `collectAgentUsage` | fn |  |
+| 11088 | `readNoDisturbState` | fn |  |
+| 11091 | `state` | const |  |
+| 11113 | `readNoDisturbApplied` | fn |  |
+| 11117 | `hasAll` | const |  |
+| 11132 | `removeListItems` | fn |  |
+| 11138 | `ensureSandboxObj` | fn |  |
+| 11147 | `applyNoDisturbSwitch` | fn |  |
+| 11151 | `recordAndMerge` | const | 关闭：仅回滚「本次新增」，绝不删除用户原有项。 |
+| 11157 | `rollback` | const |  |
+| 11205 | `setNoDisturbSwitch` | fn | 读-改-写（整文件原子替换），并维护 wbs.noDisturb.state |
+| 11220 | `noDisturbAudit` | fn |  |
+| 11255 | `acAppConfigPath` | fn |  |
+| 11258 | `readAppConfig` | fn |  |
+| 11266 | `writeAppConfig` | fn | 原子写 app-config.json：目录自动创建、0644、临时文件 + rename，写后由调用方读回校验 |
+| 11271 | `acBlock` | fn |  |
+| 11278 | `stripACBlocks` | fn |  |
+| 11284 | `applyACBlock` | fn | 开启=追加（幂等：先剥离再追加，最终只保留一个最新 v1 块）；关闭=剥离 |
+| 11290 | `acCustomPromptPresent` | fn |  |
+| 11295 | `readAutoContinueState` | fn |  |
+| 11310 | `setAutoContinue` | fn | 开启：先写 app-config（指令块），再持久化开关状态；关闭：先删除指令块，再持久化关闭状态 |
+| 11327 | `refreshAutoContinueIfEnabled` | fn | 启动时调用：开关开启但指令块缺失/被外部改写 → 补写最新 v1 块；失败仅记录脱敏错误 |
+| 11341 | `acDispatchEnter` | fn | 且内容非空时 Slate 自动隐藏占位符（解决 execCommand 模拟输入导致的占位符重叠/事件不生效）。 |
+| 11358 | `acSendCurrentInput` | fn | 通过 CDP 直接发送「当前输入框已有内容」：仅聚焦 + 真实 Enter（不写入任何文字） |
+| 11378 | `sessBuild` | fn |  |
+| 11386 | `readSessionState` | fn |  |
+| 11388 | `ns` | const |  |
+| 11389 | `st` | const |  |
+| 11421 | `writeSessionState` | fn |  |
+| 11423 | `prior` | const |  |
+| 11432 | `setSessionSwitch` | fn |  |
+| 11440 | `addQuickPhrase` | fn |  |
+| 11452 | `updateQuickPhrase` | fn |  |
+| 11462 | `deleteQuickPhrases` | fn |  |
+| 11469 | `normalizeQuickPhraseIds` | fn |  |
+| 11481 | `exportQuickPhrases` | fn |  |
+| 11497 | `importQuickPhrases` | fn |  |
+| 11522 | `acSendPhrase` | fn | 通过 CDP 发送指定短语：聚焦 composer → 全选 → 真实输入短语 → 真实 Enter（replace 式发送，多行短语按段落插入） |
+| 11531 | `selectAutomationModelById` | fn |  |
+| 11544 | `confirmAutomationModel` | fn |  |
+| 11552 | `restoreAutomationNewTaskPreference` | fn |  |
+| 11560 | `automationAgentSurfaceExpression` | fn |  |
+| 11562 | `visible` | fn |  |
+| 11563 | `isNewTask` | fn |  |
+| 11564 | `composerText` | fn |  |
+| 11591 | `readAutomationAgentSurface` | fn |  |
+| 11599 | `ensureAutomationNewTask` | fn |  |
+| 11659 | `openNewAutomationAgentTask` | fn |  |
+| 11678 | `currentAccount` | fn |  |
+| 11684 | `a` | const |  |
+| 11713 | `readAccountHealth` | fn |  |
+| 11721 | `writeAccountHealth` | fn |  |
+| 11737 | `recordAccountHealth` | fn |  |
+| 11753 | `mergeLiveHealth` | fn |  |
+| 11773 | `accountHealthRecords` | fn | 它只保留「今天签到成功」的记录，签到失败的 401 会被投影成 null，健康判据就断了。 |
+| 11781 | `accountHealthBadges` | fn | 返回 `{ uid: 健康视图 }`。statusOnly=true 时去掉 uid 明细，只给状态接口用。 |
+| 11798 | `groupAccountHealth` | fn | 按 state 分组 + 计数（`/api/account-health` 与面板概览用）。 |
+| 11817 | `accountHealthSummary` | fn | 把健康视图投影成 /api/status 要的紧凑形状（**不带 uid 明细**）。 |
+| 11833 | `sweepAccountHealth` | fn |  |
+| 11852 | `buildFailoverHealthFilter` | fn |  |
+| 11880 | `accountHealthUidOf` | fn | A8 端点的入参校验（与其他路由同一条 uid 口径）。 |
+| 11890 | `accountHealthEcho` | fn |  |
+| 11903 | `accountBackupFile` | fn |  |
+| 11924 | `gatewayStatus` | fn |  |
+| 11944 | `gatewayCollectAccounts` | fn | 读本仓已登录的账号并解密（**复用 lib.js 的 [wd-compat] 解密器**，不另写一份帧格式）。 |
+| 11953 | `auth` | const |  |
+| 11954 | `account` | const |  |
+| 11973 | `gatewayProbeHealth` | fn | 探活（/healthz 免鉴权）。null = 不可达。 |
+| 11989 | `gatewayInstall` | fn | 下载 → SHA-256 校验 → 解压 → 凭证桥 → 生成 config。任一环节失败都不留半成品可用状态。 |
+| 11991 | `task` | const |  |
+| 12051 | `gatewayReadEnabled` | fn | 「用户是否启用」是 WorkDaddy 侧意图，与「装没装」分开记（沿用免打扰开关的记法）。 |
+| 12058 | `gatewaySetEnabled` | fn |  |
+| 12071 | `gatewayStart` | fn | 启动网关子进程（stdio 用 ['ignore','pipe','pipe']：本环境给子进程建 stdin 管道会 EBUSY）。 |
+| 12095 | `gatewayStop` | fn |  |
+| 12103 | `refreshGatewayIfEnabled` | fn | 启动时：用户启用过就自动拉起（与 autoContinue 的「启动补写」同模式；未安装则静默跳过）。 |
+| 12116 | `stashDir` | fn | ================= 暂存提示词（stash）辅助 ================= |
+| 12121 | `safeKey` | fn | 与 /api/stash 写入时相同的 key 生成规则：safe(uid) + '__' + safe(conversationId) |
+| 12126 | `listStashRecords` | fn | 扫描 stash 目录，返回全部暂存记录（按 savedAt 倒序）及 uid -> nickname 映射 |
+| 12153 | `stashFilePath` | fn | key 文件名校验：替换非法字符但不截断（key 本身由 safe() 逐段限制长度，可能超过 80 字符） |
+| 12159 | `stashRecordByKey` | fn |  |
+| 12166 | `fetchConvNames` | fn | 通过 CDP 抓取侧边栏会话列表，返回 conversationId -> 会话名 映射（用于筛选下拉展示会话名而非 id） |
+| 12194 | `deleteStashRecord` | fn | 删除单条暂存记录（删文件 + 同步 stash-index.json） |
+| 12217 | `buildBusyExpr` | fn |  |
+| 12228 | `visibleIn` | fn | 误判空闲会在回复中输入，正文/图片回填容易失败，这是原设计刻意保守的原因。 |
+| 12255 | `waitAiIdle` | fn | 等待 AI 空闲；超时返回 false |
+| 12266 | `busy` | const |  |
+| 12297 | `resolveUsageBoardPython` | fn | 解析可用的 python：环境变量 → 托管 venv → 托管 base（版本目录）→ PATH 兜底。 |
+| 12319 | `latestUsageBoardHtml` | fn | usage-board 目录里最新一份看板 HTML 文件名；没有则返回 null。 |
+| 12330 | `latestUsageUnifiedHtml` | fn | 统一用量看板的产物：unified-board-<stamp>.html。 |
+| 12344 | `creditUsageQuery` | fn |  |
+| 12352 | `readUsageStatusJson` | fn |  |
+| 12357 | `runUsageStatusExtractor` | fn | 跑一次第三方抽取器（只为补充指标）。失败/超时都只返回 ok:false，绝不抛。 |
+| 12363 | `done` | const |  |
+| 12385 | `builtinAssetsDir` | fn |  |
+| 12401 | `builtinWallpaperSource` | fn |  |
+| 12410 | `initBuiltinAssets` | fn |  |
+| 12645 | `listThemes` | fn | 主题列表（内置 + 用户自定义；自定义文件与内置同名时以文件为准，不重复列出） |
+| 12672 | `getTheme` | fn | 取主题完整定义（含 colors）。优先读 themes/ 目录的自定义文件（可覆盖内置同名主题），否则回退内置 |
+| 12702 | `accountSwitchThemeExpression` | fn | 会被启动时的旧云端选择覆盖。这里不安装 hook，也不改其他账号或皮肤 CSS。 |
+| 12747 | `preserveAccountSwitchTheme` | fn |  |
+| 12764 | `nativeAppearanceSyncExpression` | fn | 的 CSS 资源；浅色/深色仍由 WorkBuddy 原生状态负责。 |
+| 12767 | `removeNativeSheet` | fn |  |
+| 12775 | `setAttr` | fn |  |
+| 12780 | `setMode` | fn |  |
+| 12791 | `sync` | fn |  |
+| 12836 | `startNativeAppearanceSyncByCdp` | fn |  |
+| 12841 | `releaseThemeByCdp` | fn |  |
+| 12855 | `restoreNativeAppearanceByCdp` | fn |  |
+| 12859 | `uid` | const |  |
+| 12932 | `restoreSavedTheme` | fn | 恢复已保存的主题（CDP 连接/页面刷新后调用）：读取 current-theme.json 重新应用，保证深浅色在重启/刷新后仍生效 |
+| 12976 | `loadThemePatches` | fn |  |
+| 12992 | `themeExtrasCss` | fn | 主题附加样式：从 theme-patches.js 热加载，不硬编码在此 |
+| 13004 | `loadThemeVars` | fn |  |
+| 13020 | `themeVarsCss` | fn | 生成变量别名 CSS：isDark 时 darkOnly 条目加 html[data-theme="dark"] 前缀；浅色主题跳过 darkOnly 条目 |
+| 13024 | `declOf` | const |  |
+| 13035 | `lead` | const |  |
+| 13043 | `readBackgroundBlur` | fn |  |
+| 13054 | `applyThemeByCdp` | fn |  |
+| 13088 | `uid` | const |  |
+| 13090 | `colors` | const |  |
+| 13213 | `wbsBuiltinAppearance` | fn | 让 WorkBuddy 内部 useTheme hook / 组件 theme prop 实时跟随，等价调用原生 setTheme()。 |
+| 13225 | `wbsSnapshotNativeAppearance` | fn |  |
+| 13249 | `wbsClearNativeCustomCss` | fn |  |
+| 13288 | `wbsWriteAppearanceState` | fn |  |
+| 13296 | `wbsSyncAppearanceKeys` | fn |  |
+| 13323 | `wbsPrepareNativeAppearance` | fn |  |
+| 13331 | `wbsSyncNativeTheme` | fn |  |
+| 13345 | `wbsSyncNativeThemeQuiet` | fn | wbsSyncNativeThemeIdempotent：250ms 守护/keeper 的周期调用路径，属性同值时不写。 |
+| 13400 | `keepSelectedTheme` | fn |  |
+| 13438 | `wbsHasSpecialNativeAppearance` | fn |  |
+| 13463 | `wbsHoldNativeAppearance` | fn |  |
+| 13535 | `clearComposerByCdp` | fn |  |
+| 13588 | `fnv1a32` | fn |  |
+| 13605 | `composerDraftHash` | fn |  |
+| 13622 | `composerDraftExpr` | fn |  |
+| 13662 | `composerDraftConsumed` | fn |  |
+| 13693 | `composerSendExpr` | const |  |
+| 13697 | `fiberOf` | fn |  |
+| 13705 | `isStore` | fn |  |
+| 13762 | `sendStashToComposer` | fn |  |
+| 13768 | `guardedSend` | const |  |
+| 13771 | `allItems` | const |  |
+| 13780 | `s` | const |  |
+| 13933 | `countBlocks` | const |  |
+| 13943 | `pasteAndVerify` | const | 通用「合成 paste 后轮询验证 contentblock 增加」 |
+| 13989 | `name` | const |  |
+| 14005 | `disp` | const |  |
+| 14016 | `visible` | fn |  |
+| 14088 | `probeSendButton` | const | React may need more than one frame to enable the official send button. |
+| 14102 | `readDraft` | const |  |
+| 14110 | `draftConsumed` | const |  |
+| 14113 | `awaitDraftConsumed` | const | 点击 / 接口调用之后统一的「草稿被吃掉了吗」等待（两条路径共用同一个判据）。 |
+| 14210 | `fetchResource` | fn |  |
+| 14244 | `data` | const |  |
+| 14247 | `accounts` | const |  |
+| 14279 | `fetchEnterpriseResource` | fn |  |
+| 14325 | `robustFetchEnterpriseResource` | fn |  |
+| 14348 | `resolveEnterpriseId` | fn |  |
+| 14376 | `retryDelay` | const |  |
+| 14380 | `robustFetchResource` | fn | 重试耗尽仍失败才抛出，由上层按现有错误路径处理。 |
+| 14412 | `fetchCredits` | fn |  |
+| 14470 | `refreshCreditRotationAccounts` | fn |  |
+| 14494 | `rememberCreditRotation` | fn |  |
+| 14506 | `cachedCreditRotationAccounts` | fn |  |
+| 14518 | `listDailyUsage` | fn |  |
+| 14524 | `syncCurrentCreditUsage` | fn |  |
+| 14527 | `task` | const |  |
+| 14568 | `exportSecretKey` | fn |  |
+| 14572 | `decryptLegacyExport` | fn |  |
+| 14583 | `handleApiRoute` | fn |  |
+| 14902 | `currentHealth` | const |  |
+| 15302 | `code` | const | ⚠️「没有可委派的模型」是**用户可修正**的状态 ⇒ 400，不是 500 |
+| 15648 | `uid` | const |  |
+| 15711 | `d` | const |  |
+| 15785 | `html` | const |  |
+| 16011 | `uid` | const |  |
+| 16148 | `dayOf` | const | 积分窗口与 token 窗口取同一个区间：分子分母同区间，否则 credit/1k 会被拉偏。 |
+| 16205 | `finish` | const |  |
+| 16282 | `pad` | const |  |
+| 16290 | `prune` | const |  |
+| 16483 | `worker` | const |  |
+| 16520 | `uid` | const |  |
+| 17115 | `probeModelEndpoint` | fn | 2xx/3xx/401/403/400/405 视为端点真实命中并立即返回；404/5xx/网络错误则继续尝试下一个候选。 |
+| 17462 | `run` | const |  |
+| 17712 | `targetUid` | const |  |
+| 17741 | `targetUid` | const |  |
+| 18092 | `id` | const |  |
+| 18379 | `uid` | const |  |
+| 18380 | `conv` | const |  |
+| 18381 | `safe` | const |  |
+| 18387 | `items` | const |  |
 | 18450 | `key` | const |  |
-| 18465 | `key` | const |  |
-| 18522 | `uid` | const |  |
-| 18744 | `handleApi` | fn |  |
-| 18745 | `failure` | const |  |
-| 18776 | `stopCaffeinate` | fn |  |
-| 18796 | `stopUserActivity` | fn | 停止防锁屏：清除续期定时器并杀掉 -u 进程（UserIsActive 断言随之释放） |
-| 18804 | `startUserActivityLoop` | fn | 无需辅助功能权限（-u 走系统 IOKit 用户活动断言）。 |
-| 18807 | `tick` | const |  |
-| 18819 | `startCaffeinate` | fn |  |
-| 18850 | `applySleepMode` | fn |  |
-| 18879 | `sleepNow` | fn |  |
-| 18900 | `restoreSleepMode` | fn |  |
-| 18911 | `startServer` | fn |  |
-| 19074 | `cleanup` | const |  |
-| 19091 | `tryListen` | const |  |
-| 19158 | `migrateAgentHintModel` | fn |  |
-| 19161 | `cp` | const |  |
-| 19224 | `runAutomationSchedules` | fn |  |
+| 18463 | `key` | const |  |
+| 18478 | `key` | const |  |
+| 18535 | `uid` | const |  |
+| 18757 | `handleApi` | fn |  |
+| 18758 | `failure` | const |  |
+| 18789 | `stopCaffeinate` | fn |  |
+| 18809 | `stopUserActivity` | fn | 停止防锁屏：清除续期定时器并杀掉 -u 进程（UserIsActive 断言随之释放） |
+| 18817 | `startUserActivityLoop` | fn | 无需辅助功能权限（-u 走系统 IOKit 用户活动断言）。 |
+| 18820 | `tick` | const |  |
+| 18832 | `startCaffeinate` | fn |  |
+| 18863 | `applySleepMode` | fn |  |
+| 18892 | `sleepNow` | fn |  |
+| 18913 | `restoreSleepMode` | fn |  |
+| 18924 | `startServer` | fn |  |
+| 19087 | `cleanup` | const |  |
+| 19104 | `tryListen` | const |  |
+| 19171 | `migrateAgentHintModel` | fn |  |
+| 19174 | `cp` | const |  |
+| 19237 | `runAutomationSchedules` | fn |  |
 
 ## scripts/inject.js  （21921 行 / 902 个函数）
 
