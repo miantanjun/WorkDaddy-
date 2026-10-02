@@ -249,10 +249,12 @@ ok(!/\/qwen\/i/.test(agentUsageCode) && !/\/deepseek\/i/.test(agentUsageCode),
 ok(agentUsageCode.indexOf('isLocal') < 0,
   'G2 已彻底删掉 isLocal（改为「有没有指定模型」+ 目录**声明**两个维度）');
 
-const hintRuleBody = (/function buildAgentHintRule\(models\) \{[\s\S]*?\n\}/.exec(daemonSrc) || [''])[0];
+// ⚠️ 2026-10-01：签名由 (models) 扩为 (models, health) —— 带健康标注。
+//    正则同步放宽为「models 之后可有可选第二参」，但仍要求**必须**含 models 形参。
+const hintRuleBody = (/function buildAgentHintRule\(models(?:,\s*health)?\) \{[\s\S]*?\n\}/.exec(daemonSrc) || [''])[0];
 ok(hintRuleBody.length > 0 && !/qwen|deepseek/i.test(codeOnly(hintRuleBody)),
   'G3 ⭐⭐ 提醒规则**不得硬编码任何模型名**（模型清单必须来自目录）');
-ok(/agentCatalog\.delegatable\(/.test(daemonCode) && /function buildAgentHintRule\(models\)/.test(daemonSrc),
+ok(/agentCatalog\.delegatable\(/.test(daemonCode) && /function buildAgentHintRule\(models/.test(daemonSrc),
   'G4 提醒规则由「可委派清单」动态生成');
 ok(/if \(!list\.length\) return '';/.test(daemonCode),
   'G5 ⭐ 可委派清单为空 ⇒ 返回空串 ⇒ **整段不注入**（宁可不说，也不让 AI 调不存在的模型）');
@@ -318,6 +320,40 @@ ok(/agentUsageCache = \{ at: 0, data: null \};/.test(daemonSrc),
   'G21 ⭐⭐ 改目录声明后**必须清使用记录缓存** —— 否则用户改完看不到变化（实测踩到）');
 ok(!/qwen|deepseek/i.test(codeOnly(catalogSrc)),
   'G22 目录模块本身不含任何模型名（与具体 AI 完全解耦）');
+
+/* ============ H. 2026-10-01 探针评估报告落地项 ============ */
+section('H. 子 Agent 提醒改进（探针评估报告 §7 落地）');
+
+ok(/Never issue more than one Agent call in the same message/.test(daemonSrc),
+  'H1 ⭐ 补「禁止同消息并发」约束（实证：09-29 17:11:10 同秒 4 任务 → 6 条失败）');
+ok(/After two consecutive failures, stop delegating for the rest of this session/.test(daemonSrc),
+  'H2 ⭐⭐ 补「连续 2 次失败即放弃本次会话委派」—— 把「单次失败」与「引擎整体挂了」区分开');
+ok(/function deriveAgentHealth\(/.test(daemonSrc) && /AGENT_UNHEALTHY_THRESHOLD/.test(daemonSrc),
+  'H3 ⭐⭐ 观测驱动健康状态（从台账推导，不做主动探活）');
+ok(/ENGINE_FAILURE_RE/.test(daemonSrc) && /waiting for admission/.test(daemonSrc) && /Paged KV/.test(daemonSrc),
+  'H4 健康判据只认**引擎类**失败三类（503 / Paged KV / admission），任务本身出错不累计');
+ok(/consecutiveFailures = 0/.test(daemonSrc),
+  'H5 ⭐ 一次成功即**清零**连续失败数（不是滚动窗口，避免长期贴标签）');
+ok(/WARNING: last /.test(daemonSrc),
+  'H6 ⭐ 风险写进**提醒文案**（让主 AI 在派活**之前**就知道，比事后收失败回执好）');
+ok(/function refreshAgentHintAfterCatalogChange\(/.test(daemonSrc),
+  'H7 ⭐ 取消「可委派」后**立即**刷新提醒块（修「只在 daemon 启动时刷新」的弱耦合）');
+ok(/refreshAgentHintAfterCatalogChange\(\);/.test(daemonCode),
+  'H8 ⭐ 该函数已接入目录变更路由（不是只定义不调用）');
+ok(!/setInterval\([^)]*probe/i.test(daemonSrc),
+  'H9 ⭐⭐ **没有**引入「固定间隔自动探活」—— 探活本身就是一个派活，会制造它想预防的拥塞');
+ok(/treat it as a failed delegation/.test(daemonSrc),
+  'H10 ⭐ 提醒块声明了「清单按轮刷新」—— 若列出的模型不可用，按规则 2 降级、别去排查');
+
+/* ============ I. 注入时机缺口 ============ */
+section('I. 注入时机缺口（2026-10-01 实测发现）');
+
+ok(/生效时机/.test(injectSrc) && /每轮用户消息/.test(injectSrc),
+  'I1 ⭐⭐ 面板明示「生效时机」—— 实测 10:20 开启、10:42 才进上下文，用户会以为「开了没用」');
+ok(/下一条消息起生效/.test(injectSrc),
+  'I2 ⭐ 开关成功的 toast 说明了生效时机（不谎报「已生效」）');
+ok(!/强制刷新当前会话/.test(injectSrc),
+  'I3 ⭐ 没有用「重载页面」这种打断用户的方式去糊弄（承认官方注入点的客观限制）');
 
 /* ============ E. 活体（只读，不写用户文件） ============ */
 section('E. 活体验证（只读）');

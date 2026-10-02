@@ -55,7 +55,12 @@
  *   （D2 事务写入器 + 快照域），故无行为差异；**将来若切到异步版必须先补这组 delta**，否则产物会被
  *   算进内容快照（既慢又可能顶破集合尺寸，症状见 delta-3 的 note）。
  *
- * 当前 7 条 delta 属于三类：
+ * 2026-10-01 追加 **delta-5a..5l**（吸纳上游 1.2.9 + 1.2.10 的 session-sync 改动，共 12 条）：
+ *   ⚠️ 核查发现本地 fixture 停在 1.2.8，**1.2.8→1.2.9 的钩子从未吸纳**，而 1.2.10 的重绑又依赖它
+ *   ⇒ 先补钩子（5a..5e，本地无调用方、零行为变化）再补重绑（5f..5l，真修复）。
+ *   核心：会话复制时重写 transcript 的 sessionId，避免 steer/权限事件路由回原会话。
+ *
+ * 当前 7 条旧 delta 属于三类：
  *   delta-0          文件头「本文件是产物」的本地说明（纯粹为了不让人直接改工作副本）
  *   delta-2a..2e     readSnapshot 支持第 4 参 options.skipPrefixes（cache 顺延为第 5 参）
  *   delta-3          applySnapshot 的**发布后复检**沿用同一 skip 域（D2 事务写入的前置）
@@ -124,6 +129,193 @@ const DELTAS = [
     note: 'unchanged() 复检必须用同一 skip 域，否则会把产物算进来（既慢又可能触顶）；cache 原样透传',
     from: '  const now = readSnapshot(snapshot.root, snapshot.id, snapshot.aliases, snapshot.cache || null);',
     to: '  const now = readSnapshot(snapshot.root, snapshot.id, snapshot.aliases, { skipPrefixes: snapshot.skipPrefixes }, snapshot.cache || null);',
+  },
+  // ===== [2026-10-01 吸纳上游 1.2.9 + 1.2.10] =====
+  // ⚠️ 背景：fixture 逐字节等于上游 **1.2.8** 原文；本地已吸纳过 1.2.9，但**该文件当时漏了 4 处**
+  //   （核查方式：fixture 与 1.2.9 原文 diff 只有这 4 行，不含页面其他改动）。
+  //   而 1.2.10 的 transcript 身份重绑**依赖**其中的 `source.rewriteBytes`
+  //   （`const rebind = !source.rewriteBytes && ...`）⇒ 必须一起补。
+  //   ⇒ 5a..5e 是**补录 1.2.9 遗漏**（本地无调用方、零行为变化），5f..5l 是 1.2.10 的新修复。
+  {
+    id: 'delta-5a',
+    note: '1.2.9：unchangedAsync 支持 snapshot.reread() 钩子（调用方可用自定义重读取代直接 readSnapshotAsync）。本地无调用方 ⇒ 不传时与原来完全等价。',
+    from: 'async function unchangedAsync(snapshot) {\n'
+      + '  const now = await readSnapshotAsync(snapshot.root, snapshot.id, snapshot.aliases, snapshot.cache || null);\n'
+      + '  return now.files.size === snapshot.files.size &&',
+    to: 'async function unchangedAsync(snapshot) {\n'
+      + '  const now = snapshot.reread ? await snapshot.reread() : await readSnapshotAsync(snapshot.root, snapshot.id, snapshot.aliases, snapshot.cache || null);\n'
+      + '  return now.files.size === snapshot.files.size &&',
+  },
+  {
+    id: 'delta-5b',
+    note: '1.2.9：targetBytesAsync 支持 source.rewriteBytes(key, file, target) 钩子。⚠️ 这是 1.2.10 重绑的前置 —— 重绑逻辑用 `!source.rewriteBytes` 避开钩子已处理的 key。',
+    from: 'async function targetBytesAsync(key, file, source, target) {\n'
+      + "  if (key !== 'artifact-index/__session__.json') return null;",
+    to: 'async function targetBytesAsync(key, file, source, target) {\n'
+      + '  if (source.rewriteBytes) return source.rewriteBytes(key, file, target);\n'
+      + "  if (key !== 'artifact-index/__session__.json') return null;",
+  },
+  {
+    id: 'delta-5c',
+    note: '1.2.9：applySnapshotAsync 的相对路径解析支持 target.resolveRelative(key) 钩子（默认仍走 targetRelative）。',
+    from: '      key, relative: targetRelative(key, target.id), bytes, sourceFile: file,\n'
+      + '      hash, size: bytes ? bytes.length : file.size, mode: file.mode, mtimeMs: file.mtimeMs,',
+    to: '      key, relative: target.resolveRelative ? target.resolveRelative(key) : targetRelative(key, target.id), bytes, sourceFile: file,\n'
+      + '      hash, size: bytes ? bytes.length : file.size, mode: file.mode, mtimeMs: file.mtimeMs,',
+  },
+  {
+    id: 'delta-5d',
+    note: '1.2.9：verifyPublished 里的目标重读也走 target.reread() 钩子。⚠️ 与 5a 同形但在不同函数内 ⇒ 带上后一行做作用域限定。',
+    from: '    const now = await readSnapshotAsync(target.root, target.id, target.aliases, target.cache || null);\n'
+      + '    if (now.files.size !== expected.size || [...expected].some(([key, hash]) => now.files.get(key)?.hash !== hash)) {',
+    to: '    const now = target.reread ? await target.reread() : await readSnapshotAsync(target.root, target.id, target.aliases, target.cache || null);\n'
+      + '    if (now.files.size !== expected.size || [...expected].some(([key, hash]) => now.files.get(key)?.hash !== hash)) {',
+  },
+  {
+    id: 'delta-5e',
+    note: '1.2.9：新增 node:stream 的 Readable 与 pipeline 导入 —— 1.2.10 的 rebind 流式写盘要用。',
+    from: "const { StringDecoder } = require('node:string_decoder');\n",
+    to: "const { StringDecoder } = require('node:string_decoder');\n"
+      + "const { Readable } = require('node:stream');\n"
+      + "const { pipeline } = require('node:stream/promises');\n",
+  },
+  {
+    id: 'delta-5f',
+    note: '1.2.10：新增 RUNTIME_IDENTITY_REPAIR 运行时标记（供 applySnapshotAsync 的「只修身份」模式识别）。',
+    from: 'const DEFAULT_SYNC_BACKUP_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;\n',
+    to: 'const DEFAULT_SYNC_BACKUP_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;\n'
+      + "const RUNTIME_IDENTITY_REPAIR = Symbol('runtime-identity-repair');\n",
+  },
+  {
+    id: 'delta-5g',
+    note: '1.2.10 ⭐ 核心修复：会话复制时必须重写 transcript 记录里的 sessionId。CLI 从记录内容（不是文件名）恢复运行身份，留着源 id 会把 steer / 权限事件路由回原会话。只改记录外壳（record.sessionId），绝不全局替换 —— 工具参数/结果/消息 id/用户原文都可能合法含同一串。',
+    from: 'function targetBytes(key, file, source, target) {',
+    to: [
+      '// The CLI restores its runtime identity from transcript records, not the',
+      "// filename. Leaving A's sessionId in B's copy routes steer and permission",
+      '// events to A. Only rewrite the record envelope: tool arguments, results,',
+      '// message IDs and user text can legitimately contain the same string.',
+      'function rebindTranscriptLine(line, aliases, id) {',
+      '  if (!line.trim()) return line;',
+      '  let record;',
+      "  try { record = JSON.parse(line); } catch (_) { throw Error('会话消息文件未写完或已损坏，未同步'); }",
+      "  if (!record || typeof record !== 'object' || Array.isArray(record) || typeof record.type !== 'string') {",
+      "    throw Error('会话消息格式不受支持，未同步');",
+      '  }',
+      '  if (record.sessionId === id || !aliases.includes(record.sessionId)) return line;',
+      '  record.sessionId = id;',
+      "  return JSON.stringify(record) + (line.endsWith('\\r') ? '\\r' : '');",
+      '}',
+      '',
+      'async function* reboundTranscript(file, aliases, id) {',
+      "  let pending = '';",
+      '  // Keep the async copy path streaming even for very large conversations.',
+      "  for await (const chunk of fs.createReadStream(file.sourcePath, { encoding: 'utf8', highWaterMark: 1024 * 1024 })) {",
+      '    const text = pending + chunk;',
+      '    let start = 0;',
+      '    const output = [];',
+      '    for (;;) {',
+      "      const newline = text.indexOf('\\n', start);",
+      '      if (newline < 0) break;',
+      "      output.push(rebindTranscriptLine(text.slice(start, newline), aliases, id) + '\\n');",
+      '      start = newline + 1;',
+      '    }',
+      '    pending = text.slice(start);',
+      "    if (output.length) yield output.join('');",
+      '  }',
+      '  if (pending) yield rebindTranscriptLine(pending, aliases, id);',
+      '}',
+      '',
+      'async function reboundTranscriptInfo(file, aliases, id) {',
+      "  const hash = crypto.createHash('sha256');",
+      '  let size = 0;',
+      '  for await (const chunk of reboundTranscript(file, aliases, id)) {',
+      '    hash.update(chunk);',
+      '    size += Buffer.byteLength(chunk);',
+      '  }',
+      "  return { hash: hash.digest('hex'), size };",
+      '}',
+      '',
+      'function targetBytes(key, file, source, target) {',
+    ].join('\n'),
+  },
+  {
+    id: 'delta-5h',
+    note: '1.2.10：同步版 targetBytes 支持 rewriteBytes 钩子；且对 transcript 直接做重绑（同步路径）。',
+    from: 'function targetBytes(key, file, source, target) {\n'
+      + "  if (key !== 'artifact-index/__session__.json') return file.bytes;",
+    to: 'function targetBytes(key, file, source, target) {\n'
+      + '  if (source.rewriteBytes) return source.rewriteBytes(key, file, target);\n'
+      + '  if (/^projects\\/[^/]+\\/__session__\\.jsonl$/.test(key)) {\n'
+      + "    return Buffer.from(file.bytes.toString('utf8').split('\\n')\n"
+      + "      .map(line => rebindTranscriptLine(line, source.aliases, target.id)).join('\\n'));\n"
+      + '  }\n'
+      + "  if (key !== 'artifact-index/__session__.json') return file.bytes;",
+  },
+  {
+    id: 'delta-5i',
+    note: '1.2.10：applySnapshotAsync 支持「只修身份」模式（source === target、只处理 transcriptKey）。',
+    from: 'async function applySnapshotAsync(source, target, options) {\n'
+      + '  const { backupRoot, commit = async () => {}, guard = async () => {}, missingOnly = false,\n'
+      + '    onProgress = () => {} } = options;\n'
+      + "  if (source.root !== target.root || source.id === target.id) throw Error('无效的会话同步目标');\n"
+      + '  const changes = [];\n'
+      + '  for (const [key, file] of source.files) {\n'
+      + '    if (missingOnly && target.files.has(key)) continue;',
+    to: 'async function applySnapshotAsync(source, target, options) {\n'
+      + '  const { backupRoot, commit = async () => {}, guard = async () => {}, missingOnly = false,\n'
+      + '    onProgress = () => {} } = options;\n'
+      + '  const repairIdentityOnly = options[RUNTIME_IDENTITY_REPAIR] === true && source === target;\n'
+      + "  if (source.root !== target.root || (source.id === target.id && !repairIdentityOnly)) throw Error('无效的会话同步目标');\n"
+      + '  const changes = [];\n'
+      + '  for (const [key, file] of source.files) {\n'
+      + '    if (repairIdentityOnly && key !== source.transcriptKey) continue;\n'
+      + '    if (missingOnly && target.files.has(key)) continue;',
+  },
+  {
+    id: 'delta-5j',
+    note: '1.2.10：applySnapshotAsync 计算 hash/size 时走流式重绑（避免大文件整份进内存）。',
+    from: '    const bytes = await targetBytesAsync(key, file, source, target);\n'
+      + '    const hash = bytes ? digest(bytes) : file.hash;\n'
+      + '    if (target.files.get(key)?.hash === hash) continue;\n'
+      + '    changes.push({\n'
+      + '      key, relative: target.resolveRelative ? target.resolveRelative(key) : targetRelative(key, target.id), bytes, sourceFile: file,\n'
+      + '      hash, size: bytes ? bytes.length : file.size, mode: file.mode, mtimeMs: file.mtimeMs,\n'
+      + '    });',
+    to: '    const bytes = await targetBytesAsync(key, file, source, target);\n'
+      + '    const rebind = !source.rewriteBytes && /^projects\\/[^/]+\\/__session__\\.jsonl$/.test(key);\n'
+      + '    const rewritten = rebind ? await reboundTranscriptInfo(file, source.aliases, target.id) : null;\n'
+      + '    const hash = rewritten ? rewritten.hash : bytes ? digest(bytes) : file.hash;\n'
+      + '    if (target.files.get(key)?.hash === hash) continue;\n'
+      + '    changes.push({\n'
+      + '      key, relative: target.resolveRelative ? target.resolveRelative(key) : targetRelative(key, target.id), bytes, sourceFile: file,\n'
+      + '      rebind, hash, size: rewritten ? rewritten.size : bytes ? bytes.length : file.size, mode: file.mode, mtimeMs: file.mtimeMs,\n'
+      + '    });',
+  },
+  {
+    id: 'delta-5k',
+    note: '1.2.10：「只修身份」模式若无变更则提前返回（避免走完整备份/提交流程）。',
+    from: '  if (!missingOnly) for (const [key, file] of target.files) {\n'
+      + '    if (!source.files.has(key)) changes.push({ key, relative: file.relative, bytes: null, sourceFile: null, hash: null, size: 0 });\n'
+      + '  }\n'
+      + '  const backupEntries = changedTargetFiles(changes, target);',
+    to: '  if (!missingOnly) for (const [key, file] of target.files) {\n'
+      + '    if (!source.files.has(key)) changes.push({ key, relative: file.relative, bytes: null, sourceFile: null, hash: null, size: 0 });\n'
+      + '  }\n'
+      + '  if (repairIdentityOnly && !changes.length) return { copied: 0, copiedBytes: 0, totalBytes: target.totalBytes };\n'
+      + '  const backupEntries = changedTargetFiles(changes, target);',
+  },
+  {
+    id: 'delta-5l',
+    note: '1.2.10：异步写盘时走流式重绑（pipeline + Readable.from），确保大会话不整份进内存。',
+    from: '        try {\n'
+      + "          if (change.bytes) await fs.promises.writeFile(staged, change.bytes, { mode: change.mode || 0o600, flag: 'wx' });",
+    to: '        try {\n'
+      + '          if (change.rebind) await pipeline(\n'
+      + '            Readable.from(reboundTranscript(change.sourceFile, source.aliases, target.id)),\n'
+      + "            fs.createWriteStream(staged, { mode: change.mode || 0o600, flags: 'wx' })\n"
+      + '          );\n'
+      + "          else if (change.bytes) await fs.promises.writeFile(staged, change.bytes, { mode: change.mode || 0o600, flag: 'wx' });",
   },
   {
     id: 'delta-3',

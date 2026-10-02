@@ -1791,6 +1791,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '不是 WorkDaddy 的账号导出文件': 'Not a WorkDaddy account export file', '导入文件中没有账号数据': 'No account data found in the import file',
     '未读取到有效内容，请选择导出文件': 'No valid content read; please choose an export file', '密码不能超过 1024 个字符': 'Password cannot exceed 1024 characters',
     '当前登录文件无法唯一确认，已拒绝退出登录': 'The current login file cannot be uniquely identified; logout rejected',
+    '同步到其他账号': 'Sync to another account',
+    '跨工作区会话请在对应项目窗口的历史中查看': 'Cross-workspace sessions appear in the history of that project window',
+    '原生登录态已切换，无需重启客户端': 'Native login session switched; no restart needed',
+    '登录文件已切换，请刷新窗口使新账号生效': 'Login file switched; refresh the window to apply the new account',
+    '已切换并触发窗口刷新': 'Switched and the window refresh was triggered',
     '不能删除当前登录的账号（请先退出登录或切换到其他账号）': 'Cannot delete the currently logged-in account (log out or switch to another account first)',
     '删除登录文件后仍然存在': 'The login file still exists after deletion',
     '诊断设置由 WORKDADDY_TELEMETRY 环境变量控制': 'Diagnostics are controlled by the WORKDADDY_TELEMETRY environment variable',
@@ -2320,6 +2325,25 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var c = a && a.checkin;
     var checked = !!(c && c.ok && !c.inactive);
     return '<span class="wbs-ck wbs-checkin-tag ' + (checked ? 'ok' : 'pending') + '" title="' + (checked ? '今日已签到' : '今日未签到') + '">' + (checked ? '今日已签到' : '今日未签到') + '</span>';
+  }
+
+  /**
+   * [2026-10-01 吸纳上游 1.2.10] 今日是否**真的**完成了成长活动。
+   *
+   * ⚠️ 与签到的区别（这是上游修正的核心语义）：
+   *   **签到和登录本身不构成成长活动** —— 只有官方热力图里有**今天**的记录才算。
+   *   所以成长容器（猫咪）不能按比例填充，否则会把「签到了但没做成长任务」显示成部分完成。
+   *   只有 0% / 100% 两种状态。
+   *
+   * ⚠️ 两个必须照搬的细节：
+   *   ① 用**北京时间**（+8h）取当天日期 —— CN 成长日历按北京时间，与 OS 时区无关。
+   *   ② **三重校验**：ok === true 且 is_active === true 且 date === 今天。
+   *      只判 is_active 会把「昨天的记录」误当成今天已达成。
+   */
+  function isGrowthActiveToday(a) {
+    var today = a && a.growthTodayActive;
+    var date = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+    return !!(today && today.ok === true && today.is_active === true && today.date === date);
   }
 
   function activityStreakHtml(a) {
@@ -4223,7 +4247,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var hidden = true;
       var disposed = false;
 
-      function messageText(message, limit) {
+      // [2026-10-01 吸纳上游 1.2.10] 新增 preserveMarkdown：
+      //   默认 false ⇒ 折叠空白（列表/搜索场景要单行）；
+      //   true ⇒ **只 trim 首尾、不折叠内部空白** —— 折叠会毁掉 Markdown 语义
+      //   （换行、缩进、列表、代码块全靠空白表达），导致详情浮层里全挤成一坨。
+      function messageText(message, limit, preserveMarkdown) {
         var content = message && message.content;
         var blocks = Array.isArray(content) ? content : [];
         var parts = [];
@@ -4239,7 +4267,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         if (messageType === 'assistant') {
           value = value.replace(/(?:^|\n)\s*\[wbs-reply-done\]:[^\n]*(?:\n\s*)*$/i, '');
         }
-        value = value.replace(/\s+/g, ' ').trim();
+        value = preserveMarkdown ? value.trim() : value.replace(/\s+/g, ' ').trim();
         if (limit && value.length > limit) return value.slice(0, limit - 1) + '…';
         return value;
       }
@@ -4337,8 +4365,21 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         tooltip.textContent = '';
         var prompt = el('div', 'wbs-message-nav-prompt', messageText(turn.userMessage, 240) || '用户消息');
         tooltip.appendChild(prompt);
-        var response = messageText(turn.assistantMessage, 320);
-        if (response) tooltip.appendChild(el('div', 'wbs-message-nav-response', response));
+        // [2026-10-01 吸纳上游 1.2.10] 回复预览：320 字纯文本 → 20000 字 Markdown。
+        // ⚠️ 渲染器 **可能缺席**（daemon 注入顺序异常 / 旧版 daemon）⇒ 必须 try/catch 回落，
+        //    绝不因为渲染器不在就让整个消息导航失效。
+        var response = messageText(turn.assistantMessage, 20000, true);
+        if (response) {
+          var responseNode = el('div', 'wbs-message-nav-response');
+          var preview = window.__wbsMarkdownPreview;
+          if (preview && typeof preview.render === 'function') {
+            try { responseNode.appendChild(preview.render(response)); }
+            catch (_) { responseNode.textContent = response; }
+          } else {
+            responseNode.textContent = response;
+          }
+          tooltip.appendChild(responseNode);
+        }
         tooltip.hidden = false;
         tooltip.classList.add('is-visible');
         var buttonRect = button.getBoundingClientRect();
@@ -9541,6 +9582,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           + '<label style="display:flex;align-items:flex-start;gap:8px;margin:8px 0;font-size:12px;cursor:pointer">'
           + '<input type="checkbox" id="wbs-agent-toggle" style="margin-top:3px">'
           + '<span>在每个会话里提醒 AI 可用（关闭后既不提醒也不注入）</span></label>'
+          // [2026-10-01 注入时机缺口] 实测：开关写入的是官方 customPrompt，而它由官方在
+          // 「**每轮用户消息**」时读取 ⇒ 已经进行中的会话**不会立刻**看到新内容
+          // （本会话实证：10:20 开启 → 10:42 才进上下文）。
+          // 插件无法强制刷新，所以**必须把这件事告诉用户**，否则会以为「开了没用」。
+          + '<div style="' + note + ';background:var(--wbs-warn-bg,#fff8ec);color:#8a5a00">'
+          + '<b>生效时机</b>：写进的是官方「全局自定义指令」，由官方在<b>每轮用户消息</b>时读取。'
+          + '所以<b>当前正在进行的会话不会立刻看到</b> —— 发下一条消息时才生效。'
+          + '</div>'
           + '<div style="' + note + '" data-wbs-i18n-skip id="wbs-agent-usage"></div>'
           + '</div>';
       }
@@ -9568,7 +9617,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           }).then(function (r) { return r.json(); }).then(function (state) {
             toggle.checked = !!(state && state.enabled);
             if (subEl) subEl.textContent = state && state.enabled ? '提醒已开' : '提醒已关';
-            toast(state && state.enabled ? '已开启：每个会话都会提醒 AI 可用本地子 Agent' : '已关闭：不再提醒、也不再注入', false, root);
+            toast(state && state.enabled
+              ? '已开启：下一条消息起生效（官方在每轮用户消息时读取）'
+              : '已关闭：下一条消息起不再提醒、也不再注入', false, root);
           }).catch(function () {
             toggle.checked = !want;   // 失败回滚勾选状态，别让界面骗人
             toast('设置失败', true, root);
@@ -10293,6 +10344,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         return;
       }
       function canEditAutoCopy(uid) { return sessionsState.uid !== '' && !!uid; }
+      // [2026-10-02 吸纳上游 1.2.11] 行内单条同步按钮：不必进批量模式，点一下直接开目标账号弹窗。
+      // ⚠️ SVG 必须内联保持自包含 —— 上游注释说明：测试 VM 会按 renderSessions 源码切片执行，
+      //    闭包外的变量在切片里不可见，用外部常量会挂。
+      function sessSyncButton(s) {
+        return '<button class="wbs-sess-sync" type="button" data-id="' + escAttr(s.id) + '" title="同步到其他账号" aria-label="同步到其他账号">' +
+          '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3l4 4-4 4"/><path d="M20 7H8"/><path d="M8 21l-4-4 4-4"/><path d="M4 17h12"/></svg></button>';
+      }
       function autoCopyButton(kind, key, uid, enabled, inherited) {
         if (sessionsState.autoCopyAll || !canEditAutoCopy(uid)) return '';
         var title = inherited ? '随空间自动同步' : (enabled ? '取消自动同步' : '切换账号时自动同步');
@@ -10334,7 +10392,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             (batch ? '<input type="checkbox" class="wbs-sess-check" data-id="' + escAttr(s.id) + '"' + sel + '>' : '') +
             '<span class="wbs-sess-main"><span class="wbs-sess-title">' + esc(title) + '</span>' +
             '<span class="wbs-sess-meta">' + esc(sessMetaText(s)) + '</span></span>' +
-            (batch ? '' : autoCopyButton('session', s.id, s.user_id, marked, inherited)) +
+            (batch ? '' : sessSyncButton(s) + autoCopyButton('session', s.id, s.user_id, marked, inherited)) +
             '</div>';
         });
         if (taskMore > 0) html += '<button class="wbs-sess-more" type="button" data-ws="__TASKS__">展开 ' + Math.min(taskMore, SESS_WS_STEP) + ' 条（剩余 ' + taskMore + '）</button>';
@@ -10365,7 +10423,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             (batch ? '<input type="checkbox" class="wbs-sess-check" data-id="' + escAttr(s.id) + '"' + sel + '>' : '') +
             '<span class="wbs-sess-main"><span class="wbs-sess-title">' + esc(title) + '</span>' +
             '<span class="wbs-sess-meta">' + esc(sessMetaText(s)) + '</span></span>' +
-            (batch ? '' : autoCopyButton('session', s.id, s.user_id, marked, inherited)) +
+            (batch ? '' : sessSyncButton(s) + autoCopyButton('session', s.id, s.user_id, marked, inherited)) +
             '</div>';
         });
         if (more > 0) html += '<button class="wbs-sess-more" type="button" data-ws="' + escAttr(groupKey) + '">展开 ' + Math.min(more, SESS_WS_STEP) + ' 条（剩余 ' + more + '）</button>';
@@ -10430,6 +10488,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     function bindSessEvents(listEl) {
       listEl.onclick = function (e) {
         var t = e.target;
+        // [2026-10-02 吸纳上游 1.2.11] 行内同步按钮：优先级**高于**自动同步开关
+        // （两者在 DOM 里相邻，不先拦会把点同步当成点开关）
+        var syncBtn = t.closest ? t.closest('.wbs-sess-sync') : null;
+        if (syncBtn) {
+          e.preventDefault();
+          e.stopPropagation();
+          openCopyModal([syncBtn.getAttribute('data-id')]);
+          return;
+        }
         var autoBtn = t.closest ? t.closest('.wbs-sess-auto') : null;
         if (autoBtn) {
           e.preventDefault();
@@ -16964,10 +17031,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       return merged;
     }
 
-    function clampDailyRatio(value) {
-      var ratio = Number(value);
-      return isFinite(ratio) ? Math.max(0, Math.min(1, ratio)) : 0;
-    }
+    // [2026-10-01 吸纳上游 1.2.10] clampDailyRatio 已删除 —— 成长容器改二值填充后，
+    // 不再需要把 growth.ratio 裁剪到 [0,1]。上游同步删除了该函数，此处保持一致
+    // （避免留下无引用的孤儿函数，回归套件里也有「无孤儿函数」类断言）。
 
     var WORKBUDDY_CAT_MARK = '__WBS_BUDDY_MARK__';
 
@@ -16989,12 +17055,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '，开启盲盒 ' + (Number(gacha.count) || 0) + ' 次，待抽奖 ' + (Number(lottery.count) || 0) + ' 次，' + catText;
     }
 
-    function dailyRingsSvg(progress) {
-      var ready = progress && progress.status === 'ready';
-      var growthRatio = ready ? progress.growth && progress.growth.ratio : 0;
-      var level = (clampDailyRatio(growthRatio) * 100).toFixed(2) + '%';
-      var empty = clampDailyRatio(growthRatio) <= 0;
-      return '<span class="wbs-daily-vessel' + (empty ? ' is-empty' : '') + '" aria-hidden="true" style="--wbs-liquid-level:' + level + ';--wbs-workbuddy-cat:url(' + WORKBUDDY_CAT_MARK + ')">' +
+    /**
+     * [2026-10-01 吸纳上游 1.2.10] 成长容器（猫咪）的液面。
+     *
+     * ⚠️ 语义修正：旧实现按 `dailyProgress.growth.ratio` **比例填充**，
+     *   但「签到 / 登录」并不构成成长活动 —— 只有官方热力图里有**今天**的记录才作数。
+     *   所以液面只有两种状态：完成 100% / 未完成 0%。
+     *   ⇒ 判据改为 `isGrowthActiveToday(account)`，因此必须传 `account` 而非 `progress`。
+     */
+    function dailyRingsSvg(account) {
+      var checkedToday = isGrowthActiveToday(account);
+      var level = checkedToday ? '100.00%' : '0.00%';
+      return '<span class="wbs-daily-vessel' + (checkedToday ? ' is-checked-in' : ' is-empty') + '" aria-hidden="true" style="--wbs-liquid-level:' + level + ';--wbs-workbuddy-cat:url(' + WORKBUDDY_CAT_MARK + ')">' +
         '<span class="wbs-daily-liquid"></span><span class="wbs-daily-cat-mark"></span></span>';
     }
 
@@ -17004,7 +17076,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var ready = progress && progress.status === 'ready';
       var label = dailyProgressLabel(progress);
       return '<button type="button" class="wbs-daily-rings' + (ready ? '' : ' is-loading') + '" tabindex="0" aria-label="' + escAttr(label) + '" aria-controls="wbs-status-popover" aria-expanded="false" data-uid="' + escAttr(account.uid) + '">' +
-        dailyRingsSvg(progress) + activityStreakHtml(account) + '</button>';
+        dailyRingsSvg(account) + activityStreakHtml(account) + '</button>';
     }
 
     function formatDailyTravelCountdown(arriveAt, now) {
@@ -17357,7 +17429,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           var ready = account.dailyProgress && account.dailyProgress.status === 'ready';
           existing.classList.toggle('is-loading', !ready);
           existing.setAttribute('aria-label', dailyProgressLabel(account.dailyProgress));
-          existing.innerHTML = dailyRingsSvg(account.dailyProgress) + activityStreakHtml(account);
+          existing.innerHTML = dailyRingsSvg(account) + activityStreakHtml(account);
         }
         else {
           var nameGroup = cards[i].querySelector('.wbs-name-group');
@@ -18742,13 +18814,25 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       function worker() {
         if (!alive || !state.open || runId !== state.activityRunId || next >= accounts.length) return Promise.resolve();
         var account = accounts[next++];
+        // [2026-10-01 吸纳上游 1.2.10] 同一 worker 内**串行**再取一次「今日是否真的活跃」。
+        // 该接口只读后端记录，**不会发送提示词、也不会触发签到**（上游注释原文）。
         return api('/api/growth/streak', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: account.uid }) })
           .then(function (result) { return result.activityStreak; })
           .catch(function () { return { days: null, status: 'unavailable' }; })
           .then(function (value) {
             if (!alive || !state.open || runId !== state.activityRunId) return;
+            return api('/api/growth/today-active', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: account.uid }) })
+              .catch(function () { return null; })
+              .then(function (today) { return { streak: value, today: today }; });
+          })
+          .then(function (result) {
+            if (!alive || !state.open || runId !== state.activityRunId) return;
+            var value = result.streak;
             var current = state.accounts.filter(function (a) { return a.uid === account.uid; })[0];
             if (!current) return;
+            current.growthTodayActive = result.today;
+            // 取不到就当未知：容器保持未完成，并安排一次退避重试
+            if (!result.today || result.today.ok !== true) retryAt = Math.max(retryAt, Date.now() + 30100);
             if (!isKnownActivityStreak(value)) {
               // daemon 对失败退避 30 秒：到期后再重试，避免重开面板时反复命中失败缓存。
               retryAt = Math.max(retryAt, (Number(value && value.fetchedAt) || Date.now()) + 30100);
@@ -18759,7 +18843,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
               var slot = card.querySelector('.wbs-checkin-slot');
               if (slot) slot.outerHTML = checkinBadgeHtml(current);
               var growthControl = card.querySelector('.wbs-daily-rings');
-              if (growthControl) growthControl.innerHTML = dailyRingsSvg(current.dailyProgress) + activityStreakHtml(current);
+              if (growthControl) growthControl.innerHTML = dailyRingsSvg(current) + activityStreakHtml(current);
             });
           }).then(worker);
       }
@@ -20442,12 +20526,32 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-message-nav-dot{display:block;width:5px;height:min(2px,var(--wbs-message-nav-marker-height,12px));border-radius:2px;background:currentColor;opacity:.62;transition:width .18s ease,opacity .18s ease}',
     '.wbs-message-nav-marker:hover .wbs-message-nav-dot,.wbs-message-nav-marker:focus-visible .wbs-message-nav-dot{width:11px;opacity:.82}',
     '.wbs-message-nav-marker.is-active .wbs-message-nav-dot{width:14px;opacity:1}',
-    '.wbs-message-nav-tooltip{position:absolute;width:var(--wbs-message-nav-tooltip-max,300px);max-height:min(42vh,320px);box-sizing:border-box;overflow:hidden;padding:10px 11px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.14));border-radius:8px;background:color-mix(in srgb,var(--wb-bg-popover,#fff) 84%,transparent);color:var(--wb-color-text-primary,#1f1f1f);box-shadow:0 12px 34px rgba(20,24,32,.18),inset 0 1px 0 rgba(255,255,255,.38);backdrop-filter:blur(22px) saturate(1.24);-webkit-backdrop-filter:blur(22px) saturate(1.24);pointer-events:none;opacity:0;transform:translateY(-50%) translateX(3px);transition:opacity .18s ease,transform .18s ease}',
+    '.wbs-message-nav-tooltip{position:absolute;width:var(--wbs-message-nav-tooltip-max,300px);max-height:80vh;box-sizing:border-box;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:transparent transparent;padding:10px 11px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.14));border-radius:8px;background:color-mix(in srgb,var(--wb-bg-popover,#fff) 84%,transparent);color:var(--wb-color-text-primary,#1f1f1f);box-shadow:0 12px 34px rgba(20,24,32,.18),inset 0 1px 0 rgba(255,255,255,.38);backdrop-filter:blur(22px) saturate(1.24);-webkit-backdrop-filter:blur(22px) saturate(1.24);pointer-events:none;opacity:0;transform:translateY(-50%) translateX(3px);transition:opacity .18s ease,transform .18s ease}',
     '.wbs-message-nav-tooltip.is-left{right:calc(100% + 10px)}.wbs-message-nav-tooltip.is-right{left:calc(100% + 10px)}',
+    '.wbs-message-nav-tooltip::-webkit-scrollbar{width:6px}.wbs-message-nav-tooltip::-webkit-scrollbar-track,.wbs-message-nav-tooltip::-webkit-scrollbar-thumb{background:transparent}.wbs-message-nav-tooltip::-webkit-scrollbar-thumb{border-radius:6px}.wbs-message-nav-tooltip.is-scrolling{scrollbar-color:var(--wb-icon-secondary,#72757d) transparent}.wbs-message-nav-tooltip.is-scrolling::-webkit-scrollbar-thumb{background:var(--wb-icon-secondary,#72757d)}',
     '.wbs-message-nav-tooltip.is-visible{opacity:1;transform:translateY(-50%) translateX(0)}',
-    '.wbs-message-nav-prompt,.wbs-message-nav-response{display:-webkit-box;overflow:hidden;-webkit-box-orient:vertical;word-break:break-word;letter-spacing:0}',
-    '.wbs-message-nav-prompt{-webkit-line-clamp:4;font-size:12px;font-weight:600;line-height:1.55;color:var(--wb-color-text-primary,#1f1f1f)}',
-    '.wbs-message-nav-response{-webkit-line-clamp:6;margin-top:7px;padding-top:7px;border-top:1px solid var(--wb-border-subtle,rgba(20,24,32,.12));font-size:11px;font-weight:400;line-height:1.55;color:var(--wb-color-text-secondary,#5f626a)}',
+    // ⚠️ [2026-10-01 吸纳上游 1.2.10] prompt 仍是 4 行截断（保持），
+    //    但 **response 不能再 line-clamp** —— 它现在装的是 Markdown 渲染结果（可能 2 万字），
+    //    截成 6 行就白升级了。改为块级 + 由 tooltip 容器负责滚动。
+    '.wbs-message-nav-prompt{display:-webkit-box;overflow:hidden;-webkit-box-orient:vertical;word-break:break-word;letter-spacing:0;-webkit-line-clamp:4;font-size:12px;font-weight:600;line-height:1.55;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-message-nav-response{display:block;min-width:0;overflow-wrap:anywhere;margin-top:7px;padding-top:7px;border-top:1px solid var(--wb-border-subtle,rgba(20,24,32,.12));font-size:11px;font-weight:400;line-height:1.55;color:var(--wb-color-text-secondary,#5f626a)}',
+    // Markdown 渲染结果的排版（标题收敛字号、代码块横滚、表格横滚、引用条）
+    '.wbs-message-nav-response>:first-child{margin-top:0}.wbs-message-nav-response>:last-child{margin-bottom:0}',
+    '.wbs-message-nav-response p{margin:0 0 8px}',
+    '.wbs-message-nav-response :is(h1,h2,h3,h4,h5,h6){margin:12px 0 6px;font-size:12px;line-height:1.45;font-weight:650;color:var(--wb-color-text-primary)}',
+    '.wbs-message-nav-response h1{font-size:14px}.wbs-message-nav-response h2{font-size:13px}',
+    '.wbs-message-nav-response :is(ul,ol){margin:6px 0;padding-left:20px}',
+    '.wbs-message-nav-response li{margin:3px 0}.wbs-message-nav-response li>p{margin:0}',
+    '.wbs-message-nav-response blockquote{margin:8px 0;padding:2px 8px;border-left:3px solid var(--wb-border-default);color:var(--wb-color-text-secondary)}',
+    '.wbs-message-nav-response code{padding:1px 3px;border-radius:3px;background:var(--wb-bg-tertiary);font:10.5px/1.55 var(--wb-font-code-family,monospace)}',
+    '.wbs-message-nav-response pre{max-width:100%;box-sizing:border-box;margin:8px 0;padding:8px;overflow-x:auto;border:1px solid var(--wb-border-subtle);border-radius:6px;background:var(--wb-bg-tertiary);white-space:pre;overscroll-behavior:contain}',
+    '.wbs-message-nav-response pre code{padding:0;background:transparent}',
+    '.wbs-message-nav-response table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:8px 0;overscroll-behavior:contain}',
+    '.wbs-message-nav-response :is(th,td){padding:4px 7px;border:1px solid var(--wb-border-default);min-width:45px}',
+    '.wbs-message-nav-response th{background:var(--wb-bg-tertiary);font-weight:600}',
+    '.wbs-message-nav-response a{color:var(--wb-accent-blue,var(--wb-color-text-primary));text-decoration:underline}',
+    '.wbs-message-nav-response hr{border:0;border-top:1px solid var(--wb-border-subtle);margin:10px 0}',
+    '.wbs-message-nav-response input[type="checkbox"]{width:11px;height:11px;margin:0 4px 0 0;accent-color:var(--wb-button-primary-bg);pointer-events:none}',
     '.wbs-message-nav-highlight{animation:wbs-message-nav-highlight .7s ease-out}',
     '@keyframes wbs-message-nav-highlight{0%{box-shadow:0 0 0 3px color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 48%,transparent)}100%{box-shadow:0 0 0 8px transparent}}',
     /* WorkBuddy 内置引用 tooltip 复用快捷短语的气泡风格，长文本在气泡内滚动 */
@@ -21161,6 +21265,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-sess-main{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}',
     '.wbs-sess-title{font-size:12px;font-weight:600;color:var(--wb-color-text-primary,#1f1f1f);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.wbs-sess-meta{font-size:11px;color:var(--wb-icon-tertiary,#999)}',
+    /* [2026-10-02 吸纳上游 1.2.11] 行内同步图标按钮：尺寸/圆角/交互色与自动同步按钮一致 */
+    '.wbs-sess-sync{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:26px;height:26px;margin-top:-2px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--wb-icon-tertiary,#999);cursor:pointer;padding:0;transition:background .15s,color .15s;font:inherit}',
+    '.wbs-sess-sync:hover{background:var(--wb-bg-hover,#f5f5f5);color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-sess-sync:focus-visible{outline:2px solid color-mix(in srgb,var(--wb-color-text-primary,#1f1f1f) 50%,transparent);outline-offset:1px}',
     '.wbs-sess-auto{display:inline-flex;align-items:center;justify-content:flex-end;gap:6px;flex:0 0 auto;min-width:76px;height:26px;margin-top:-2px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--wb-icon-tertiary,#999);cursor:pointer;padding:0 3px 0 5px;transition:background .15s,color .15s,opacity .15s;font:inherit}',
     '.wbs-sess-auto:hover{background:var(--wb-bg-hover,#f5f5f5);color:var(--wb-color-text-primary,#1f1f1f)}',
     '.wbs-sess-auto.active{color:var(--wb-button-primary-bg,#1f1f1f)}',

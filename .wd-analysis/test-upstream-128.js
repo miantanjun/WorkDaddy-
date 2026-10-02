@@ -108,7 +108,13 @@ ok((SYNC_SRC.split('changedTargetFiles(changes, target)').length - 1) === 3,
 ok(SYNC_SRC.indexOf('\r') === -1, 'B8 session-sync.js 仍是纯 LF（regen 产物，不许被编辑器改成 CRLF）');
 const deltas = require('./fixtures/session-sync.deltas.js');
 ok(deltas.UPSTREAM_VERSION === '1.2.8', 'B9 delta 表登记的基线 = 1.2.8', deltas.UPSTREAM_VERSION);
-ok(deltas.DELTAS.length === 7, 'B10 delta 仍是 7 条（1.2.8 全是上游原生能力，本地零新增 delta）', deltas.DELTAS.length);
+// ⚠️ 2026-10-01：吸纳上游 1.2.10 的 session-sync 改动，新增 delta-5a..5l 共 12 条
+//    （含补录 1.2.8→1.2.9 当时漏掉的 3 个钩子）⇒ 总数由 7 变 19。
+//    这里改成「**至少** 7 条 + 恰好含 delta-5 系列」，避免以后每加一条都要改数字。
+ok(deltas.DELTAS.length >= 7, 'B10 delta 表至少 7 条（原 1.2.8 基线 7 条；后续吸纳只增不减）', deltas.DELTAS.length);
+ok(deltas.DELTAS.filter((d) => /^delta-5/.test(d.id)).length === 12,
+  'B10b 2026-10-01 新增 delta-5a..5l 共 12 条（1.2.9 补录 5 条 + 1.2.10 修复 7 条）',
+  deltas.DELTAS.filter((d) => /^delta-5/.test(d.id)).map((d) => d.id).join(','));
 
 /* ==================================================================== */
 section('[C] 模型限流表（行为级：save → list 往返 + 过期自动清）');

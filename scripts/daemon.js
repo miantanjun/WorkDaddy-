@@ -554,7 +554,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         （删 acIsDarkTheme / watchThemeForButtons / syncAccountFade / syncModelFade）。
 //         同版修复：会话同步冲突误报 / 切号后需再切一次才能同步 / 模型限流写入被服务端白名单拒 /「空间」
 //         分组反复折叠 / 引导会话被暂存队列永久暂停；新增「中文思考」开关（写入官方全局自定义指令）。
-const DAEMON_VERSION = '1.9.4';
+const DAEMON_VERSION = '1.9.6';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 const UPSTREAM_VERSION = '1.2.8';
@@ -577,7 +577,7 @@ const UPSTREAM_VERSION = '1.2.8';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.9.4-20261001-catalog-corrupt-fix-r1';
+const DAEMON_BUILD_ID = 'release-1.9.6-20261002-upstream-1211-intake-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -6199,6 +6199,13 @@ function injectWidget(reason, executionContextId) {
 }
 
 function buildInjectScript() {
+  // [2026-10-01 吸纳上游 1.2.10] 离线 Markdown 渲染器（marked + DOMPurify 打包产物）。
+  // ⚠️ 它是**打包产物**，不要手改 —— 重建走 tools/markdown-preview/build.mjs。
+  //    必须在 inject.js **之前**拼进去，否则 showDetail 用到 window.__wbsMarkdownPreview 时还没就绪
+  //    （inject.js 里有 try/catch 兜底成纯文本，但那样就失去 Markdown 渲染了）。
+  //    它内部对 window.__wbsTrustedHtmlPolicy 的引用是**可选**的（`? {...} : {}`），
+  //    非 codebuddy profile 下该 policy 不存在也能正常工作。
+  const markdownScript = fs.readFileSync(path.join(__dirname, 'markdown-preview.js'), 'utf8');
   const toastScript = fs.readFileSync(path.join(__dirname, 'toast-runtime.js'), 'utf8');
   const compatScript = fs.readFileSync(path.join(__dirname, 'workbuddy-compat.js'), 'utf8');
   let injectScript = fs.readFileSync(path.join(__dirname, 'inject.js'), 'utf8');
@@ -6221,7 +6228,8 @@ function buildInjectScript() {
     injectScript = injectScript.replace(anchor, pickerCode + '\n' + anchor);
   }
   // 组件内通过 fetch 调用本机 API，注入时写入实际端口
-  return (toastScript + '\n' + compatScript + '\n' + injectScript)
+  // ⚠️ 拼接顺序：markdownScript 必须在最前（inject.js 依赖 window.__wbsMarkdownPreview）。
+  return (markdownScript + '\n' + toastScript + '\n' + compatScript + '\n' + injectScript)
     .replace(/__WBS_API__/g, `http://${HOST}:${ACTUAL_PORT}`)
     .replace(/__WBS_VERSION__/g, DAEMON_VERSION)
     // 注入本地 API 能力凭证；旧版面板不会携带该 header，但新版 daemon 会在启动时重新注入新版面板。
@@ -10768,6 +10776,59 @@ function refreshZhReasoningIfEnabled() {
 const AGENT_HINT_TAG_START = '<!-- wbs-agent-hint:start -->';
 const AGENT_HINT_TAG_END = '<!-- wbs-agent-hint:end -->';
 /**
+ * [2026-10-01 探针评估报告 §7.3] 从**已发生的派活记录**推导每个模型的健康状态。
+ *
+ * ⚠️ 为什么不做「固定间隔自动探活」：本地探活**必须发真实 chat 请求**
+ *    （引擎崩后 /v1/models 仍返 200，轻量探测全是假的），而真实请求本身要占推理资源
+ *    （显存余量仅约 1GB）⇒ 定时探测会**制造它想预防的拥塞**。
+ *    ⇒ 改用「观测驱动」：状态来自已经发生的事实，零额外开销。
+ *
+ * 判据：**连续失败**次数 ≥ 阈值，且失败原因属于引擎类（503 / Paged KV / admission）。
+ *   连续失败数按时间倒序累计，遇到一次成功即清零。
+ *
+ * ⚠️ 三条刻意的取舍（被独立复核追问过，在此写死语义）：
+ *   ① **非引擎类失败不参与计数、也不清零** —— 任务本身逻辑出错不代表引擎有问题，
+ *      不该把引擎的连续失败「洗白」。所以「引擎失败 → 任务失败 → 引擎失败」仍计 2 次。
+ *   ② **从未有结果的模型不进 Map** —— 我们对它一无所知时**不贴任何标签**。
+ *      注意这与「读不到 = 健康」是两回事：读不到就是不知道，不是健康。
+ *   ③ 只有**引擎类**失败才推进计数；其余分支一律不写回 Map（避免无意义的 set）。
+ *
+ * @param {Array} records 台账记录（agent-usage 的 records）
+ * @returns {Map<string, {consecutiveFailures:number, lastFailureKind:string}>}
+ */
+const AGENT_UNHEALTHY_THRESHOLD = 2;
+const ENGINE_FAILURE_RE = /503|inference engine is unavailable|Paged KV|waiting for admission/i;
+
+function deriveAgentHealth(records) {
+  const byModel = new Map();
+  const list = Array.isArray(records) ? records.slice() : [];
+  // 按时间正序，便于累计「连续失败」
+  list.sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+  for (const r of list) {
+    const id = String((r && r.model) || '').trim();
+    if (!id) continue;
+    const state = byModel.get(id) || { consecutiveFailures: 0, lastFailureKind: '' };
+    if (r.failed) {
+      const text = String(r.outputHead || '');
+      if (ENGINE_FAILURE_RE.test(text)) {
+        state.consecutiveFailures += 1;
+        state.lastFailureKind = /503/i.test(text) ? 'engine-unavailable'
+          : /Paged KV/i.test(text) ? 'engine-corrupt'
+          : 'admission-timeout';
+        byModel.set(id, state);
+      }
+      // 非引擎类失败（如任务本身出错）**不累计** —— 那不是引擎的问题
+    } else if (r.paired) {
+      // 有结果且不是失败 ⇒ 健康，清零
+      state.consecutiveFailures = 0;
+      state.lastFailureKind = '';
+      byModel.set(id, state);
+    }
+  }
+  return byModel;
+}
+
+/**
  * 子 Agent 提醒规则（**按目录动态生成**，2026-10-01 通用化）。
  *
  * ⚠️ 旧版把 `model="qwen3.8-27b"` **写死在文案里** —— 接入任何别的 AI 之后提醒就失真
@@ -10776,8 +10837,17 @@ const AGENT_HINT_TAG_END = '<!-- wbs-agent-hint:end -->';
  *
  * @param {Array<{id:string,kind:string,label:string}>} models 可委派的模型（非空）
  */
-function buildAgentHintRule(models) {
-  const rows = models.map((m) => '  - ' + m.id + '   (' + m.kind + ')').join('\n');
+function buildAgentHintRule(models, health) {
+  const healthMap = health instanceof Map ? health : new Map();
+  // [2026-10-01 探针评估报告 §7.3] 把「最近不稳」直接写进清单行 ——
+  // 让主 AI 在**决定要不要派活之前**就知道风险，比事后收失败回执更好。
+  const rows = models.map((m) => {
+    const h = healthMap.get(m.id);
+    const warn = h && h.consecutiveFailures >= AGENT_UNHEALTHY_THRESHOLD
+      ? '  [WARNING: last ' + h.consecutiveFailures + ' delegations failed (' + h.lastFailureKind + ')]'
+      : '';
+    return '  - ' + m.id + '   (' + m.kind + ')' + warn;
+  }).join('\n');
   const example = models[0].id;
   return [
     'You can delegate work to one of these sub-agent models:',
@@ -10788,13 +10858,26 @@ function buildAgentHintRule(models) {
     'a list, surveying a directory tree, summarizing logs, or cross-checking two documents against each other.',
     '',
     'Rules:',
+    // ⚠️ [2026-10-01] 规则 1/2 的补充句来自实证：台账显示 2026-09-29 17:11:10
+    //    **同一秒内发起 4 个不同任务** → 6 条失败（全 admission timeout）
+    //    ⇒ 「串行」这条约束确实被违反过 ⇒ 光靠文案不够，要把边界说死。
     '1. Delegate one at a time, serially. Concurrent calls crash a local engine.',
+    '   Never issue more than one Agent call in the same message.',
     '2. If a delegation fails, fall back to the default model for that task. Do not retry the same task repeatedly.',
+    '   After two consecutive failures, stop delegating for the rest of this session.',
     '3. Do not delegate critical-path work (writing code, editing files, cutting a release).',
     '4. Sub-agents are reliable at reading and copying, not at writing or deciding. Do not delegate work that needs design or judgment.',
     '',
     'Every delegation is recorded locally. Consult that history (WorkDaddy panel -> Models) when you need',
-    'to judge what kinds of tasks they have actually been good at.'
+    'to judge what kinds of tasks they have actually been good at.',
+    '',
+    // [2026-10-01 注入时机缺口] 实测：用户在面板开关提醒后，**已在进行中的会话**
+    // 不会立刻拿到新的 customPrompt —— 它由官方在「每轮用户消息」时读取
+    // （本会话实证：10:20 开启 → 10:42 才进上下文）。
+    // ⇒ 无法强制刷新，但可以让主 AI **自己知道**这条清单可能滞后：
+    //   若清单里写的模型实际不可用，按规则 2 降级即可，不要反复重试。
+    'Note: this list is refreshed per user turn. If a listed model turns out to be unavailable,',
+    'treat it as a failed delegation (rule 2) and fall back — do not retry or investigate.'
   ].join('\n');
 }
 
@@ -10807,7 +10890,12 @@ function buildAgentHintRule(models) {
 function buildAgentHintBlock() {
   const list = agentCatalog.delegatable(agentCatalog.readCatalog(DATA_DIR));
   if (!list.length) return '';
-  return AGENT_HINT_TAG_START + '\n' + buildAgentHintRule(list) + '\n' + AGENT_HINT_TAG_END;
+  // [2026-10-01 探针评估报告 §7.3] 把「最近连续失败」写进提醒文案。
+  // ⚠️ 读台账失败时**静默降级为空健康表**（不标警），绝不因为读不到状态就不生成提醒 ——
+  //    提醒本身仍有价值（告诉 AI 有子 Agent 可用），健康标注只是增量信息。
+  let health = new Map();
+  try { health = deriveAgentHealth(collectAgentUsage().records); } catch (_) {}
+  return AGENT_HINT_TAG_START + '\n' + buildAgentHintRule(list, health) + '\n' + AGENT_HINT_TAG_END;
 }
 
 /** 从 customPrompt 中移除子 Agent 提示段（保留用户其它内容，**且不改动用户原文一个字节**）。 */
@@ -10869,6 +10957,33 @@ function setAgentHint(enabled) {
   }
   writeWorkbuddySettings(settings);
   return getAgentHintState();
+}
+
+/**
+ * [2026-10-01 探针评估报告 §5·弱耦合] 目录变更后**立即**刷新提醒块。
+ *
+ * ⚠️ 修的问题：`refreshAgentHintIfEnabled` 原本**只在 daemon 启动时跑一次** ⇒
+ *    取消「可委派」后，customPrompt 里那段注明「已停用模型」的过期提醒**不会立即消失**，
+ *    要等 daemon 重启才被摘除。窗口期内 AI 会读到失真信息。
+ *
+ * 行为（与启动时一致）：
+ *   · 提醒开着 ⇒ 用最新名单重建块（同时把新加入的可委派模型写进去）
+ *   · 提醒开着但名单已空 ⇒ 摘除旧块（不报错）
+ *   · 提醒关着 ⇒ 什么都不做
+ */
+function refreshAgentHintAfterCatalogChange() {
+  if (PROFILE.kind !== 'workbuddy') return;
+  try {
+    if (!getAgentHintState().enabled) return;
+    setAgentHint(true);
+    log('[agent-hint] 目录变更后已刷新提醒块');
+  } catch (e) {
+    if (e && e.code === 'NO_DELEGATABLE_MODEL') {
+      try { setAgentHint(false); log('[agent-hint] 已无可委派模型，提醒块已摘除'); } catch (_) {}
+      return;
+    }
+    log('[agent-hint] 目录变更后刷新失败: ' + e.message);
+  }
 }
 
 /** 启动时调用：如已开启，把旧的提示规则替换为最新版本（用标记精确识别）。 */
@@ -15197,18 +15312,10 @@ function handleApiRoute(req, res) {
         // ⚠️⚠️ 必须**清掉使用记录的缓存** —— 统计是按目录做「读时过滤」的，而它带 5 分钟缓存；
         //    不清的话用户改完声明**看不到任何变化**，会以为功能坏了（实测第一次就踩到）。
         agentUsageCache = { at: 0, data: null };
-        // ⚠️ 提醒块是**按目录动态生成**的 ⇒ 改了 delegate 必须**立即重算已注入的那一份**，
-        //    否则用户以为改好了、上下文里却还是旧文案（要等下次开关或重启才变）。
-        if (getAgentHintState().enabled) {
-          try {
-            setAgentHint(true);
-          } catch (e2) {
-            // 把「可委派」全关掉 ⇒ 块为空 ⇒ 应顺势摘掉旧块（而不是留一份过期的）
-            if (e2 && e2.code === 'NO_DELEGATABLE_MODEL') {
-              try { setAgentHint(false); log('[agent-catalog] 已无可委派模型，提醒块已摘除'); } catch (_) {}
-            }
-          }
-        }
+        // ⚠️ 提醒块是**按目录动态生成**的 ⇒ 改了 delegate 必须**立即重算已注入的那一份**。
+        //    [2026-10-01] 抽成 refreshAgentHintAfterCatalogChange()：与 daemon 启动时的
+        //    refreshAgentHintIfEnabled() 行为一致（含「名单空了就摘块」的分支）。
+        refreshAgentHintAfterCatalogChange();
         return json(res, 200, { ok: true, entry: saved });
       } catch (e) {
         return json(res, 400, { ok: false, error: e.message });
@@ -18506,7 +18613,12 @@ function handleApiRoute(req, res) {
         //   前者是普通的 CDP 读写（不 reload），不需要被保护；后者到 reload 结束才是要保护的窗口。
         releaseRendererReload = body.reload ? beginRendererReloadPriority() : null;
         const acct = switchTo(DATA_DIR, uid, log);
-        const hint = '登录文件已切换，请重启 WorkBuddy 使新账号生效';
+        // [2026-10-02 吸纳上游 1.2.11] 文案修正：原来说「重启 WorkBuddy」，但实际**只需刷新窗口**
+        // （daemon 已经在下面调 reloadWorkBuddyPage 做 CDP 刷新）。说「重启」会让用户多做一个多余动作。
+        // ⚠️ 上游还区分了 codebuddy 的「原生登录态已切换，无需重启客户端」（nativeSwitched），
+        //    但本地没有 codebuddy 的原生会话替换链路（switchAccountForProfile）⇒ 该分支在本机不可达，
+        //    故只吸纳通用文案，不引入 codebuddy 专用字段。
+        const hint = '登录文件已切换，请刷新窗口使新账号生效';
         let reloaded = false;
         if (body.reload) {
           // 读取切换前当前会话标题：官方会话列表的选中行（.conversation-item 带 selected）；

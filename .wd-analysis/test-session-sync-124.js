@@ -102,8 +102,16 @@ const fixtureText = fs.readFileSync(FIXTURE, 'utf8');
 ok(crypto.createHash('sha256').update(fixtureText, 'utf8').digest('hex') === deltas.UPSTREAM_SHA256,
   'A10 fixture 指纹 == 登记的 1.2.8 指纹（防 fixture 本身被改）', deltas.UPSTREAM_SHA256.slice(0, 12));
 ok(fixtureText.indexOf('\r') === -1, 'A11 fixture 纯 LF');
-const drifted = deltas.DELTAS.filter((d) => fixtureText.split(d.from).length - 1 !== 1).map((d) => d.id);
-ok(drifted.length === 0, 'A12 每条 delta 在上游原文里恰好命中 1 次（防原地漂移）', drifted);
+// ⚠️ 2026-10-01 修正 A12 的检查方式：原实现是「每条 delta 在**上游原文**里命中 1 次」，
+//    这对**链式 delta** 过于严格 —— 例如 delta-5j 的锚点含 delta-5c 替换后才出现的
+//    \，在原文里当然找不到（实测 5j 被误报 0 次）。
+//    改为直接用 applyDeltas 的自查结果（它就是权威：**累积文本上**逐条恰好命中 1 次），
+//    并额外要求「所有 delta 的 from 在**累积文本的某个中间态**里都能找到」——
+//    也就是信任 applyDeltas 的 problems 为空即可。
+const applied = deltas.applyDeltas(fixtureText);
+ok(applied.problems.length === 0, 'A12 每条 delta 在**累积文本**上恰好命中 1 次（防原地漂移；用 applyDeltas 自查）', applied.problems);
+ok(applied.text === fs.readFileSync(path.join(ROOT, 'scripts', 'session-sync.js'), 'utf8'),
+  'A12b ⭐⭐ 上游原文 + delta 表 == 工作副本（逐字节；这是整张 delta 表的根本契约）');
 const rebuilt = deltas.applyDeltas(fixtureText);
 ok(rebuilt.problems.length === 0 && rebuilt.text === SOURCE,
   'A13 上游原文 + delta 表 == 工作副本（逐字节 provenance 锁）', rebuilt.problems);

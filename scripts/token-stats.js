@@ -23,8 +23,10 @@ const discipline = require('./stats-discipline.js');
 const TOKEN_FIELDS = {
   input: ['input_tokens', 'prompt_tokens', 'inputTokens', 'promptTokens'],
   output: ['output_tokens', 'completion_tokens', 'outputTokens', 'completionTokens'],
-  cacheRead: ['cache_read_input_tokens', 'cache_read_tokens', 'cacheReadTokens', 'cached_tokens'],
-  cacheWrite: ['cache_creation_input_tokens', 'cache_write_tokens', 'cacheWriteTokens'],
+  cacheRead: ['cache_read_input_tokens', 'cache_read_tokens', 'cacheReadTokens', 'cached_tokens', 'cacheTokens'],
+  // [2026-10-01 吸纳上游 1.2.10] 别名 3→7：不同供应商 / 不同版本的 usage 字段名不统一，
+  // 少一个别名就会把「缓存写入」整项算成 0，导致 token 总量偏少（且无任何报错）。
+  cacheWrite: ['cache_write_input_tokens', 'cacheWriteInputTokens', 'cache_creation_input_tokens', 'cache_write_tokens', 'prompt_cache_write_tokens', 'cacheWriteTokens', 'cachedWriteTokens'],
 };
 
 // 思维链 token。实测（2026-09-23，本机 88 个 jsonl / 52858 条 usage 行）：
@@ -38,6 +40,74 @@ function numberField(value, fields) {
     if (Number.isFinite(number) && number >= 0) return number;
   }
   return 0;
+}
+
+/**
+ * [2026-10-01 吸纳上游 1.2.10] 只取**正数**的取值器。
+ *
+ * ⚠️ 与 numberField 的区别：numberField 接受 0（`>= 0`），用于「本来就是 0 也合理」的必需字段；
+ *    但**兜底链**里不能这样 —— `0` 会被当成"取到了"，从而中断后续候选。
+ *    例如 `cache_write_input_tokens: 0` 存在但真实值在 `cache_creation_input_tokens`，
+ *    用 numberField 就会返回 0 而不再往下找。
+ */
+function positiveNumberField(value, fields) {
+  for (const field of fields) {
+    const number = Number(value && value[field]);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return 0;
+}
+
+/**
+ * [2026-10-01 吸纳上游 1.2.10] 缓存读取的**嵌套兜底**。
+ * 平铺字段取不到时，往下找 `prompt_tokens_details.cached_tokens`
+ * 与 `inputTokensDetails[].cached_tokens` 两种常见嵌套形态。
+ */
+function cacheReadField(value) {
+  const flat = positiveNumberField(value, TOKEN_FIELDS.cacheRead);
+  if (flat) return flat;
+  const promptDetails = value && value.prompt_tokens_details;
+  const promptCached = promptDetails && typeof promptDetails === 'object'
+    ? positiveNumberField(promptDetails, ['cached_tokens']) : 0;
+  if (promptCached) return promptCached;
+  const inputDetails = value && value.inputTokensDetails;
+  if (Array.isArray(inputDetails)) {
+    for (const detail of inputDetails) {
+      const cached = positiveNumberField(detail, ['cached_tokens']);
+      if (cached) return cached;
+    }
+  }
+  return 0;
+}
+
+function cacheWriteField(value) {
+  return positiveNumberField(value, TOKEN_FIELDS.cacheWrite);
+}
+
+/**
+ * [2026-10-01 吸纳上游 1.2.10] 缓存写入的**跨记录路径兜底**。
+ * 先看选中的 usage 对象，再依次尝试记录里的其它常见位置 ——
+ * 不同 CLI 版本把 usage 挂在不同层级（`message.usage` / `providerData.usage` / `rawUsage`）。
+ */
+function cacheWriteForRecord(record, selectedUsage) {
+  const selected = cacheWriteField(selectedUsage);
+  if (selected) return selected;
+  const candidates = [
+    record && record.message && record.message.usage,
+    record && record.providerData && record.providerData.usage,
+    record && record.usage,
+    record && record.providerData && record.providerData.rawUsage,
+  ];
+  for (const candidate of candidates) {
+    const value = cacheWriteField(candidate);
+    if (value) return value;
+  }
+  return 0;
+}
+
+/** [2026-10-01 吸纳上游 1.2.10] 单次调用总量 = 输入 + 输出 + 缓存写入。 */
+function tokenTotal(input, output, cacheWrite) {
+  return (Number(input) || 0) + (Number(output) || 0) + (Number(cacheWrite) || 0);
 }
 
 function findUsage(value, depth = 0) {
@@ -97,7 +167,7 @@ function localDayString(timestamp) {
   return `${y}-${m}-${d}`;
 }
 
-const CACHE_VERSION = 10; // 10: item 增加 undated 台账（纪律 1）；9: entries 增加 thinking / requestId
+const CACHE_VERSION = 11; // 11: [吸纳上游 1.2.10] cacheWrite 别名 3→7 + 嵌套兜底 + total 字段；10: item 增加 undated 台账（纪律 1）；9: entries 增加 thinking / requestId
 const MAX_CACHE_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -169,8 +239,9 @@ function parseRecords(root, options = {}) {
       if (!usage) continue;
       const input = numberField(usage, TOKEN_FIELDS.input);
       const output = numberField(usage, TOKEN_FIELDS.output);
-      const cacheRead = numberField(usage, TOKEN_FIELDS.cacheRead);
-      const cacheWrite = numberField(usage, TOKEN_FIELDS.cacheWrite);
+      // [2026-10-01 吸纳上游 1.2.10] 改用嵌套兜底版本（平铺字段缺失时往下找 details）
+      const cacheRead = cacheReadField(usage);
+      const cacheWrite = cacheWriteForRecord(record, usage);
       if (!(input || output || cacheRead || cacheWrite)) continue;
       // 纪律 1：时间戳拿不到就**留空**，绝不回落成 `now`。
       // 旧实现回落成扫描时刻 ⇒ 导入的历史行会在时间轴上跳到今天，
@@ -342,7 +413,7 @@ function aggregateRecords(records, options = {}) {
   const bounds = dateBounds(now, options);
   const accountFilter = String(options.account || '').trim();
   const modelFilter = String(options.model || '').trim();
-  const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
+  const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, calls: 0 };
   const byDay = new Map();
   const byModel = new Map();
   const byAccount = new Map();
@@ -350,21 +421,21 @@ function aggregateRecords(records, options = {}) {
     if (!record || record.timestamp < bounds.from || record.timestamp > bounds.until) continue;
     if (accountFilter && record.account !== accountFilter) continue;
     if (modelFilter && record.model !== modelFilter) continue;
-    const values = { input: Number(record.input) || 0, output: Number(record.output) || 0, cacheRead: Number(record.cacheRead) || 0, cacheWrite: Number(record.cacheWrite) || 0, calls: Number(record.calls) || 1 };
+    const values = { input: Number(record.input) || 0, output: Number(record.output) || 0, cacheRead: Number(record.cacheRead) || 0, cacheWrite: Number(record.cacheWrite) || 0, total: tokenTotal(record.input, record.output, record.cacheWrite), calls: Number(record.calls) || 1 };
     for (const key of Object.keys(totals)) totals[key] += values[key];
     const day = localDayString(record.timestamp);
     if (day) {
-      const row = byDay.get(day) || { day, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
+      const row = byDay.get(day) || { day, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, calls: 0 };
       for (const key of Object.keys(values)) row[key] += values[key];
       byDay.set(day, row);
     }
     if (record.model) {
-      const row = byModel.get(record.model) || { model: record.model, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
+      const row = byModel.get(record.model) || { model: record.model, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, calls: 0 };
       for (const key of Object.keys(values)) row[key] += values[key];
       byModel.set(record.model, row);
     }
     if (record.account) {
-      const row = byAccount.get(record.account) || { account: record.account, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
+      const row = byAccount.get(record.account) || { account: record.account, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, calls: 0 };
       for (const key of Object.keys(values)) row[key] += values[key];
       byAccount.set(record.account, row);
     }
@@ -373,7 +444,7 @@ function aggregateRecords(records, options = {}) {
   for (const account of accountOptions) {
     const uid = String(account && (account.uid || account.account) || '').trim();
     if (!uid) continue;
-    if (!byAccount.has(uid)) byAccount.set(uid, { account: uid, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, nickname: account.nickname || '' });
+    if (!byAccount.has(uid)) byAccount.set(uid, { account: uid, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, calls: 0, nickname: account.nickname || '' });
     else if (account.nickname) byAccount.get(uid).nickname = account.nickname;
   }
   // 纪律 1 留痕：无时间戳的记录**必须暴露**（`aggregateCachedBuckets` 同款）。
