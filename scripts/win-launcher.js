@@ -1348,6 +1348,61 @@ function stopNativeWorkBuddy() {
   }
 }
 
+// ===== 与 native（scripts/windows-native/main.go）的退出码对齐 =====
+// Go 外层拿到 JS 的退出码后决定弹什么窗，所以这里的返回值**不是随便定的**：
+//   EXIT_WORKBUDDY_RUNNING(10) ⇒ Go 弹「WorkBuddy 已经打开，但没有启用调试端口。
+//                                请完全退出 WorkBuddy，然后点击"重试"。」并**给出重试按钮**
+//   EXIT_CDP_TIMEOUT(3)        ⇒ Go 弹「启动失败（错误码 3）」
+//   EXIT_UNCAUGHT(4)           ⇒ Go 弹「启动失败（错误码 4）」
+const EXIT_CDP_TIMEOUT = 3;
+const EXIT_UNCAUGHT = 4;
+const EXIT_WORKBUDDY_RUNNING = 10;
+// native/main.go 里的 exitAccessDenied
+const NATIVE_EXIT_ACCESS_DENIED = 11;
+
+/**
+ * 这个错误是否属于「目标进程以**更高完整性级别**运行，普通权限停不掉」。
+ *
+ * 实测成因（2026-10-06）：用户以**管理员身份**直接启动了 WorkBuddy（命令行是裸的
+ * `"D:\\WorkBuddy\\WorkBuddy.exe"`，没有 --remote-debugging-port），于是它没有 CDP；
+ * 而 WorkDaddy 启动器是**普通权限**，Windows 不允许普通进程终止管理员进程 ⇒
+ * OpenProcess(PROCESS_TERMINATE) 返回 ERROR_ACCESS_DENIED。
+ *
+ * 旁证：普通权限**读不到**提权进程的属主与命令行（实测 `GetOwner()` 返回空），
+ * 所以不能靠「查它的路径」来判断，只能靠 helper 的退出码 + stderr 文本。
+ */
+function isAccessDeniedStopError(error) {
+  const text = String((error && error.message) || error || '');
+  return new RegExp('错误码 ' + NATIVE_EXIT_ACCESS_DENIED + '\\b').test(text)
+    || /Access is denied/i.test(text)
+    || /cannot be terminated at standard privilege/i.test(text);
+}
+
+/**
+ * 尝试停掉没有 CDP 的 WorkBuddy。**停不掉时不抛错**，返回 false。
+ *
+ * ⚠️ 为什么不能直接抛错（修复前的行为）：抛错会冒泡到入口的 catch ⇒
+ *   `process.exit(4)` ⇒ 用户看到的是没头没脑的「启动失败（错误码 4）」，
+ *   而**真正该看到**的是「请完全退出 WorkBuddy，然后点击重试」——
+ *   后者能直接指导用户解决问题（而且带重试按钮，退出后可一键继续）。
+ *
+ * 返回：true = 已停掉（或本来就不在跑）；false = 目标仍在运行、我们无权终止。
+ */
+function tryStopNativeWorkBuddy(reason) {
+  try {
+    stopNativeWorkBuddy();
+    return true;
+  } catch (error) {
+    if (isAccessDeniedStopError(error)) {
+      log('[launcher] 无法终止 WorkBuddy（' + reason + '）：' + (error && error.message || error)
+        + ' —— 目标很可能以管理员身份运行，而启动器是普通权限；'
+        + '交由用户手动退出后重试（外层会弹「请完全退出 WorkBuddy 后点重试」）。');
+      return false;
+    }
+    throw error;
+  }
+}
+
 function findWorkBuddyNative() {
   const candidates = [];
   const summary = {
@@ -1622,7 +1677,9 @@ async function waitForWorkBuddyCdpNative(binary) {
       if (!restartedAfterHandoff && nativeWorkBuddyRunning()) {
         restartedAfterHandoff = true;
         log('WorkBuddy 启动进程异常退出但同 profile 进程仍在运行，精确停止后重试一次');
-        stopNativeWorkBuddy();
+        // 停不掉（多半是权限不对等）⇒ 不必再 start() 一次，直接退出循环让上层
+        // 按「WorkBuddy 仍在运行」处理（返回 10 ⇒ 外层弹「请完全退出后重试」）。
+        if (!tryStopNativeWorkBuddy('launch-failed-reclaim')) break;
         await sleep(1000);
         start();
         continue;
@@ -1642,7 +1699,8 @@ async function waitForWorkBuddyCdpNative(binary) {
         Date.now() - launchStartedAt >= 5000 && nativeWorkBuddyRunning()) {
       restartedAfterHandoff = true;
       log('WorkBuddy 启动请求已被无 CDP 的单实例接管，精确停止后重试一次');
-      stopNativeWorkBuddy();
+      // 同上：停不掉就不再重试启动（重试只会再撞一次权限墙）。
+      if (!tryStopNativeWorkBuddy('single-instance-handoff')) break;
       await sleep(1000);
       start();
     }
@@ -1688,12 +1746,21 @@ async function nativeStartupMain() {
 
   if (nativeWorkBuddyRunning()) {
     log('WorkBuddy 已运行但没有 CDP，按当前 profile 的唯一真实路径精确重启');
-    stopNativeWorkBuddy();
+    // ⭐ 停不掉时**返回 10 而不是抛错** —— 让 Go 外层弹
+    //   「WorkBuddy 已经打开，但没有启用 WorkDaddy 所需的调试端口。请完全退出 WorkBuddy，
+    //    然后点击"重试"。」并给出重试按钮。这比「启动失败（错误码 4）」有用得多。
+    if (!tryStopNativeWorkBuddy('startup-reclaim')) return EXIT_WORKBUDDY_RUNNING;
     await sleep(1000);
   }
 
   const ok = await waitForWorkBuddyCdpNative(wb);
   if (!ok) {
+    // ⭐ 超时后若 WorkBuddy **仍在运行**，根因多半不是"慢"而是"停不掉"（权限不对等）。
+    //   此时报「超时」会误导用户去等/去重试；正确的指引是"请完全退出 WorkBuddy 后点重试"。
+    if (nativeWorkBuddyRunning()) {
+      log('[launcher] CDP 等待失败且 WorkBuddy 仍在运行 ⇒ 按「需用户手动退出」处理');
+      return EXIT_WORKBUDDY_RUNNING;
+    }
     await captureMessage('等待 WorkBuddy CDP 端口超时', {
       stage: 'windows-native-launcher-cdp-timeout',
       extra: {
@@ -1816,4 +1883,8 @@ module.exports = {
   workBuddyRunning,
   cdpPortCandidates,
   reserveEphemeralCdpPort,
+  // 供测试与 installer 复用：判断"停不掉是因为权限不对等"，以及带兜底的停止
+  isAccessDeniedStopError,
+  tryStopNativeWorkBuddy,
+  EXIT_WORKBUDDY_RUNNING,
 };

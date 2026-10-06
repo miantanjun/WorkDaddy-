@@ -1,6 +1,6 @@
 # 代码索引（自动生成，勿手改）
 
-> 由 `.wd-analysis/gen-code-index.js` 生成 · 2026-10-02 22:31:47
+> 由 `.wd-analysis/gen-code-index.js` 生成 · 2026-10-06 04:47:43
 > 用途：定位大文件里的函数，**替代「grep 整个文件」**（索引按需读，不常驻上下文）。
 > 查法：`node .wd-analysis/gen-code-index.js --grep <关键词>`
 
@@ -1706,7 +1706,7 @@
 | 2065 | `deleteAccount` | fn | 永久删除某个账号的备份文件（不影响当前登录） |
 | 2107 | `switchTo` | fn | 切换登录账号：把备份文件复制回登录信息文件（先校验 uid 匹配） |
 
-## scripts/win-launcher.js  （1820 行 / 99 个函数）
+## scripts/win-launcher.js  （1891 行 / 101 个函数）
 
 | 行 | 函数 | 类型 | 摘要 |
 |---|---|---|---|
@@ -1795,20 +1795,22 @@
 | 1332 | `nativeWorkBuddyDiscoverySummary` | fn |  |
 | 1336 | `nativeWorkBuddyRunning` | fn |  |
 | 1343 | `stopNativeWorkBuddy` | fn |  |
-| 1351 | `findWorkBuddyNative` | fn |  |
-| 1363 | `add` | const |  |
-| 1447 | `stopVerifiedLegacyManagedLifecycle` | fn |  |
-| 1455 | `nativeDaemonDiagnostics` | fn |  |
-| 1494 | `nativeCdpDiagnostics` | fn |  |
-| 1519 | `nativeDaemonStatusMatches` | fn |  |
-| 1532 | `waitForNativeDaemon` | fn |  |
-| 1541 | `stopNativeLifecycle` | fn |  |
-| 1551 | `ensureDaemonNative` | fn |  |
-| 1568 | `startWatchdog` | const |  |
-| 1600 | `waitForWorkBuddyCdpNative` | fn |  |
-| 1603 | `start` | const |  |
-| 1653 | `nativeLaunchFailed` | fn |  |
-| 1660 | `nativeStartupMain` | fn |  |
+| 1374 | `isAccessDeniedStopError` | fn |  |
+| 1391 | `tryStopNativeWorkBuddy` | fn |  |
+| 1406 | `findWorkBuddyNative` | fn |  |
+| 1418 | `add` | const |  |
+| 1502 | `stopVerifiedLegacyManagedLifecycle` | fn |  |
+| 1510 | `nativeDaemonDiagnostics` | fn |  |
+| 1549 | `nativeCdpDiagnostics` | fn |  |
+| 1574 | `nativeDaemonStatusMatches` | fn |  |
+| 1587 | `waitForNativeDaemon` | fn |  |
+| 1596 | `stopNativeLifecycle` | fn |  |
+| 1606 | `ensureDaemonNative` | fn |  |
+| 1623 | `startWatchdog` | const |  |
+| 1655 | `waitForWorkBuddyCdpNative` | fn |  |
+| 1658 | `start` | const |  |
+| 1711 | `nativeLaunchFailed` | fn |  |
+| 1718 | `nativeStartupMain` | fn |  |
 
 ## scripts/growth-tasks.js  （1770 行 / 65 个函数）
 
@@ -2012,4 +2014,4 @@
 | 380 | `apiKeyHint` | fn | api_key 的展示用指纹（只回前 6 位 + 长度，够确认是不是同一把，又不泄漏）。 |
 | 387 | `generateApiKey` | fn | 生成本地 api_key（32 字节 base64url，约 43 字符）。 |
 
-合计 **1958** 个函数。
+合计 **1960** 个函数。
