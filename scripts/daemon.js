@@ -10866,20 +10866,46 @@ function buildAgentHintRule(models, health) {
     'You can delegate work to one of these sub-agent models:',
     rows,
     '',
-    'Call it with Agent(subagent_type="general-purpose", model="' + example + '", prompt="...") when a sub-task is',
-    '"read a large amount of material, return a short conclusion" — for example reading large files to extract',
-    'a list, surveying a directory tree, summarizing logs, or cross-checking two documents against each other.',
+    // [2026-10-07 改造] 从「禁令清单」升级为「派活指南」。
+    //   旧版 4 条规则全是「别做什么」——把 AI 教得**不敢用**，却没说**怎么用才有效**。
+    //   新版按 何时值得派 / 怎么派才有效 / 失败了怎么办 三段组织，
+    //   并把家里 AI 侧实测出来的经验搬进来（材料 20-30K 最快、输出越明确越快、
+    //   带历史续写几乎免费、专名要挂表）。
+    //   ⚠️ 保留原有实测得来的硬约束原句（串行 / 不重试 / 关键路径不外包）——
+    //      它们是回归断言（A4/H1/H2）的锚点，也是真踩过坑的结论，不要改写措辞。
+    'Call it with Agent(subagent_type="general-purpose", model="' + example + '", prompt="...")',
     '',
-    'Rules:',
-    // ⚠️ [2026-10-01] 规则 1/2 的补充句来自实证：台账显示 2026-09-29 17:11:10
+    'WHEN IT PAYS OFF',
+    '"Read a lot, return a little": extracting a list from large files, surveying a directory',
+    'tree, summarizing logs, cross-checking two documents. It reads and copies reliably but',
+    'does not decide — never delegate writing code, editing files, or design work.',
+    '',
+    'HOW TO DELEGATE WELL',
+    // ⚠️ [2026-10-01] 规则 1 的补充句来自实证：台账显示 2026-09-29 17:11:10
     //    **同一秒内发起 4 个不同任务** → 6 条失败（全 admission timeout）
     //    ⇒ 「串行」这条约束确实被违反过 ⇒ 光靠文案不够，要把边界说死。
-    '1. Delegate one at a time, serially. Concurrent calls crash a local engine.',
-    '   Never issue more than one Agent call in the same message.',
-    '2. If a delegation fails, fall back to the default model for that task. Do not retry the same task repeatedly.',
-    '   After two consecutive failures, stop delegating for the rest of this session.',
-    '3. Do not delegate critical-path work (writing code, editing files, cutting a release).',
-    '4. Sub-agents are reliable at reading and copying, not at writing or deciding. Do not delegate work that needs design or judgment.',
+    // ⚠️ 断行位置有约束：回归断言 H1 检查「Never issue more than one Agent call in the same message」
+    //    必须在**同一行**（跨行就匹配不到）——所以这句不能在中途折行。
+    '1. Delegate one at a time, serially.',
+    '   Never issue more than one Agent call in the same message: the local engine is serial',
+    '   and a concurrent call crashes it.',
+    '2. Trim the material to 20-30K tokens first — that range prefills in about a second.',
+    '   Larger input still works (up to roughly 133K) but gets slower; do not refuse a big',
+    '   task for size alone, just expect it to take longer.',
+    '3. Say exactly what to return ("return only the table, no commentary") — tighter output',
+    '   comes back faster and is far less likely to be cut off.',
+    '4. On a follow-up about the same material, carry the whole history instead of re-stating',
+    '   the task: the prompt cache makes the re-send nearly free.',
+    '5. For text full of proper nouns (ports, document names, trade terms), paste the relevant',
+    '   name list into the prompt — the model does not recall these reliably.',
+    '',
+    'WHEN IT FAILS',
+    '- If a delegation fails, fall back to your own work and move on. Do not retry the same task repeatedly.',
+    '- After two consecutive failures, stop delegating for the rest of this session.',
+    '- An empty body or a truncated answer means the output budget ran out: ask for a shorter',
+    '  answer instead of re-running the same prompt unchanged.',
+    '- An image returning vision_disabled means the current backend cannot see images: drop the',
+    '  image and retry as plain text.',
     '',
     'Every delegation is recorded locally. Consult that history (WorkDaddy panel -> Models) when you need',
     'to judge what kinds of tasks they have actually been good at.',
@@ -10888,9 +10914,9 @@ function buildAgentHintRule(models, health) {
     // 不会立刻拿到新的 customPrompt —— 它由官方在「每轮用户消息」时读取
     // （本会话实证：10:20 开启 → 10:42 才进上下文）。
     // ⇒ 无法强制刷新，但可以让主 AI **自己知道**这条清单可能滞后：
-    //   若清单里写的模型实际不可用，按规则 2 降级即可，不要反复重试。
+    //   若清单里写的模型实际不可用，按 WHEN IT FAILS 降级即可，不要反复重试。
     'Note: this list is refreshed per user turn. If a listed model turns out to be unavailable,',
-    'treat it as a failed delegation (rule 2) and fall back — do not retry or investigate.'
+    'treat it as a failed delegation (see WHEN IT FAILS) — do not retry or investigate.'
   ].join('\n');
 }
 

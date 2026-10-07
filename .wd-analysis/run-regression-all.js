@@ -50,7 +50,7 @@ const SUITES = [
   ['test-session-activation.js', 36],  // 上游 1.2.6 吸纳/批次 5（B1/C2/A9）：会话激活分层融合。行为级验快路径（官方导航 handler/SDK 优先）**只在可验证时**成立：authoritative!==true 不调 activate、activate 后必须确认目标控制器真的挂上、没落地则回落点击循环且老路径零行为变化（快路径成功时零点击）；源码级守 A9 的 currentConversationId 所有权校验 + openConversationById 签名不变
   ['test-session-dirty-wiring.js', 49],  // 上游 1.2.6 吸纳/批次 3（A1 + A5-B6）：脏索引接线。**接线就绪 + 开关默认关**。守：索引持久化（本地口径 atomicWriteText / 去抖 / unref）、POST /api/sessions/dirty 的三道守卫 + 隐私边界、renderer feed 独立订阅与解绑；[B] 组用「出仓代码里没人写 fingerprintVersion」**硬证明规划期快路径今天必然不可达**，并守住「没有动 archived 过滤链的形态」（那条链是归档不变量的守卫锚点）；[D]/[E] 组行为级守 fail-open（未建基线恒 true，写反=静默漏同步）与抖动过滤（账号 reload / 仅 lastActivityAt 漂移不算脏）
   ['test-automation-protocol-v3.js', 111],  // 上游 1.2.5 吸纳/B 组协议 V3：校验负向门（V1/V2 拒 prepare、prepare 只读白名单、condition 形状）+ prepare/condition 真跑语义（切换前执行 / 跳过不切不跑 / 收尾还原不受影响）+ orderCheckinAccounts 稳定排序 + B4 闸门有界可取消 + A9 失败屏障 + A11 409 + 接线静态守卫（含「不搬上游 job.completion / waitAutomationSyncJob」的反向守卫）
-  ['test-upstream-125-step4-panel.js', 98],  // 上游 1.2.5 吸纳/Step 4：A7 作业指标（真跑切片函数 + 速率口径）+ A8 大会话提示 + A7/A8 面板文案整句入典（含重复 key 去重守卫）+ A10 会话体积/总量口径（总量不受筛选）+ 体积筛选字节精确
+  ['test-upstream-125-step4-panel.js', 108],  // 上游 1.2.5 吸纳/Step 4：A7 作业指标（真跑切片函数 + 速率口径）+ A8 大会话提示 + A7/A8 面板文案整句入典（含重复 key 去重守卫）+ A10 会话体积/总量口径（总量不受筛选）+ 体积筛选字节精确
   ['test-account-health.js', 139],  // v1.4.5 F2：13 层分类顺序（含两条反向对照）+ 三条迁移纪律（不加深 / 取更远者 / 硬不降级）+ A5 分级排除 + A8 双状态位与幂等 + daemon 端点与切片反向守卫 + 面板徽标/i18n/CSS + mac 白名单；2026-09-23 补 E25 传递闭包白名单守卫 +1
   ['test-failover-manual.js', 62],  // F5：手动「换号并续跑」入口 —— markBlocked 三态（缺省零变化 / false 不写限流窗口）+ ports 装配与 core 分居两处（含模块级名字打错的静态守卫）+ 手动路由两个前置刻意不要求且立即 202 + status 透出不带正文 + 面板整句词条与 data-wbs-i18n-skip（数据不被当文案翻）
   ['test-context-audit.js', 59],  // 省 token 吸纳：上下文体检（记忆/skill 体积 + 会话成本形状）—— frontmatter 块标量 / 阈值分级 / 目录树行数真数 / 副本行去重 / sessionRoot 默认值回归（第一版传 home 导致会话维度静默全零）+ daemon 路由只读性静态守卫
@@ -69,7 +69,7 @@ const SUITES = [
   ['test-official-schedule.js', 20],
   ['test-upstream-1211.js', 26],
   ['test-launcher-privilege.js', 26],
-  ['test-agent-hint.js', 81],
+  ['test-agent-hint.js', 96],
   // 2026-10-01 本地子 Agent 提醒开关 + 使用记录：规则写进官方全局自定义指令（每个会话生效）/ 关闭=既不提醒也不注入（摘除后用户内容原样保留 + 开→关字节级还原）/ jsonl 解析严格只认 name 为 Agent（防正文提模型名误报）/ 本地承担 vs 漏到云端 / 口径守卫（不得出现省 token 或划算这类推不出来的结论）/ 面板开关失败回滚 + i18n 整句入典  // 2026-10-01 官方 5.7.3 定时任务「融合」：只读官方 automations 表（硬约束：全仓无写操作）/ 时间戳单位按数量级判别（created_at 秒 vs next_run_at 毫秒）/ 冲突检测只判 daily / 面板引导 + i18n 整句入典 / 活体验证 nextSlot 年份合理  // 2026-10-01 全面审查 4 项修复：复制跳过特殊文件（含「必须放行符号链接」的回归守卫）/ cloud-ghosts 日志澄清（含 D12 契约反向守卫）/ 渲染层错误记录兜底（行为级验证不再出现 error: null）/ 代码索引覆盖扩容 4→10  // 2026-10-01 知识页「自愈」守卫：文件引用存在性 + 行号越界 + 反查表章节验真（借鉴 Hindsight Knowledge Pages 的 self-healing）  // 2026-09-30 切号「预同步+进度弹窗」：core 顺序重排（预同步先于切号 / 失败中止整轮不走 per-round catch / 可选端口守卫保证既有切片套件逐字等价 / 切片沙箱零标识符泄漏）+ 弹窗阶段机（惰性过期 / 取消复用既有中止机制 / 未活跃过不凭空造弹窗）+ 「只等 meta 阶段」判据 + 路由与 UI 静态守卫
 ];
 

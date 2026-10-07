@@ -9515,8 +9515,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       function wbsOfficialCardHTML() {
         var box = 'padding:8px 10px;border-radius:8px;background:var(--wb-bg-tertiary,#f5f5f5);'
           + 'font-size:11px;line-height:1.75;margin:8px 0';
-        return '<div class="wbs-pcard" id="wbs-official-card">'
-          + '<div class="wbs-pcard-title">官方定时任务<span class="wbs-pcard-sub" id="wbs-official-count"></span></div>'
+        // ⚠️ 2026-10-07 改**折叠卡**（默认收起）——
+        //    原先平铺展开时，本卡 + 本地子 Agent 卡会把上面的「自动化」列表挤到只剩一点：
+        //    `.wbs-auto-card{flex:1}` 抢不过「按内容撑开」的卡片（min-height:auto 压缩不动）。
+        //    折叠后两卡各占一行，自动化列表拿回主要空间。
+        //    交互语言与账号页三卡（限流换号 / 上下文体检）完全一致，折叠状态按卡片 id 持久化。
+        return '<div class="wbs-pcard collapsed" id="wbs-official-card">'
+          + '<button class="wbs-fold-head" type="button" aria-expanded="false" title="展开 / 折叠">'
+          + '<span class="wbs-fold-chevron" aria-hidden="true"></span>'
+          + '<span class="wbs-fold-title">官方定时任务</span>'
+          + '<span class="wbs-fold-summary" id="wbs-official-count"></span>'
+          + '</button>'
+          + '<div class="wbs-fold-body">'
           + '<div style="' + box + '">'
           + '<div><b>该用哪个？</b></div>'
           + '<div>· 让 AI 定时干活（查资料 / 领券 / 巡检 / 刷新看板）→ 用官方</div>'
@@ -9524,6 +9534,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           + '<div style="opacity:.75">官方这类任务做得很全，还能推微信；插件这类任务官方做不了</div>'
           + '</div>'
           + '<div id="wbs-official-list" data-wbs-i18n-skip></div>'
+          + '</div>'
           + '</div>';
       }
 
@@ -9577,8 +9588,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       function wbsAgentCardHTML() {
         var note = 'padding:8px 10px;border-radius:8px;background:var(--wb-bg-tertiary,#f5f5f5);'
           + 'font-size:11px;line-height:1.75;margin:8px 0';
-        return '<div class="wbs-pcard" id="wbs-agent-card">'
-          + '<div class="wbs-pcard-title">本地子 Agent<span class="wbs-pcard-sub" id="wbs-agent-sub"></span></div>'
+        // ⚠️ 2026-10-07 同官方卡：改折叠卡（默认收起），把空间让给上面的自动化列表。
+        //    摘要行显示开关状态（#wbs-agent-sub，由 wbsLoadAgent 填充）。
+        return '<div class="wbs-pcard collapsed" id="wbs-agent-card">'
+          + '<button class="wbs-fold-head" type="button" aria-expanded="false" title="展开 / 折叠">'
+          + '<span class="wbs-fold-chevron" aria-hidden="true"></span>'
+          + '<span class="wbs-fold-title">本地子 Agent</span>'
+          + '<span class="wbs-fold-summary" id="wbs-agent-sub"></span>'
+          + '</button>'
+          + '<div class="wbs-fold-body">'
           + '<label style="display:flex;align-items:flex-start;gap:8px;margin:8px 0;font-size:12px;cursor:pointer">'
           + '<input type="checkbox" id="wbs-agent-toggle" style="margin-top:3px">'
           + '<span>在每个会话里提醒 AI 可用（关闭后既不提醒也不注入）</span></label>'
@@ -9591,6 +9609,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           + '所以<b>当前正在进行的会话不会立刻看到</b> —— 发下一条消息时才生效。'
           + '</div>'
           + '<div style="' + note + '" data-wbs-i18n-skip id="wbs-agent-usage"></div>'
+          + '</div>'
           + '</div>';
       }
 
@@ -9660,6 +9679,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       wbsLoadAgent();
       automationPane.insertAdjacentHTML('beforeend', wbsOfficialCardHTML());
       wbsLoadOfficial();
+      // [2026-10-07] 两张卡接上折叠交互（复用账号页的 setupFoldCard —— 同一 build() 作用域）。
+      // 不调这两行的话卡片会**永远处于 collapsed**（默认类在 HTML 里），用户点不开。
+      setupFoldCard(automationPane.querySelector('#wbs-agent-card'));
+      setupFoldCard(automationPane.querySelector('#wbs-official-card'));
       automationPane.querySelector('#wbs-auto-import').addEventListener('click', function () { automationPane.querySelector('#wbs-auto-import-file').click(); });
       automationPane.querySelector('#wbs-auto-import-file').addEventListener('change', readAutomationImport);
       automationPane.querySelector('#wbs-auto-export').addEventListener('click', exportAutomationTasks);
@@ -20948,6 +20971,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-pcard-title{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f);margin-bottom:8px}',
     '.wbs-pcard-sub{font-size:11px;color:var(--wb-icon-tertiary,#999);font-weight:400}',
     '.wbs-auto-card{display:flex;flex:1;flex-direction:column;min-height:0;margin-bottom:0}',
+    /* [2026-10-07] 自动化页的两张折叠卡（本地子 Agent / 官方定时任务）：
+       · flex:0 0 auto —— 只占内容高度，**不参与拉伸**，把剩余空间全留给上面的自动化列表
+       · margin-top:8px —— .wbs-auto-card 的 margin-bottom 是 0，不补就会贴在一起
+       （折叠状态本身由 .wbs-pcard.collapsed > .wbs-fold-body{display:none} 控制，无需额外规则） */
+    '.wbs-pane[data-pane="automations"] > .wbs-pcard:not(.wbs-auto-card){flex:0 0 auto;margin:8px 0 0}',
     '.wbs-auto-toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px;flex-shrink:0}.wbs-auto-toolbar .wbs-pcard-title{margin-bottom:0}.wbs-auto-toolbar>.wbs-auto-toolbar-actions{flex-basis:100%;justify-content:flex-start}.wbs-auto-toolbar .wbs-sess-bbtn{font-size:11px;padding:5px 8px}',
     '.wbs-auto-toolbar-actions,.wbs-auto-editor-actions,.wbs-auto-normal-actions,.wbs-auto-batch-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.wbs-auto-toolbar-actions{justify-content:flex-end}.wbs-auto-normal-actions{width:100%;min-width:0}.wbs-auto-right-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:6px;max-width:100%;margin-left:auto}.wbs-auto-log-head-actions{display:flex;align-items:center;gap:8px}',
     '.wbs-auto-normal-actions .wbs-auto-pick-btn{border-color:var(--wb-button-primary-bg,#1f1f1f);background:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff)}.wbs-auto-normal-actions .wbs-auto-pick-btn:hover,.wbs-auto-normal-actions .wbs-auto-pick-btn:focus-visible{background:var(--wb-button-primary-bg-hover,var(--wb-button-primary-bg,#1f1f1f));color:var(--wb-button-primary-fg,#fff)}',

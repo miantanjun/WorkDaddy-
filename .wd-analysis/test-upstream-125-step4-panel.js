@@ -309,6 +309,51 @@ ok(warnKey && T(warnKey[1], 'en') === 'Session exceeds 100 MB; syncing may take 
 ok(indexOfOnce(INJECT_SRC, "if (els.sub) els.sub.textContent = sub + metric;"),
   'E3 指标后缀在**唯一的** els.sub 赋值处拼接（五条分支一处不漏、也不重复拼）');
 
+/* ==================================================================== */
+/* [F] 自动化页布局：两张从属卡改折叠（2026-10-07）
+ *
+ * 用户报告：「本地子agent和官方定时任务两个模块占太多空间，
+ *            导致上面的自动化模块只显示出来一点」
+ *
+ * 根因：.wbs-auto-card{flex:1} + .wbs-auto-list{flex:1} 想占满剩余空间，
+ *       但下面两张卡是按内容撑开的（min-height:auto）⇒ **压缩不动**，
+ *       flex:1 的自动化列表只能被挤到最小。
+ * 修法：两张从属卡改折叠卡（默认收起），并设 flex:0 0 auto 不参与拉伸。
+ * ==================================================================== */
+console.log('\n--- F. 自动化页布局（从属卡折叠）---');
+
+ok(/\.wbs-pane\[data-pane="automations"\] > \.wbs-pcard:not\(\.wbs-auto-card\)\{flex:0 0 auto;margin:8px 0 0\}/.test(INJECT_SRC),
+  'F1 ⭐ 从属卡 flex:0 0 auto（只占内容高度，剩余空间全给自动化列表）');
+ok(/\.wbs-auto-card\{display:flex;flex:1;flex-direction:column;min-height:0;margin-bottom:0\}/.test(INJECT_SRC),
+  'F2 自动化卡仍是 flex:1（保持主区域地位，未被误改）');
+
+const officialFn = (/function wbsOfficialCardHTML\(\)[\s\S]*?\n      \}/.exec(INJECT_SRC) || [''])[0];
+ok(officialFn.length > 0 && /wbs-pcard collapsed" id="wbs-official-card"/.test(officialFn),
+  'F3 ⭐ 官方定时任务卡带 collapsed（默认收起）');
+ok(/wbs-fold-head/.test(officialFn) && /wbs-fold-body/.test(officialFn),
+  'F4 官方卡用 fold-head + fold-body 结构');
+
+const agentFn = (/function wbsAgentCardHTML\(\)[\s\S]*?\n      \}/.exec(INJECT_SRC) || [''])[0];
+ok(agentFn.length > 0 && /wbs-pcard collapsed" id="wbs-agent-card"/.test(agentFn),
+  'F5 ⭐ 本地子 Agent 卡带 collapsed');
+ok(/wbs-fold-head/.test(agentFn) && /wbs-fold-body/.test(agentFn),
+  'F6 子 Agent 卡用 fold-head + fold-body 结构');
+
+ok(/setupFoldCard\(automationPane\.querySelector\('#wbs-agent-card'\)\)/.test(INJECT_SRC)
+  && /setupFoldCard\(automationPane\.querySelector\('#wbs-official-card'\)\)/.test(INJECT_SRC),
+  'F7 ⭐⭐ 两张卡都接上 setupFoldCard —— 漏接的话 collapsed 类永远摘不掉，用户点不开');
+ok(/function setupFoldCard\(card\) \{/.test(INJECT_SRC),
+  'F8 setupFoldCard 仍在（复用账号页实现，没另写一套折叠逻辑）');
+ok(/wbs-fold-summary" id="wbs-official-count"/.test(INJECT_SRC)
+  && /wbs-fold-summary" id="wbs-agent-sub"/.test(INJECT_SRC),
+  'F9 ⭐ 收起后摘要仍可见（官方=任务数 / 子Agent=开关状态）—— 收起不等于信息丢失');
+
+// 引用点必须仍按 id 找（改结构后 class 变了，用 class 找会静默失效）
+ok(/automationPane\.querySelector\('#wbs-official-count'\)/.test(INJECT_SRC)
+  && /automationPane\.querySelector\('#wbs-agent-sub'\)/.test(INJECT_SRC)
+  && /automationPane\.querySelector\('#wbs-agent-usage'\)/.test(INJECT_SRC),
+  'F10 ⭐ 三个数据挂载点仍按 **id** 引用（若改成 class 引用，改结构会静默失效）');
+
 console.log('\n==== ' + pass + ' passed, ' + failures.length + ' failed ====');
 if (failures.length) { failures.forEach((f) => console.log('  未通过: ' + f)); process.exit(1); }
 

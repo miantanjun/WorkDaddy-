@@ -399,7 +399,44 @@ function get(pathname, token) {
       { failed: s.failedCount, total: s.total, rate: s.successRate });
   }
 
-  console.log('\n===== 结果：' + pass + ' 通过 / ' + failures.length + ' 失败 =====');
+  /* ============ J. 提醒文案升级为「派活指南」（2026-10-07） ============ */
+section('J. 提醒文案：从「禁令清单」→「派活指南」');
+
+// 旧版只有 4 条 Rule，全是「别做什么」——把 AI 教得不敢用，却没说怎么用才有效。
+// 新版按 何时值得派 / 怎么派才有效 / 失败了怎么办 三段组织，并搬进家里 AI 的实测经验。
+const hintBody = (/function buildAgentHintRule\([\s\S]*?\n\}/.exec(daemonSrc) || [''])[0];
+ok(hintBody.length > 0, 'J1 可取到 buildAgentHintRule 函数体');
+
+ok(/WHEN IT PAYS OFF/.test(hintBody), 'J2 ⭐ 段一「何时值得派」');
+ok(/HOW TO DELEGATE WELL/.test(hintBody),
+  'J3 ⭐⭐ 段二「怎么派才有效」—— **旧版完全缺失**，这是本次改造的核心');
+ok(/WHEN IT FAILS/.test(hintBody), 'J4 ⭐ 段三「失败了怎么办」');
+
+ok(/20-30K tokens/.test(hintBody), 'J5 ⭐ 材料切到 20-30K（该区间 prefill 约 1 秒）');
+ok(/133K/.test(hintBody),
+  'J6 ⭐ 长文别拒（133K 内可用、只是慢）—— 防 AI 因为「材料太大」干脆不派');
+ok(/return only the table, no commentary/.test(hintBody),
+  'J7 ⭐ 明确要求返回什么（输出越紧越快、越不易被截断）');
+ok(/carry the whole history/.test(hintBody), 'J8 ⭐ 多轮追问带完整历史（复用缓存，几乎免费）');
+ok(/proper nouns \(ports, document names, trade terms\)/.test(hintBody),
+  'J9 ⭐ 专名场景把名称表塞进 prompt（模型固有弱项）');
+ok(/vision_disabled/.test(hintBody),
+  'J10 ⭐ 图片返回 vision_disabled 就去掉图重试 —— **用运行时反馈兜底，不做档位探测**');
+ok(/output budget ran out/.test(hintBody),
+  'J11 ⭐ 空正文/截断 = 输出预算不足 ⇒ 改问法要更短答案，别原样重跑');
+
+// 防退化：原有实测锚点必须仍在（真踩过坑的结论）
+ok(/Delegate one at a time, serially/.test(hintBody)
+  && /Never issue more than one Agent call in the same message/.test(hintBody),
+  'J12 ⭐⭐ 串行约束仍在，且关键句**未被换行拆断**（拆断会让 H1 断言失效）');
+ok(/Do not retry the same task repeatedly/.test(hintBody) && /After two consecutive failures/.test(hintBody),
+  'J13 ⭐ 失败降级 + 连续失败即放弃仍在');
+ok(/does not decide|not at deciding/.test(hintBody),
+  'J14 ⭐「不派需要判断的活」语义仍在（措辞可改、语义不能丢）');
+ok(/writing code, editing files/.test(hintBody),
+  'J15 ⭐「不派关键路径（写码/改文件）」仍在');
+
+console.log('\n===== 结果：' + pass + ' 通过 / ' + failures.length + ' 失败 =====');
   if (failures.length) {
     console.log('失败项：');
     failures.forEach((f) => console.log('  - ' + f));
