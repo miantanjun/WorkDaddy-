@@ -10874,6 +10874,12 @@ function buildAgentHintRule(models, health) {
     //   ⚠️ 保留原有实测得来的硬约束原句（串行 / 不重试 / 关键路径不外包）——
     //      它们是回归断言（A4/H1/H2）的锚点，也是真踩过坑的结论，不要改写措辞。
     'Call it with Agent(subagent_type="general-purpose", model="' + example + '", prompt="...")',
+    // [2026-10-07 补] ⚠️ 必须显式传 model —— 实测踩坑：不传 model 时 Agent 工具**静默回落**
+    //   到本会话自己的云端模型（调用照常成功、无任何报错），既花了 API 钱、
+    //   又完全没用到本地引擎。这是个**不可见的失败模式**，提示里不点名 AI 无从得知。
+    '⚠️ Always pass model= explicitly (' + example + ' or any id listed above). Omitting it does NOT',
+    'fail — the task silently runs on this session\'s own model instead, billed as normal usage,',
+    'with the intended model never touched. No error, no warning, so you cannot tell it happened.',
     '',
     'WHEN IT PAYS OFF',
     '"Read a lot, return a little": extracting a list from large files, surveying a directory',

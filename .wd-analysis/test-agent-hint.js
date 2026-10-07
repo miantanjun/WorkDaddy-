@@ -436,6 +436,23 @@ ok(/does not decide|not at deciding/.test(hintBody),
 ok(/writing code, editing files/.test(hintBody),
   'J15 ⭐「不派关键路径（写码/改文件）」仍在');
 
+/* ============ K. 「必须显式传 model」的警告（2026-10-07 补） ============ */
+section('K. 提醒必须写明「省略 model 会静默回落」');
+
+// 实测踩坑：Agent 工具**不传 model** 时会静默继承父会话（云端）模型 ——
+// 调用照样成功、没有任何报错，既花 API 钱又完全没用到本地引擎。
+// 这是**不可见的失败模式**，提示里必须点名，否则 AI 无从得知。
+ok(/Always pass model=/.test(hintBody),
+  'K1 ⭐⭐ 提醒块明确要求「必须显式传 model」');
+ok(/Omitting it does NOT/.test(hintBody) && /silently runs on this session/.test(hintBody),
+  'K2 ⭐⭐ 写明省略后**不报错**、而是静默跑在本会话自己的模型上');
+ok(/billed as normal usage/.test(hintBody),
+  'K3 ⭐ 写明会被**照常计费**（点出代价，否则 AI 没动机遵守）');
+ok(/No error, no warning/.test(hintBody),
+  'K4 ⭐ 点明「无任何报错提示」—— 这正是它危险的原因');
+ok(hintBody.indexOf('Always pass model=') > hintBody.indexOf('Call it with Agent'),
+  'K5 警告紧跟在调用形式那句**之后**（先给正确写法，再说省了会怎样）');
+
 console.log('\n===== 结果：' + pass + ' 通过 / ' + failures.length + ' 失败 =====');
   if (failures.length) {
     console.log('失败项：');
