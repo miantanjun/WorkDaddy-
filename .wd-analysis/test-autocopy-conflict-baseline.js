@@ -173,7 +173,7 @@ function makeHarness(cfg) {
   if (cfg.watermark) meta.autoCopy.syncedAt = { L1: cfg.watermark };
   writeMeta(dir, meta);
 
-  const world = { copyCalls: [], setSyncedAtCalls: [], setMappingCalls: [], runs: [], logs: [] };
+  const world = { copyCalls: [], setSyncedAtCalls: [], setMappingCalls: [], runs: [], logs: [], applyCalls: [] };
   const rowsById = {};
   const mtimeById = {};
   for (const m of cfg.members) {
@@ -190,7 +190,8 @@ function makeHarness(cfg) {
     'getAutoCopyLineageSyncedAt', 'setAutoCopyLineageSyncedAt',
     'SESSION_COPY_COLUMNS', 'sqliteQuery', 'sessionBodyMtime',
     'selectLatestAutoCopyMember', 'copySessionFiles', 'sqliteRun',
-    'setAutoCopyMapping', 'yieldAutoCopyToRenderer', 'log',
+    'setAutoCopyMapping', 'yieldAutoCopyToRenderer', 'log', 'autoCopyLeader',
+    'getSessionSyncCache', 'fs', 'path', 'directoryStats', 'autoCopyJudge',
     SLICE + '\nreturn { syncAutoCopyLineage };'
   );
   const fn = factory(
@@ -211,7 +212,30 @@ function makeHarness(cfg) {
     async () => { world.runs.push(1); },
     (d, lid, tUid, mapping) => { world.setMappingCalls.push([lid, tUid, mapping && mapping.status]); return mapping; },
     async () => {},
-    (m) => world.logs.push(String(m))
+    (m) => world.logs.push(String(m)),
+    // content 模式（judge='content'）需要它：resolveContentLeader 的桩。
+    // 默认给 divergent —— 正好是「两侧各改各的」那种不可自动合并的形态。
+    {
+      resolveContentLeader: () => cfg.contentLeader
+        || { kind: 'divergent', leaderId: '', pairs: [], reason: 'test-fixture divergent' },
+    },
+    // content 模式的指纹缓存入口；桩掉（resolveContentLeader 本身也是桩，用不到真缓存）。
+    () => null,
+    fs, path,
+    () => ({ files: 0, bytes: 0 }),
+    // content 模式的写盘走 autoCopyJudge（事务写入），与 mtime 模式的 copySessionFiles 不同实现。
+    {
+      readWritableSnapshot: () => ({ id: null, bytes: 0, files: new Map() }),
+      assertWritable: () => {},
+      pruneSessionSyncBackups: () => ({ removed: 0, kept: 0 }),
+      evictCache: () => {},
+      applySnapshot: async (_src, tgt, opts) => {
+        world.applyCalls.push([tgt && tgt.id]);
+        // commit 是发布回调：真实实现里它写库 + 复检；这里照调，顺带覆盖 sqliteRun 桩。
+        if (opts && typeof opts.commit === 'function') await opts.commit(null);
+        return { copied: 1, copiedBytes: 0, failed: 0 };
+      },
+    }
   ).syncAutoCopyLineage;
 
   return {
@@ -344,6 +368,53 @@ const rForceBare = await hForceBare.run({ force: true });
 ok(rForceBare && rForceBare.conflict === true && hForceBare.world.copyCalls.length === 0,
   'B14 force 但既无 forceSourceId 也无 forceSourceUid ⇒ 作废：「不说以谁为准」的强制覆盖毫无意义',
   hForceBare.world.copyCalls);
+
+/* ==================================================================== */
+/* 【B3】content 模式的 divergent 闸门也必须给 force 留出口（2026-10-11） */
+/* ==================================================================== */
+//
+// 用户报障：Lang app 在三个账号间真分叉，勾「强制覆盖（以源账号为准）」并点名源账号，
+// 任务显示跑完，但那份会话**一份都没被覆盖**、仍然报分叉 —— 用户侧表现为「强制失败」。
+//
+// 根因：force 共有三道闸门，mtime 模式的两道都写了 `!forceResolve`，唯独 content 模式的
+// divergent 闸门漏了 ⇒ 它无条件 return，而 forcedSource 的计算在它**后面** ⇒ 永远走不到。
+// 修法：forcedSource 提前到 force 归一化之后算，两道 content 闸门补 `!forcedSource`。
+//
+// ⚠️ B16/B17 是**反向守卫** —— 修法只该给 force 开出口，绝不能把默认的保护性判据改松。
+
+section('\n[B3] content 模式 divergent 闸门的 force 出口（2026-10-11 修的缺陷）');
+
+const divMembers = [
+  { uid: 'UX', id: 'g1', mtime: 5000 },
+  { uid: 'UY', id: 'g2', mtime: 4000 },
+  { uid: 'UZ', id: 'g3', mtime: 2000 },
+];
+
+// ── B15：content + divergent + force 点名源 ⇒ 必须真覆盖 ────────────────
+const hDivForce = makeHarness({ targetUid: 'UZ', members: divMembers });
+const rDivForce = await hDivForce.run({ judge: 'content', force: true, forceSourceUid: 'UX' });
+ok(rDivForce && rDivForce.conflict !== true && rDivForce.divergent !== true
+  && hDivForce.world.copyCalls.length === 1 && hDivForce.world.copyCalls[0][0] === 'g1'
+  && hDivForce.world.applyCalls.length === 2,
+  'B15 ⭐⭐ content 模式 divergent + force 点名源 ⇒ 必须真覆盖过去（2026-10-11 修掉的缺陷：'
+  + '那道闸门原先没有 force 出口，任务跑完却一份都没动）',
+  { result: rDivForce && { conflict: rDivForce.conflict, divergent: rDivForce.divergent, synced: rDivForce.synced }, calls: hDivForce.world.copyCalls });
+
+// ── B16：content + divergent + **不传 force** ⇒ 仍报分叉、零写入 ────────
+const hDivBare = makeHarness({ targetUid: 'UZ', members: divMembers });
+const rDivBare = await hDivBare.run({ judge: 'content' });
+ok(rDivBare && rDivBare.conflict === true && rDivBare.divergent === true
+  && hDivBare.world.copyCalls.length === 0
+  && hDivBare.world.setSyncedAtCalls.length === 0,
+  'B16 ⭐⭐ content 模式 divergent + 不传 force ⇒ 照常报分叉、零写入（**保护性判据不许被修松**）',
+  { result: rDivBare && { conflict: rDivBare.conflict, divergent: rDivBare.divergent }, calls: hDivBare.world.copyCalls.length });
+
+// ── B17：content + divergent + force 但源不在血缘 ⇒ 整块作废 ────────────
+const hDivMiss = makeHarness({ targetUid: 'UZ', members: divMembers });
+const rDivMiss = await hDivMiss.run({ judge: 'content', force: true, forceSourceUid: 'NOPE' });
+ok(rDivMiss && rDivMiss.conflict === true && hDivMiss.world.copyCalls.length === 0,
+  'B17 content 模式 divergent + force 源不在本血缘 ⇒ 整块 force 作废、照常报分叉（不能猜）',
+  { result: rDivMiss && rDivMiss.conflict, calls: hDivMiss.world.copyCalls.length });
 
 /* ==================================================================== */
 /* 【C】sessionBodyMtime：判据只看对话正文（A′ 收窄）                    */

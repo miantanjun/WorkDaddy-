@@ -350,10 +350,19 @@ section('[G] daemon 接线守卫（静态形态断言，防「改回去也不知
   //   insufficient（可读成员不足两个 = 内容读不出来）旧实现也当冲突，于是用户会看到
   //   「同步处报冲突、点『处理冲突』又说没有」—— 读不出来不是分叉，是数据缺失。
   //   现在 insufficient 落到下面的 !contentLatest 安全返回（不写盘、不报冲突）。
-  ok(has("if (contentLead.kind === 'divergent') {"),
-    'G9 ⭐ 只有真分叉 divergent 走「一份都不覆盖」出口；insufficient 不再算冲突（BUG3 修复）');
-  ok(has("if (!contentLatest) return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent, judge: 'content' };"),
-    'G9b ⭐ insufficient 的收口：contentLatest 为 null ⇒ 安全返回（不写盘、不报冲突）');
+  ok(has("if (contentLead.kind === 'divergent' && !forcePinnedSource) {"),
+    'G9 ⭐ 只有真分叉 divergent 走「一份都不覆盖」出口；insufficient 不再算冲突（BUG3 修复）。'
+    + '⚠️ 2026-10-11 补 forcePinnedSource 出口 —— 用户显式点名强制源时必须放行，'
+    + '否则「强制覆盖」永远无效（任务跑完却一份都没动）');
+  ok(has("if (!contentLatest && !forcePinnedSource) return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent, judge: 'content' };"),
+    'G9b ⭐ insufficient 的收口：contentLatest 为 null ⇒ 安全返回（不写盘、不报冲突）。'
+    + '⚠️ 同样要给 forcePinnedSource 留出口（divergent 时 leaderId 为空 ⇒ contentLatest 必为 null）');
+
+  // 守卫实现方式本身：出口必须用**独立布尔**，不能靠把 forcedSource 提前来实现
+  //（提前会破坏下面 G12 守的「判主 → 选源」顺序契约）。
+  ok(has('const forcePinnedSource = !!(forceResolve && forceSourceId)')
+    && has('&& live.some((member) => String(member.id) === forceSourceId);'),
+    'G9c ⭐⭐ content 模式闸门的 force 出口用独立布尔 forcePinnedSource —— 不许把 forcedSource 提前');
   ok(has('detail.branch = result.branch || null;'),
     'G10 分叉明细已透到 job 明细（用户通知的数据通道）');
   ok(has('if (result.divergent) job.divergences += 1;'), 'G11 分叉计数已累加');

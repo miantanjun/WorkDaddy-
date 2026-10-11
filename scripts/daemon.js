@@ -7205,6 +7205,15 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   }
   const forceResolve = !!(options && options.force);
   const forceSourceId = String((options && options.forceSourceId) || '').trim();
+  // ⚠️ 2026-10-11 修复：给 content 模式的闸门开一个 force 出口。
+  //    为什么用**独立布尔**而不是把 forcedSource 提前：`forcedSource` 必须留在
+  //    `resolveContentLeader` **之后**（「判主 → 选源」这条顺序契约由 G12 守着），
+  //    提前它会破坏那个不变量。这个布尔只回答「用户是否已点名了一个**本血缘内**的源」。
+  //    背景：force 共有三道闸门，mtime 模式的两道都写了 `!forceResolve`，唯独 content 模式的
+  //    divergent 闸门漏了 ⇒ 用户勾「强制覆盖」并点名源账号后，任务跑完却一份都没动
+  //    （用户侧表现为「强制失败」）。
+  const forcePinnedSource = !!(forceResolve && forceSourceId)
+    && live.some((member) => String(member.id) === forceSourceId);
   // ---- 判主偏序（方案 D 的 D1；只有 judge='content' 时才走，默认路径逐行为不变）----
   // 用**内容**定源：找「含住其余全部成员」的那一份当源。有唯一领导者才 fan-out；
   // 全部等价 => 无事可做；谁都不含谁 => 真分叉，**一份都不覆盖**，双方保留交用户裁决。
@@ -7226,7 +7235,9 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
     );
     // 【BUG3 修复】只有真正的 divergent（两边都读得到且内容不同）才算冲突。
     // insufficient = 可读成员不足两个（内容读不出来）—— 这不是分叉，报冲突只会让用户点进去看不到东西。
-    if (contentLead.kind === 'divergent') {
+    // ⚠️ 加 `!forcedSource`：用户显式点名了强制源时，要的就是用那一份覆盖过去，
+    //    不能再拦在这里报分叉。不传 force 时 forcedSource 恒为 null ⇒ 判据逐行为不变。
+    if (contentLead.kind === 'divergent' && !forcePinnedSource) {
       // 「保留分叉」在这里落地：连产物相位都不推进，目标侧保持原样。
       return {
         members: live.length,
@@ -7252,7 +7263,9 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
       return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent, unchanged: true, judge: 'content' };
     }
     contentLatest = live.find((member) => member.id === contentLead.leaderId) || null;
-    if (!contentLatest) return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent, judge: 'content' };
+    // ⚠️ 同样要放行 force：divergent 时 leaderId 可能为空 ⇒ contentLatest 为 null，
+    //    若用户已点名强制源，必须继续往下走（下面 `forcedSource || contentLatest || …`）。
+    if (!contentLatest && !forcePinnedSource) return { members: live.length, synced: 0, failedFiles: 0, targetIds, targetPresent, judge: 'content' };
   }
   // Once a lineage has been synchronized, a changed file on each side means
   // both accounts wrote new content since the last common snapshot. Do not
@@ -7282,6 +7295,8 @@ async function syncAutoCopyLineage(lineageId, targetUid, options = {}) {
   // judge='content' 时源由内容偏序决定（contentLatest）；只有默认的 mtime 路径才比时间。
   // force 时源由调用方指定（用户点「以本账号为准」那一份），不再按 mtime 选「最新」——
   // 真分叉下「最新」并不等于「用户想要的那份」，按时间选会静默丢另一边的内容。
+  // ⚠️ 这两行必须留在 `resolveContentLeader` **之后**（「判主 → 选源」的顺序契约，G12 守着）；
+  //    content 模式那两道闸门用的是另一个独立布尔 forcePinnedSource（见上）。
   const forcedSource = (forceResolve && forceSourceId)
     ? live.find((member) => member.id === forceSourceId)
     : null;
