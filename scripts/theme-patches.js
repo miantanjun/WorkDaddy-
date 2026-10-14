@@ -519,6 +519,12 @@ module.exports = [
     desc: '毛玻璃下文件链接与代码复制控件透明：外层 tooltip 触发器不应有弹窗底色，内层文件标签使用独立的 cr-symbol 背景变量，也需单独清除。',
     css: 'html[data-wbs-theme-id="nebula"] body[data-vscode-theme-name] .cr-clickable-path-tooltip-anchor,html[data-wbs-theme-id="nebula"] body[data-vscode-theme-name] .cr-clickable-path,html[data-wbs-theme-id="nebula"] body[data-vscode-theme-name] .cr-code-block__copy-tooltip,html[data-wbs-theme-id="nebula"] body[data-vscode-theme-name] .cr-code-block__copy-button{background:transparent !important;}',
   },
+  {
+    id: 'patch-107',
+    themeId: 'nebula',
+    desc: '毛玻璃主题下新版 teams 输入工具条的语音、上下文用量和增强按钮触发器去掉背景色，避免右侧出现多余色块。',
+    css: ':is(html.cb-dark,html[data-theme="dark"]) body[data-vscode-theme-name] .teams-container .cr-input-toolbar__right>span:is(.cr-voice-trigger-tooltip,.cr-context-usage-tooltip-trigger,.cr-enhance-button-tooltip),body[data-vscode-theme-name="IDE Night"] .teams-container .cr-input-toolbar__right>span:is(.cr-voice-trigger-tooltip,.cr-context-usage-tooltip-trigger,.cr-enhance-button-tooltip){background:transparent !important;background-color:transparent !important;box-shadow:none !important;backdrop-filter:none !important;-webkit-backdrop-filter:none !important;}',
+  },
   /* 原 patch-82（AI 端快捷短语弹层 z-index 抬升）已移入 inject.js 常驻样式：
      theme-patches 仅在非默认主题时注入，默认浅色主题下会失效；层级修复不依赖主题，随注入脚本常驻更可靠。 */
 ];

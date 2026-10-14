@@ -91,6 +91,11 @@ const CDP_STARTUP_TIMEOUT_MS = 60000;
 // Electron/ShellExecute 冷启动可能超过 5 秒；过早换端口会让首个实例与重试实例发生单实例冲突。
 const CDP_PORT_RETRY_GRACE_MS = 15000;
 const INJECT_REQUEST_TIMEOUT_MS = 5000;
+// daemon 的 /api/status 可能等待后台客户端进程枚举（Windows 上旧实现曾达数秒）。
+// 启动器的 UI 端口发现与 daemon 状态读取必须容忍这种慢响应：预算过短会把仍在
+// 监听的 daemon 误判为不存在，进而误选备用端口并以「daemon 未绑定当前 UI 端口」
+// 失败退出。与 daemon 侧 spawnSync 的 10s 进程查询预算保持同量级并留出余量。
+const HTTP_GET_TIMEOUT_MS = 8000;
 const INJECT_MAX_ATTEMPTS = 6;
 const INJECT_RETRY_DELAY_MS = 1000;
 // 每个 profile 只查询自己的主程序镜像；其他 CodeBuddy/WorkBuddy profile 不参与退出判定。
@@ -182,17 +187,27 @@ function relaunchWithDesktopShell(nodeBin) {
   }
 }
 
-function runHiddenPowerShell(script) {
+function runHiddenPowerShell(script, options = {}) {
   if (process.platform !== 'win32') return;
   try {
     const encoded = Buffer.from(String(script), 'utf16le').toString('base64');
     // Resolve the system PowerShell explicitly. The managed Node runtime may
     // resolve a different shim when the shortcut is launched via wscript.
     const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const result = spawnSync(powershell, [
+    const args = [
       '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
       '-EncodedCommand', encoded,
-    ], { stdio: 'ignore', windowsHide: true, timeout: 10000 });
+    ];
+    if (options.detached) {
+      const child = spawn(powershell, args, {
+        stdio: 'ignore', windowsHide: true, detached: true,
+      });
+      child.once('error', (error) => log('Windows 本地提示调用失败: ' + error.message));
+      child.unref();
+      log('Windows 本地提示已异步派发');
+      return;
+    }
+    const result = spawnSync(powershell, args, { stdio: 'ignore', windowsHide: true, timeout: 10000 });
     if (result.error) log('Windows 本地提示调用失败: ' + result.error.message);
     else if (result.status !== 0) log('Windows 本地提示退出码: ' + result.status);
     else log('Windows 本地提示已完成');
@@ -213,7 +228,9 @@ function showWindowsNotification(title, message) {
     `$n.Icon=[System.Drawing.SystemIcons]::Information; $n.Visible=$true; ` +
     `$n.BalloonTipTitle=${powershellQuote(title)}; $n.BalloonTipText=${powershellQuote(message)}; ` +
     `$n.ShowBalloonTip(5000); Start-Sleep -Milliseconds 5500; $n.Dispose()`;
-  runHiddenPowerShell(ps);
+  // A balloon notification sleeps for 5.5s while it remains visible. It must
+  // not hold up daemon/CDP startup or make a slow install look hung.
+  runHiddenPowerShell(ps, { detached: true });
 }
 
 function powershellQuote(value) {
@@ -303,7 +320,7 @@ function reserveEphemeralCdpPort() {
 
 function httpGet(port, p, headers = {}) {
   return new Promise((resolve) => {
-    const req = http.get({ host: HOST, port, path: p, headers, timeout: 1500 }, (res) => {
+    const req = http.get({ host: HOST, port, path: p, headers, timeout: HTTP_GET_TIMEOUT_MS }, (res) => {
       let body = '';
       res.on('data', (c) => (body += c));
       res.on('end', () => resolve({ status: res.statusCode, body }));
@@ -1584,9 +1601,23 @@ function nativeDaemonStatusMatches(status) {
   );
 }
 
-async function waitForNativeDaemon(attempts = 40) {
+// 原生 helper/PowerShell/CIM 冷启动可能超过 10 秒；给 watchdog/daemon 60 秒完成初始化，
+// 避免第一次等待失败后重复清理并制造第二个启动竞态。等待期间通过 detached
+// NotifyIcon 报告进度，通知本身不能阻塞这条启动链。
+const NATIVE_DAEMON_PROGRESS_INTERVALS_MS = [15 * 1000, 30 * 1000, 45 * 1000];
+async function waitForNativeDaemon(attempts = 240, onProgress = null) {
+  const startedAt = Date.now();
+  const deadline = startedAt + attempts * 250;
+  let nextProgressIndex = 0;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (attempt > 0) await sleep(250);
+    if (Date.now() >= deadline) break;
+    const elapsed = Date.now() - startedAt;
+    while (onProgress && nextProgressIndex < NATIVE_DAEMON_PROGRESS_INTERVALS_MS.length &&
+      elapsed >= NATIVE_DAEMON_PROGRESS_INTERVALS_MS[nextProgressIndex]) {
+      onProgress(NATIVE_DAEMON_PROGRESS_INTERVALS_MS[nextProgressIndex]);
+      nextProgressIndex += 1;
+    }
     const status = await readStatus();
     if (nativeDaemonStatusMatches(status)) return status;
   }
@@ -1633,8 +1664,13 @@ async function ensureDaemonNative(nodeBin) {
     });
     child.unref();
   };
+  const waitWithProgress = () => waitForNativeDaemon(240, (elapsedMs) => {
+    const seconds = Math.max(1, Math.round(elapsedMs / 1000));
+    showWindowsNotification(WBS_BRAND, `后台服务仍在启动（已等待约 ${seconds} 秒），请勿重复点击。`);
+  });
+  showWindowsNotification(WBS_BRAND, '正在启动 WorkDaddy 后台服务，请稍候……');
   startWatchdog();
-  status = await waitForNativeDaemon();
+  status = await waitWithProgress();
   if (status) return true;
 
   // A previous watchdog may own the OS lock while its daemon is unhealthy.
@@ -1643,8 +1679,9 @@ async function ensureDaemonNative(nodeBin) {
   await stopVerifiedLegacyManagedLifecycle(nodeBin);
   stopNativeLifecycle();
   await sleep(800);
+  showWindowsNotification(WBS_BRAND, '正在重新启动 WorkDaddy 后台服务，请稍候……');
   startWatchdog();
-  status = await waitForNativeDaemon();
+  status = await waitWithProgress();
   if (status) return true;
   const error = new Error('等待 WorkDaddy 后台服务启动超时');
   error.sentryStage = 'windows-native-launcher-daemon-timeout';
@@ -1883,6 +1920,7 @@ module.exports = {
   workBuddyRunning,
   cdpPortCandidates,
   reserveEphemeralCdpPort,
+  httpGet,
   // 供测试与 installer 复用：判断"停不掉是因为权限不对等"，以及带兜底的停止
   isAccessDeniedStopError,
   tryStopNativeWorkBuddy,

@@ -15,7 +15,7 @@ const SUITES = [
   ['test-space-ui.js', 70],
   ['test-limit-failover.js', 47],
   ['test-limit-switchback.js', 138],
-  ['test-idle-switchback.js', 128],
+  ['test-idle-switchback.js', 134],
   ['test-switch-sync.js', 63],  // 2026-09-21 手动强制覆盖：C18 形态更新 + C22–C27 六条新守卫
   ['test-lineage-dedupe.js', 34],
   ['test-cloud-ghosts.js', 86],
@@ -32,7 +32,8 @@ const SUITES = [
   ['test-switch-settle.js', 47],  // v1.3.17 切号闸门：还原因定时任务切走的账号前，先等在飞的回合跑完（v1.4.3 B4 取并集后 42→47）
   ['test-autocopy-conflict-baseline.js', 42],  // v1.4.1 会话同步「假冲突 + 自锁」：血缘级 watermark 标尺 + 正文 mtime 收窄
   ['test-automations-guard.js', 41],  // v1.4.1 P0：读失败不得折成空集合（静默清空全部任务）+ 写侧骤减守卫 + 路由级兜底
-  ['test-daemon-http.js', 22],  // v1.4.1 §9-3：HTTP 入口层（readBody 一定 settle / 有界 / 解析失败 reject）+ 鉴权契约
+  ['test-client-debug-relaunch.js', 34],  // 上游 1.2.12 吸纳/A1 + 1.2.13 补丁/B1：客户端「进程在跑但调试端口丢了」（官方自动更新后裸重启）的检测与一键恢复 —— VM 切片真跑状态机（阈值 3 / 命中才标记 / 恢复清零 / 未知不计数 / 不重复刷日志）+ 接线静态守卫（恢复路由先退后起 / 202 pending / 动作前重探 / 状态页按钮）+ ⭐ 非阻塞反向守卫（/api/status 与 cdpLoop 都不得同步探测，否则 Win 上 2.4~6.7s 拖垮 launcher 的 8000ms 探测预算）
+  ['test-daemon-http.js', 23],  // v1.4.1 §9-3：HTTP 入口层（readBody 一定 settle / 有界 / 解析失败 reject）+ 鉴权契约；2026-10-13 上游 1.2.12/1.2.13 吸纳：+F3 反向守卫（POST 例外白名单必须落在公开路径集合内），F1 5→6、F2 改为「除显式白名单外不得出现在 POST 分支」；同日修 E7/E8 抖动：abort 探针与服务端解析请求头有竞态（RST 先到则该连接不计入），固定次数 + 精确计数会随负载随机变红 ⇒ 改 abortUntil 补发到目标达成（实测 8/8 稳定）
   ['test-usage-attribution-guard.js', 32],  // v1.4.1 §9-6：空间归属解析（裸前缀错归）+ 用量入库（NaN 拖垮整批）
   ['test-watchdog-backoff.js', 16],  // v1.4.1 §9-4：watchdog 退避复位判据（存活超 60s）+ 熔断
   ['test-failover-clock.js', 42],  // v1.4.1 §9-7：限流窗口绝对到期时刻 + 时钟回拨不可信 + 结构化「选不出账号」
@@ -49,6 +50,7 @@ const SUITES = [
   ['test-session-monitor.js', 55],  // 上游 1.2.6 吸纳/批次 4 第 4 项（A7）：会话监控中断判据。核心契约 = isSessionMonitorInterrupted 与判定层**结论完全一致**（允许绑定的会话必须等于会被续跑的会话）；另守抽函数后的静默退化陷阱（acControllerSnapshot 必须自带 completionMarker）+ 会话资源归一化的 protocolStatus 跨字段取终局
   ['test-session-activation.js', 36],  // 上游 1.2.6 吸纳/批次 5（B1/C2/A9）：会话激活分层融合。行为级验快路径（官方导航 handler/SDK 优先）**只在可验证时**成立：authoritative!==true 不调 activate、activate 后必须确认目标控制器真的挂上、没落地则回落点击循环且老路径零行为变化（快路径成功时零点击）；源码级守 A9 的 currentConversationId 所有权校验 + openConversationById 签名不变
   ['test-session-dirty-wiring.js', 49],  // 上游 1.2.6 吸纳/批次 3（A1 + A5-B6）：脏索引接线。**接线就绪 + 开关默认关**。守：索引持久化（本地口径 atomicWriteText / 去抖 / unref）、POST /api/sessions/dirty 的三道守卫 + 隐私边界、renderer feed 独立订阅与解绑；[B] 组用「出仓代码里没人写 fingerprintVersion」**硬证明规划期快路径今天必然不可达**，并守住「没有动 archived 过滤链的形态」（那条链是归档不变量的守卫锚点）；[D]/[E] 组行为级守 fail-open（未建基线恒 true，写反=静默漏同步）与抖动过滤（账号 reload / 仅 lastActivityAt 漂移不算脏）
+  ['test-account-token-refresh.js', 48],  // 上游 1.2.12 吸纳/B4：面板打开时刷新全部账号 token。[A] daemon 契约（状态文件落 DATA_DIR / in-flight 合并 / mtime+size 指纹 / 带签名比对的时间状态 / 新路由排在 GET /api/accounts 之前且失败落 500 不裸抛）+ [B] 保活改按**自然日**（跨零点即新一天，不再满 24h）+ 按天去重 + force 只放宽非 daily 路径 + 并发合并（快速开关面板不产生 token 风暴）+ 单账号并发上限 3 + 结束清 in-flight + 返回四件套 + [C] ⭐ 隐私红线（rememberTokenRefreshSuccess **只**写公开时间字段，函数体里不得出现任何 token 字段名；落盘 0600）+ [D] 列表合并优先级（内存缓存→落盘状态→原样，全过签名比对）+ [E] inject 侧（先快照后触发 / 仅本次打开 / **代际守卫**防旧副本写 DOM / 零刷新不再取快照 / 整链 catch 兜底）+ [F] 反向守卫（写状态文件处禁 token 字段 / 必须在 DATA_DIR 下 / 临时名带 pid / 刷新本体不直接落盘 / 两文件纯 CRLF）
   ['test-automation-protocol-v3.js', 111],  // 上游 1.2.5 吸纳/B 组协议 V3：校验负向门（V1/V2 拒 prepare、prepare 只读白名单、condition 形状）+ prepare/condition 真跑语义（切换前执行 / 跳过不切不跑 / 收尾还原不受影响）+ orderCheckinAccounts 稳定排序 + B4 闸门有界可取消 + A9 失败屏障 + A11 409 + 接线静态守卫（含「不搬上游 job.completion / waitAutomationSyncJob」的反向守卫）
   ['test-upstream-125-step4-panel.js', 108],  // 上游 1.2.5 吸纳/Step 4：A7 作业指标（真跑切片函数 + 速率口径）+ A8 大会话提示 + A7/A8 面板文案整句入典（含重复 key 去重守卫）+ A10 会话体积/总量口径（总量不受筛选）+ 体积筛选字节精确
   ['test-account-health.js', 139],  // v1.4.5 F2：13 层分类顺序（含两条反向对照）+ 三条迁移纪律（不加深 / 取更远者 / 硬不降级）+ A5 分级排除 + A8 双状态位与幂等 + daemon 端点与切片反向守卫 + 面板徽标/i18n/CSS + mac 白名单；2026-09-23 补 E25 传递闭包白名单守卫 +1
@@ -69,6 +71,7 @@ const SUITES = [
   ['test-official-schedule.js', 20],
   ['test-upstream-1211.js', 26],
   ['test-launcher-privilege.js', 26],
+  ['test-daemon-probe-guard.js', 14],  // 2026-10-14 上游 1.2.14（1.2.38）吸纳：daemon 探测子进程不得递归派生。静态（守卫在 refreshClientRunning 体内 / 顶层无裸调用 / startClientRunningMonitor 落在 acquireDaemonLock 之后 / 两个探针超时常量已接线）+ 动态（真跑 --probe-client-running 入口 ×4 profile，preload 拦截 execFile 断言累计派生 0，且入口仍能应答 {running:…}）
   ['test-agent-hint.js', 101],
   // 2026-10-01 本地子 Agent 提醒开关 + 使用记录：规则写进官方全局自定义指令（每个会话生效）/ 关闭=既不提醒也不注入（摘除后用户内容原样保留 + 开→关字节级还原）/ jsonl 解析严格只认 name 为 Agent（防正文提模型名误报）/ 本地承担 vs 漏到云端 / 口径守卫（不得出现省 token 或划算这类推不出来的结论）/ 面板开关失败回滚 + i18n 整句入典  // 2026-10-01 官方 5.7.3 定时任务「融合」：只读官方 automations 表（硬约束：全仓无写操作）/ 时间戳单位按数量级判别（created_at 秒 vs next_run_at 毫秒）/ 冲突检测只判 daily / 面板引导 + i18n 整句入典 / 活体验证 nextSlot 年份合理  // 2026-10-01 全面审查 4 项修复：复制跳过特殊文件（含「必须放行符号链接」的回归守卫）/ cloud-ghosts 日志澄清（含 D12 契约反向守卫）/ 渲染层错误记录兜底（行为级验证不再出现 error: null）/ 代码索引覆盖扩容 4→10  // 2026-10-01 知识页「自愈」守卫：文件引用存在性 + 行号越界 + 反查表章节验真（借鉴 Hindsight Knowledge Pages 的 self-healing）  // 2026-09-30 切号「预同步+进度弹窗」：core 顺序重排（预同步先于切号 / 失败中止整轮不走 per-round catch / 可选端口守卫保证既有切片套件逐字等价 / 切片沙箱零标识符泄漏）+ 弹窗阶段机（惰性过期 / 取消复用既有中止机制 / 未活跃过不凭空造弹窗）+ 「只等 meta 阶段」判据 + 路由与 UI 静态守卫
 ];

@@ -4885,6 +4885,30 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       return false;
     }
 
+    // 官方新版 teams 工具条会把背景直接写在 tooltip 触发器的元素样式上，
+    // 主题 CSS 即使带 !important 也可能被 React 重渲染后的内联值盖回去。
+    // 毛玻璃主题下按实际节点写入内联透明背景，并在节点重建时重新应用。
+    function syncGlassComposerTriggerBackgrounds() {
+      var html = document.documentElement;
+      var glass = html && html.getAttribute('data-wbs-theme-id') === 'nebula';
+      var selector = '.teams-container .cr-input-toolbar__right > span.cr-voice-trigger-tooltip,' +
+        '.teams-container .cr-input-toolbar__right > span.cr-context-usage-tooltip-trigger,' +
+        '.teams-container .cr-input-toolbar__right > span.cr-enhance-button-tooltip';
+      document.querySelectorAll(selector).forEach(function (node) {
+        if (glass) {
+          node.style.setProperty('background', 'transparent', 'important');
+          node.style.setProperty('background-color', 'transparent', 'important');
+          node.style.setProperty('box-shadow', 'none', 'important');
+          node.setAttribute('data-wbs-glass-trigger-patched', '1');
+        }
+        else if (node.getAttribute('data-wbs-glass-trigger-patched') === '1') {
+          node.style.removeProperty('background');
+          node.style.removeProperty('background-color');
+          node.style.removeProperty('box-shadow');
+          node.removeAttribute('data-wbs-glass-trigger-patched');
+        }
+      });
+    }
     function onDomChange() {
       if (!alive) return;
       acLimitWatchTick(); // 限流横幅监听：内部有 1.5s 时间闸，不会每帧都查 DOM
@@ -4892,6 +4916,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (messageNavigation) messageNavigation.sync();
       scheduleForkButtons();
       scheduleFabPos();
+      if (typeof syncGlassComposerTriggerBackgrounds === 'function') syncGlassComposerTriggerBackgrounds();
       watchRow();
       syncStash(); // 页面切换（欢迎页↔聊天页）后立即重算暂存按钮显隐
       if (!findActionRow()) return;
@@ -4941,6 +4966,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         scheduleDomChange();
       });
       bodyObserver.observe(document.body, { childList: true, subtree: true });
+      var glassThemeObserver = new MutationObserver(syncGlassComposerTriggerBackgrounds);
+      glassThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-wbs-theme-id'] });
+      registerDisposer(function () { glassThemeObserver.disconnect(); });
     }
 
     // ===== 限流横幅监听（快路入口：供 daemon 的「切账号 + 同一模型续跑」）=====
@@ -4992,6 +5020,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
     setBuildTimeout(acLimitWatchTick, 4000); // 首屏兜底：注入时页面可能已经有横幅
 
+    syncGlassComposerTriggerBackgrounds();
     syncStash(); // 初始检查
     scheduleForkButtons();
     setBuildTimeout(wrapQueueReorder, 800);
@@ -12068,6 +12097,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<label class="wbs-switch" title="开启后仍有确认弹窗时自动替你点「允许」，所有自动批准记录在审计日志"><input type="checkbox" id="wbs-nd-auto"><span class="wbs-switch-slider"></span></label>' +
         '</div>' +
         '</div>' +
+        '<div class="wbs-pcard" id="wbs-motion-card">' +
+        '<div class="wbs-pcard-title">性能<span class="wbs-pcard-sub">动效降级</span></div>' +
+        '<div class="wbs-nd-row">' +
+        '<span class="wbs-nd-title">动效降级</span>' +
+        '<span class="wbs-nd-hint">实测可降低主线程渲染负载约 30%。流畅＝只停装饰性动画（机器人眨眼、扫光闪烁）；极速＝页面内所有动画静止（加载转圈也会停）</span>' +
+        '</div>' +
+        '<div class="wbs-theme-seg wbs-motion-seg" role="radiogroup" aria-label="动效降级">' +
+        '<label class="wbs-theme-opt" title="保留全部动效"><input type="radio" name="wbs-motion-mode" value="off"><span>关闭</span></label>' +
+        '<label class="wbs-theme-opt" title="只停纯装饰动画，保留加载转圈等交互反馈"><input type="radio" name="wbs-motion-mode" value="lite"><span>流畅</span></label>' +
+        '<label class="wbs-theme-opt" title="页面内所有 animation 静止"><input type="radio" name="wbs-motion-mode" value="turbo"><span>极速</span></label>' +
+        '</div>' +
+        '</div>' +
         '<div class="wbs-pcard" id="wbs-ac-card">' +
         '<div class="wbs-pcard-title">会话<span class="wbs-pcard-sub" id="wbs-ac-status"></span></div>' +
         '<div class="wbs-nd-row" id="wbs-ac-row">' +
@@ -13242,7 +13283,22 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         if (newlyOpened && typeof preloadAutomationDiscovery === 'function') preloadAutomationDiscovery().catch(function () {});
         if (newlyOpened && !(options && options.automation)) api('/api/automations/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'panelOpened' }) }).catch(function () {});
         if (newlyOpened) state.dailyProgressForceNext = true;
-        refresh();
+        var panelRefresh = refresh();
+        if (newlyOpened && CAPS.accounts) {
+          // B4（上游 1.2.13）：打开面板时把**全部**备份账号按日保活一遍，再重取一次快照，
+          // 把轮换后的新有效期显示出来。daemon 侧负责「按天去重 + 合并并发」，
+          // 所以快速开关面板不会产生 refresh token 风暴。
+          Promise.resolve(panelRefresh).then(function () {
+            return api('/api/accounts/refresh-tokens', {
+              method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+            });
+          }).then(function (result) {
+            // 代际守卫（本地口径）：热更后旧副本不许再写 DOM；面板已关则不刷新。
+            if (window.__wbsGeneration !== WBS_GENERATION || !state.open) return;
+            if (!result || Number(result.refreshed) <= 0) return;
+            refresh();
+          }).catch(function () {});
+        }
         checkForUpdate(); // 打开面板即检测更新（每次打开都强制查一次新版本）
         try { acCheckPromptOnOpen(); } catch (e) {} // 每次打开面板：指令块丢失则请求 daemon 补写（无 toast）
         try { syncSessionModule(); } catch (e) {} // 每次打开面板刷新会话模块（开关+快捷短语，含外部修改）
@@ -16257,6 +16313,27 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     /** 会话模块控件绑定：暂存提示词/消息索引/快捷短语开关 + 快捷短语列表。面板每次打开重建时重绑。 */
     function wireSessionControls() {
       var pane2 = enhancePane;
+      // 性能：动效降级分段（关闭 / 流畅 / 极速）。切换即写 localStorage + 改 html 属性，立刻生效。
+      var motionRadios = pane2.querySelectorAll('input[name="wbs-motion-mode"]');
+      if (motionRadios.length) {
+        var motionCur = readPerfMode();
+        Array.prototype.forEach.call(motionRadios, function (input) {
+          input.checked = input.value === motionCur;
+          var opt = input.closest ? input.closest('.wbs-theme-opt') : null;
+          if (opt) opt.classList.toggle('active', input.checked);
+          input.addEventListener('change', function () {
+            if (!input.checked) return;
+            var applied = applyPerfMode(input.value);
+            Array.prototype.forEach.call(motionRadios, function (r) {
+              var o = r.closest ? r.closest('.wbs-theme-opt') : null;
+              if (o) o.classList.toggle('active', r.checked);
+            });
+            toast(applied === 'off' ? '已恢复全部动效'
+              : applied === 'lite' ? '已开启流畅模式：仅停装饰动画'
+              : '已开启极速模式：页面内动画全部静止', false, root);
+          });
+        });
+      }
       if (!pane2) { syncSessionModule(); return; }
       var swS = pane2.querySelector('#wbs-sess-stash');
       if (swS) swS.addEventListener('change', function () { setSessionSwitchWire('stashEnabled', this); });
@@ -20519,6 +20596,29 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     try { delete window.__wbsWidget; } catch (e) { window.__wbsWidget = null; }
   }
 
+  // ===== 性能：动效降级（面板 → 增强 → 性能）=====
+  // 依据（2026-10-14 用 CDP Tracing / Performance.getMetrics 在本机实测）：主线程约 34% 被渲染帧管线吃掉，
+  // 其中 ProxyMain::BeginMainFrame 占主线程净忙的 76%（帧率 81~87 帧/秒，远超屏幕刷新率）；
+  // 把「纯装饰动画」停掉实测可降 27%~35%（34.4% -> 22.3%）。
+  // 最大的单一来源是本插件自己的机器人眨眼：它在 SVG <mask> 里的 <rect> 上做 scaleY，mask 动画拿不到
+  // 合成器，每帧都要主线程重算样式并重绘（实测该项独占约 1/4 主线程负载）；官方 shimmer 动的是
+  // background-position，同样无法合成。功能性 spinner（transform，可合成）不在降级范围内，保持旋转。
+  // 用 html[data-wbs-motion] 承载：CSS 常驻、只在属性存在时命中 ⇒ 关闭时零副作用、可字节级还原。
+  var PERF_MODE_KEY = 'workdaddy.motionMode';
+  function readPerfMode() {
+    try { var v = localStorage.getItem(PERF_MODE_KEY); return v === 'lite' || v === 'turbo' ? v : 'off'; } catch (e) { return 'off'; }
+  }
+  function applyPerfMode(mode) {
+    var m = mode === 'lite' || mode === 'turbo' ? mode : 'off';
+    try { if (m === 'off') localStorage.removeItem(PERF_MODE_KEY); else localStorage.setItem(PERF_MODE_KEY, m); } catch (e) {}
+    try {
+      var el = document.documentElement;
+      if (!el) return m;
+      if (m === 'off') el.removeAttribute('data-wbs-motion');
+      else el.setAttribute('data-wbs-motion', m);
+    } catch (e) {}
+    return m;
+  }
   // 样式：参考 WorkBuddy 个人中心菜单（@image#1）——纯白卡片、圆润、简洁分区、灰色副文案
   var css = document.createElement('style');
   css.id = 'wbs-style';
@@ -21933,8 +22033,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     'html.cb-dark .wbs-mdp-doc code,html[data-theme="dark"] .wbs-mdp-doc code{background:rgba(255,255,255,.1)}',
     'html.cb-dark .wbs-mdp-pre,html[data-theme="dark"] .wbs-mdp-pre{background:rgba(255,255,255,.055)}',
     'html.cb-dark .wbs-mdp-dock,html[data-theme="dark"] .wbs-mdp-dock{background:var(--wb-bg-popover,#202126);color:var(--wb-color-text-primary,#f2f3f5);border-left-color:rgba(255,255,255,.1);box-shadow:-12px 0 32px rgba(0,0,0,.34)}',
+    /* ===== 性能：动效降级（html[data-wbs-motion] 由 applyPerfMode 设置）===== */
+    /* lite：只停纯装饰动画 —— 自家机器人眨眼（SVG mask 内，不可合成）+ 官方 shimmer/扫光（background-position，不可合成）。 */
+    'html[data-wbs-motion="lite"] .wbs-robot-cutout,html[data-wbs-motion="lite"] .wbs-fab .eye{animation:none!important;-webkit-animation:none!important}',
+    'html[data-wbs-motion="lite"] [class*="text-shimmer"],html[data-wbs-motion="lite"] [class*="shining-text-sweep"],html[data-wbs-motion="lite"] [class*="scroll-to-bottom-dot"]{animation:none!important;-webkit-animation:none!important}',
+    /* turbo：页面内所有 animation 静止（含加载转圈），仅保留 transition 以免交互失去反馈。 */
+    'html[data-wbs-motion="turbo"] *,html[data-wbs-motion="turbo"] *::before,html[data-wbs-motion="turbo"] *::after{animation:none!important;-webkit-animation:none!important}'
   ].join('');
   (document.head || document.documentElement).appendChild(css);
+  applyPerfMode(readPerfMode());  // 面板未打开也要生效：页面加载即恢复上次选择
   start();
 
   window.__wbsWidget = {

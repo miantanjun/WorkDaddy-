@@ -12,6 +12,8 @@
  * 【E】readBody 真跑（从 daemon.js 切片 → new Function 实例化 → 起临时 HTTP 服务 + 裸 socket 客户端）
  *      三条不变式：一定 settle / 有界 / 空 body 是 {} 而非法 JSON 必须 reject
  * 【E7】对照组：把**旧实现**内联进来跑同一条探针 —— 证明这套探针真能发现缺陷
+ *      ⚠️ 探针（abort）与服务端解析请求头存在竞态 ⇒ 一律用 abortUntil 补发到目标达成，
+ *         禁止用「固定次数 + 精确计数」的写法（会随负载随机变红，实测 300 次偶少 3~7 次）
  * 【E8~E13】事件层边界（error / aborted / close / 恰好 settle 一次 / 超限销毁连接）
  * 【F】鉴权与契约的静态断言（公开集合只读、update-apply 受保护、非法 Origin 403）
  */
@@ -123,6 +125,18 @@ function abort(port) {
     socket.on('error', done);
   });
 }
+/**
+ * 反复 abort 直到 `probe()` 达到 target（或达到尝试上限）。
+ *
+ * 为什么要这样：单次 abort 是「发半截 body → 5ms 后 RST」，**与服务端解析请求头存在竞态**
+ * —— RST 若先于 `request` 事件抵达，那条连接就不会被计入。固定跑 N 次时实测 300 次里
+ * 偶少 3~7 次（负载越高越明显），于是 `=== 300` / `>= 200` 这类断言会随机器负载**随机变红**。
+ * 改成「补发到目标达成」后，断言回到确定性：少的那几次由重试补齐。
+ */
+async function abortUntil(port, probe, target, maxAttempts) {
+  for (let i = 0; i < maxAttempts && probe() < target; i++) await abort(port);
+  return probe();
+}
 function statusOf(res) { const m = res.match(/^HTTP\/1\.1 (\d{3})/); return m ? Number(m[1]) : null; }
 function jsonOf(res) { const i = res.indexOf('\r\n\r\n'); try { return JSON.parse(res.slice(i + 4)); } catch (_) { return null; } }
 function waitFor(fn, ms) {
@@ -169,17 +183,17 @@ async function main() {
   const settledInTime = await waitFor(() => s.state.settled > before, 3000);
   check(settledInTime, 'E6 客户端半截 body + RST 时服务端一定 settle（旧实现会永久挂起）');
 
-  // E7 批量：300 次中断后 pending 不增长
+  // E7 批量：补发到 ≥300 条被计入（探针有竞态，见 abortUntil 说明），全部 settle 后 pending 不增长
   const base = s.state;
   const startSettled = base.settled;
-  for (let i = 0; i < 300; i++) await abort(s.port);
-  const allSettled = await waitFor(() => base.settled - startSettled === 300, 10000);
-  check(allSettled && base.pending === 0, 'E7 300 次「半截 body + RST」后全部 settle，pending 回到 0（不累积挂起帧）');
+  await abortUntil(s.port, () => base.settled - startSettled, 300, 380);
+  const allSettled = await waitFor(() => base.settled - startSettled >= 300 && base.pending === 0, 10000);
+  check(allSettled, 'E7 「半截 body + RST」批量（≥300 次）后全部 settle，pending 回到 0（不累积挂起帧）');
   s.server.close();
 
   console.log('=== E7 对照组：旧实现跑同一条探针应当挂起 ===');
   const legacy = await startServer(legacyReadBody, small);
-  for (let i = 0; i < 200; i++) await abort(legacy.port);
+  await abortUntil(legacy.port, () => legacy.state.pending, 200, 320);
   const legacyGrew = await waitFor(() => legacy.state.pending >= 200, 3000);
   check(legacyGrew && legacy.state.settled === 0,
     'E8 对照：旧实现 200 次中断后 pending=' + legacy.state.pending + '、settled=' + legacy.state.settled + '（证明探针真能发现缺陷）');
@@ -232,9 +246,16 @@ async function main() {
   {
     const publicPaths = (daemonSrc.match(/const PUBLIC_API_PATHS = new Set\(\[[\s\S]*?\]\)/) || [''])[0]
       .split(/\r?\n/).map((l) => (l.match(/'(\/api\/[^']*)'/) || [])[1]).filter(Boolean);
-    check(publicPaths.length === 5, 'F1 公开路径集合解析出 5 条（实际 ' + publicPaths.length + '）');
-    check(publicPaths.every((p) => !new RegExp("req\\.method === 'POST' && p === '" + p.replace(/[/]/g, '\\/') + "'").test(daemonSrc)),
-      'F2 公开路径全部只读：没有任何一条出现在 POST 分支里（否则会变成免鉴权写入口）');
+    check(publicPaths.length === 6, 'F1 公开路径集合解析出 6 条（实际 ' + publicPaths.length + '）');
+    // 例外白名单：一键恢复重启是**有意的**公开 POST —— 仅 loopback 可达、权限等同本地
+    // launcher，且处理线程会重探客户端进程（非 true 即 409），不做静默执行；它与本地
+    // CLI/启动器同级，不构成远程写入口。白名单必须显式列出，不得写成「允许任意 POST」。
+    const POST_ALLOWED_PUBLIC = ['/api/client/relaunch'];
+    check(publicPaths.every((p) => POST_ALLOWED_PUBLIC.includes(p)
+      || !new RegExp("req\\.method === 'POST' && p === '" + p.replace(/[/]/g, '\\/') + "'").test(daemonSrc)),
+      'F2 公开路径除显式白名单外全部只读：没有任何一条出现在 POST 分支里（否则会变成免鉴权写入口）');
+    check(POST_ALLOWED_PUBLIC.every((p) => publicPaths.includes(p)),
+      'F3 反向守卫：POST 例外白名单里的每一条都必须在公开路径集合内（防白名单腐烂成永久豁免）');
     check(publicPaths.indexOf('/api/update-apply') < 0 && /req\.method === 'POST' && p === '\/api\/update-apply'/.test(daemonSrc),
       'F3 /api/update-apply（会杀 WorkBuddy 再装）不在公开集合里，走 token 鉴权');
     check(/if \(!isApiRequestAuthorized\(req, p\)\) \{[\s\S]{0,120}?json\(res, 401/.test(daemonSrc),

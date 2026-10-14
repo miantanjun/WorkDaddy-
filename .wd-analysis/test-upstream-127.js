@@ -52,8 +52,8 @@ function section(t) { console.log(t); }
 section('[A] theme-patches.js —— P1 主体：3 条新补丁登记 + 旧条目未丢');
 /* ==================================================================== */
 
-ok(Array.isArray(patches) && patches.length === 100,
-  'A1 条目数 = 100（1.2.6 的 96 + 1.2.7 的 patch-102/103/104 + 1.2.8 的 patch-105/106 − 1.2.8 删除的 patch-41）', Array.isArray(patches) ? patches.length : typeof patches);
+ok(Array.isArray(patches) && patches.length === 101,
+  'A1 条目数 = 101（1.2.6 的 96 + 1.2.7 的 patch-102/103/104 + 1.2.8 的 patch-105/106 − 1.2.8 删除的 patch-41 + 1.2.12 的 patch-107）', Array.isArray(patches) ? patches.length : typeof patches);
 
 const byId = new Map(patches.map((p) => [p && p.id, p]));
 ok(byId.has('patch-83') && byId.has('patch-99') && byId.has('patch-101'),

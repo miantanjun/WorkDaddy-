@@ -59,7 +59,7 @@ section('[A] 主题三件套必须同批（拆批 = 暂存按钮毛玻璃丢失�
 /* ==================================================================== */
 
 const byId = new Map(patches.map((p) => [p && p.id, p]));
-ok(Array.isArray(patches) && patches.length === 100, 'A1 theme-patches 条目数 = 100', Array.isArray(patches) ? patches.length : typeof patches);
+ok(Array.isArray(patches) && patches.length === 101, 'A1 theme-patches 条目数 = 101（新增 1.2.12 的 patch-107）', Array.isArray(patches) ? patches.length : typeof patches);
 ok(!byId.has('patch-41'), 'A2 ⭐ patch-41 已按上游删除（.wbs-stash-inline 毛玻璃改由变量接管，不许回填）');
 const p105 = byId.get('patch-105');
 const p106 = byId.get('patch-106');

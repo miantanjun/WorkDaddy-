@@ -436,6 +436,24 @@ function createCreditUsageStore(options = {}) {
     try { fs.chmodSync(dbPath, 0o600); } catch (_) {}
   }
 
+  async function hasModelRateLimitElsewhere({ uid, modelId, resetAt, now }) {
+    await initialize();
+    const accountUid = validIdentity(uid, 'uid');
+    const id = validIdentity(modelId, 'model id');
+    const reset = Number(resetAt);
+    if (!Number.isSafeInteger(reset) || reset < 0) throw new Error('限流解封时间无效');
+    const timestamp = Number(now === undefined ? Date.now() : now);
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0) throw new Error('限流查询时间无效');
+    const rows = await db.all(
+      `SELECT 1
+       FROM model_rate_limit_records
+       WHERE profile_id = ? AND uid <> ? AND model_id = ? AND reset_at = ? AND reset_at > ?
+       LIMIT 1`,
+      [profileId, accountUid, id, reset, timestamp]
+    );
+    return rows.length > 0;
+  }
+
   async function listModelRateLimits(uids, now) {
     await initialize();
     const accountUids = Array.from(new Set((Array.isArray(uids) ? uids : []).map((uid) => validIdentity(uid, 'uid'))));
@@ -488,6 +506,7 @@ function createCreditUsageStore(options = {}) {
     saveHistoryUsage,
     saveDailyCheckin,
     saveModelRateLimit,
+    hasModelRateLimitElsewhere,
     listModelRateLimits,
   };
 }

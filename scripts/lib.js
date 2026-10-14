@@ -112,6 +112,25 @@ function wdCompatConfiguredExe() {
   }
 }
 
+function wdCompatWindowsExeCandidates(options = {}) {
+  const pathApi = path.win32;
+  const localAppData = String(options.localAppData || process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'));
+  const profileId = String(options.profileId || process.env.WBSWITCH_PROFILE || 'workbuddy-cn').trim().toLowerCase();
+  const configured = String(options.configured || '').trim();
+  const candidates = [];
+  // CodeBuddy cannot expose WorkBuddy's storage binding. Keep both official
+  // WorkBuddy binaries available as key providers when importing their
+  // encrypted account backups into a CodeBuddy profile.
+  if (profileId === 'workbuddy-cn' || profileId === 'workbuddy-ai') {
+    if (configured) candidates.push(configured);
+  }
+  candidates.push(
+    pathApi.join(localAppData, 'Programs', 'WorkBuddy', 'WorkBuddy.exe'),
+    pathApi.join(localAppData, 'Programs', 'WorkBuddyAI', 'WorkBuddyAI.exe'),
+  );
+  return [...new Set(candidates.filter(Boolean))];
+}
+
 function wdCompatExeCandidates() {
   if (process.env.WORKDADDY_WB_EXE) return [process.env.WORKDADDY_WB_EXE];
   const home = os.homedir();
@@ -125,13 +144,12 @@ function wdCompatExeCandidates() {
     return apps;
   }
   if (IS_WIN) {
-    const base = process.env.LOCALAPPDATA || '';
     const configured = wdCompatConfiguredExe();
-    return [
-      ...(configured ? [configured] : []),
-      path.join(base, 'Programs', 'WorkBuddy', 'WorkBuddy.exe'),
-      path.join(base, 'Programs', 'WorkBuddy AI', 'WorkBuddy AI.exe'),
-    ].filter(Boolean);
+    return wdCompatWindowsExeCandidates({
+      localAppData: process.env.LOCALAPPDATA || '',
+      profileId: process.env.WBSWITCH_PROFILE || 'workbuddy-cn',
+      configured,
+    });
   }
   return ['/opt/WorkBuddy/workbuddy', '/opt/WorkBuddy/workbuddy-ai'];
 }
@@ -2174,6 +2192,7 @@ function switchTo(dataDir, uid, log = () => {}) {
 module.exports = {
   isWbEncryptedEnvelope, // [wd-compat]
   wdCompatExeCandidates, // [wd-compat]
+  wdCompatWindowsExeCandidates, // [wd-compat]
   wdCompatContainsEncryptedFields, // [wd-compat]
   wdCompatText, // [wd-compat]
   wdCompatAuthToken, // [wd-compat]

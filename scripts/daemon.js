@@ -29,7 +29,8 @@ const os = require('os');
 const crypto = require('crypto');
 const net = require('net');
 const sessionSync = require('./session-sync.js');
-const { spawn, spawnSync } = require('child_process');
+const { spawn, spawnSync, execFile } = require('child_process');
+const PROBE_CLIENT_RUNNING = process.argv.includes('--probe-client-running');
 const {
   assertSameProcessIdentity,
   detectWindowsPrivilege,
@@ -554,7 +555,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         （删 acIsDarkTheme / watchThemeForButtons / syncAccountFade / syncModelFade）。
 //         同版修复：会话同步冲突误报 / 切号后需再切一次才能同步 / 模型限流写入被服务端白名单拒 /「空间」
 //         分组反复折叠 / 引导会话被暂存队列永久暂停；新增「中文思考」开关（写入官方全局自定义指令）。
-const DAEMON_VERSION = '1.9.6';
+const DAEMON_VERSION = '1.9.7';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 //
@@ -568,9 +569,14 @@ const DAEMON_VERSION = '1.9.6';
 // 1.2.11 吸纳（v1.9.6）：会话列表行内「同步到其他账号」按钮 / 切号提示文案改为「请刷新窗口」。
 //         保持不动（codebuddy / mac 专用）：IDE 状态栏浮层、selectIdeTargets、
 //         patch-44 状态弹层排除、reloadIdeWorkbenchWindows、IDE 账号菜单去重样式。
+// 1.2.12+1.2.13 吸纳（2026-10-13）：A3/A4/B4 已全落地（账号面板按日保活 / 自然日判据等）。
+// 1.2.14 吸纳（v1.9.7）：★ 修复「客户端运行状态探测不断派生子进程」的递归派生
+//         （探测进程不再派生探测进程，避免进程链与系统负载升高）+ macOS 探针 / pgrep 超时收紧。
+//         ⚠️ 上游同版的 persona 系列（scripts/persona.js + 2 路由 + inject.js UI）**不吸纳**
+//            —— 上游自己在 inject.js 里把 UI 入口全部注释停用了。
 // ⚠️ 另注：`scripts/session-sync.js` 的 fixture 基线**仍是 1.2.8**（那是产物溯源用的真实原文，
 //    逐字节可 diff），它与这里的「发布版本基线」是两件事，不要混为一谈。
-const UPSTREAM_VERSION = '1.2.11';
+const UPSTREAM_VERSION = '1.2.14';
 // 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.5）。
 // 本机 fork 用自己的修改版版本号（当前 1.8.x = 上游 1.2.6 基线 + 本地增强），否则更新检查会误判。
 // 1.5.0-b：省 token 专项批次 —— 账号页通用折叠卡片（自动切换 / 换号续跑 / 上下文体检三卡默认收起，
@@ -590,7 +596,7 @@ const UPSTREAM_VERSION = '1.2.11';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.9.6-20261002-upstream-1211-intake-r1';
+const DAEMON_BUILD_ID = 'release-1.9.7-20261014-upstream-1214-probe-recursion-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -2842,6 +2848,109 @@ function onCdpEvent(method, params) {
   }
 }
 
+// [客户端调试端口丢失检测] 配套状态与判定（纯函数部分可单测，见 test/client-debug-relaunch.test.js）。
+// 背景：WorkBuddy 官方自动更新后自行重启，新进程丢失 --remote-debugging-port，
+// daemon 表现为「进程在跑但 CDP 不可达」，cdpLoop 会无限重试。连续命中阈值后
+// 标记 needsDebugRelaunch，由 /api/status 与根路径状态页向用户暴露并提供一键恢复。
+// 为 VM 切片单测，以下块只依赖 log / Date，不依赖 workBuddyRunning（由调用方注入结果）。
+// __wbsClientDebugStateBlockStart
+const CLIENT_DEBUG_MISS_THRESHOLD = 3;
+const clientDebugState = { consecutiveMiss: 0, needsDebugRelaunch: false, updatedAt: 0 };
+
+function resetClientDebugState() {
+  clientDebugState.consecutiveMiss = 0;
+  if (clientDebugState.needsDebugRelaunch) {
+    clientDebugState.needsDebugRelaunch = false;
+    clientDebugState.updatedAt = Date.now();
+  }
+  return clientDebugState;
+}
+
+// clientRunning: true=进程在跑 / false=没跑 / null=未知（探测失败时不计数，避免误报）
+function updateClientDebugState({ cdpConnected, clientRunning }) {
+  if (cdpConnected || clientRunning === false) {
+    return resetClientDebugState();
+  }
+  if (clientRunning !== true) return clientDebugState;
+  clientDebugState.consecutiveMiss += 1;
+  if (clientDebugState.consecutiveMiss >= CLIENT_DEBUG_MISS_THRESHOLD && !clientDebugState.needsDebugRelaunch) {
+    clientDebugState.needsDebugRelaunch = true;
+    clientDebugState.updatedAt = Date.now();
+    log('[cdp] 检测到 WorkBuddy 正在运行但调试端口不可达（疑似官方自动更新后重启），请在状态页一键恢复');
+  }
+  return clientDebugState;
+}
+// __wbsClientDebugStateBlockEnd
+
+function safeClientRunning() {
+  try {
+    // workBuddyRunning() deliberately treats a failed non-Windows probe as
+    // "still running" for destructive account operations. The diagnostic
+    // state must preserve that uncertainty as null, otherwise a broken pgrep
+    // or /proc probe can manufacture a recovery warning.
+    if (IS_WIN) {
+      const binary = resolveWorkBuddyBinary();
+      if (!binary) return null;
+      return verifiedWindowsWorkBuddyProcesses(binary).length > 0;
+    }
+    if (IS_LINUX) {
+      return linuxWorkBuddyPids(WORKBUDDY_BINARY).length > 0;
+    }
+    const result = spawnSync('pgrep', ['-f', WORKBUDDY_APP], {
+      stdio: 'ignore', timeout: IS_MAC ? CLIENT_RUNNING_MAC_SCAN_TIMEOUT_MS : 5000,
+    });
+    if (result.error || result.status === null) return null;
+    return result.status === 0;
+  } catch (_) {
+    return null;
+  }
+}
+
+// /api/status 曾直接在请求线程里调用 safeClientRunning()：Windows 上这会同步冷启
+// PowerShell 做 CIM 进程枚举（实测 2.4-6.7s），把状态接口拖到远超 launcher HTTP
+// 探测预算（1500ms）的程度，温启动时 launcher 发现不到已在监听的 daemon，误选
+// 备用 UI 端口并覆写 ui-port.json，最终以「daemon 未绑定当前 UI 端口与当前 profile
+// 状态」失败退出。现改为后台定时刷新 + 请求直读缓存，状态接口恒为毫秒级；缓存
+// 未就绪时为 null（未知），与探测失败时的既有语义一致。
+// 注意：刷新必须走一次性子进程（--probe-client-running）——同步探测会阻塞 daemon
+// 事件循环数秒，放在主线程里只会把「每次请求慢」变成「周期性不可用」。
+const clientRunningState = { value: null, checkedAt: 0 };
+const CLIENT_RUNNING_REFRESH_MS = 5000;
+// macOS 的 pgrep 会扫描所有进程；系统过载时必须快速返回未知，不能让多个慢探针叠加。
+const CLIENT_RUNNING_MAC_SCAN_TIMEOUT_MS = 2000;
+// Windows 的验证包含 CIM 查询，保留较长预算；macOS 探针则在扫描超时前结束。
+const CLIENT_RUNNING_PROBE_TIMEOUT_MS = IS_MAC ? 4000 : 15000;
+let clientRunningRefreshInFlight = false;
+function refreshClientRunning() {
+  // 探测子进程会从本文件顶部开始执行；即使未来有调用路径早于启动门禁，
+  // 也不能让它再次派生 --probe-client-running，避免形成进程链。
+  if (PROBE_CLIENT_RUNNING) return Promise.resolve(clientRunningState.value);
+  if (clientRunningRefreshInFlight) return Promise.resolve(clientRunningState.value);
+  clientRunningRefreshInFlight = true;
+  return new Promise((resolve) => {
+    execFile(process.execPath, [__filename, '--probe-client-running'], {
+      encoding: 'utf8', timeout: CLIENT_RUNNING_PROBE_TIMEOUT_MS, windowsHide: true,
+    }, (error, stdout) => {
+      // 探测失败（超时/异常/输出不可解析）时保留上一次已知值，绝不让状态接口失败
+      if (!error) {
+        try { clientRunningState.value = JSON.parse(String(stdout)).running; } catch (_) {}
+      }
+      clientRunningState.checkedAt = Date.now();
+      clientRunningRefreshInFlight = false;
+      resolve(clientRunningState.value);
+    });
+  });
+}
+// 仅由取得单实例锁的正常 daemon 启动。不能在模块顶层调用刷新：
+// --probe-client-running 也会加载本文件，提前刷新会递归拉起探测子进程。
+function startClientRunningMonitor() {
+  refreshClientRunning().catch(() => {});
+  if (typeof setInterval === 'function') {
+    const timer = setInterval(() => { refreshClientRunning().catch(() => {}); }, CLIENT_RUNNING_REFRESH_MS);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+  }
+}
+
 async function cdpLoop() {
   for (;;) {
     if (!cdp.connected) {
@@ -2850,6 +2959,16 @@ async function cdpLoop() {
       } catch (e) {
         log(`[cdp] 连接异常: ${e.message}`);
       }
+    }
+    // [客户端调试端口丢失检测] WorkBuddy 官方自动更新器装完更新会自行重启应用，
+    // 新进程不再带 --remote-debugging-port：此时进程在跑、CDP 永远连不上，
+    // 表现为右下角机器人按钮消失且无任何可操作的提示。这里只做检测与状态暴露，
+    // 不静默杀进程；恢复由用户在状态页一键触发（POST /api/client/relaunch）。
+    try {
+      // clientRunning 已由后台一次性子进程刷新，避免 cdpLoop 周期性阻塞事件循环。
+      updateClientDebugState({ cdpConnected: cdp.connected, clientRunning: clientRunningState.value });
+    } catch (e) {
+      log(`[cdp] 客户端状态探测异常: ${e.message}`);
     }
     await new Promise((r) => setTimeout(r, CDP_RECONNECT_MS));
   }
@@ -3458,7 +3577,7 @@ function relaunchWorkBuddy() {
         const launcherHome = resolveLauncherHome(command);
         if (launcherHome) childEnv.HOME = launcherHome;
       }
-      const child = spawn(command, environmentMode ? [] : [`--remote-debugging-port=${port}`], {
+      const child = spawn(command, environmentMode ? [] : [`--remote-debugging-port=${port}`, ...(PROFILE.nativeDebugPort ? [`--inspect=127.0.0.1:${PROFILE.nativeDebugPort}`] : [])], {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
@@ -3492,7 +3611,7 @@ function relaunchWorkBuddy() {
       throw new Error(`未找到 WorkBuddy 可执行文件: ${WORKBUDDY_BINARY}`);
     }
     log(`[logout] 未找到 WorkDaddy.app，直接重新启动 WorkBuddy（带 CDP 端口 ${port}）`);
-    const child = spawn(WORKBUDDY_BINARY, [`--remote-debugging-port=${port}`], {
+    const child = spawn(WORKBUDDY_BINARY, [`--remote-debugging-port=${port}`, ...(PROFILE.nativeDebugPort ? [`--inspect=127.0.0.1:${PROFILE.nativeDebugPort}`] : [])], {
       detached: true,
       stdio: 'ignore',
     });
@@ -5337,13 +5456,31 @@ async function runIdleSwitchBack(plan) {
     const banner = await readLimitBanner().catch(() => null);
     if (banner && banner.hit) throw new Error('页面上还有限流横幅，先让限流流程处理');
 
+    // ⭐ ① 切号**之前**先同步（与手动切号 / 限流切号共用 preSyncBeforeSwitch 同一份实现）。
+    //    2026-09-30 定稿的规则：不论自动切号还是手动切号，一律「先复制同步会话、再切号」。
+    //    本路径此前漏改，仍是「先切后同步」⇒ 复制正好落在 Page.reload 窗口里（reload 期间
+    //    官方要 flush 旧账号会话 + load 新账号会话，而这些正是被复制的文件）⇒ 撞
+    //    applySnapshot 的 CAS 保护 ⇒ 抛错回滚 ⇒ 作业 partial / 报「复制失败」。
+    //    不传 holdGate：紧接着走的 automationSwitchAccount 自带串行 tail，与限流切号路径
+    //    同一判据（见 preSyncBeforeSwitch 内的注释）。
+    //    预同步失败（含「已有会话同步在跑」）⇒ 抛错 ⇒ 本轮不切号，下一轮 tick 再试。
+    const pre = await preSyncBeforeSwitch(report.fromUid, report.primaryUid, {
+      targetNickname: report.primaryNickname,
+      reason: 'idle-switchback',
+    });
+    if (!pre || pre.ok !== true) {
+      throw new Error(String((pre && pre.error) || '会话同步未完成，已中止切回'));
+    }
+
     await automationSwitchAccount({ uid: report.primaryUid });
     const after = currentAccount();
     const afterUid = after ? String(after.uid || '') : '';
     if (afterUid !== report.primaryUid) {
       throw new Error('切回后当前账号不是主账号（期望 ' + report.primaryUid.slice(0, 8) + '，实际 ' + (afterUid || '读不到') + '）');
     }
-    // 切号完成后必须同步会话（与手动切号共用同一份实现）
+    // ② 切号后再同步一次：规则约束的是**顺序**（同步必须在切号之前），不是「切号后不许同步」。
+    //    此时预同步已完成 ⇒ 本调用按同判据幂等 skipped（不写盘、不撞 reload 窗口），
+    //    只用于兜住「预同步返回后、切号进行中」这段窗口里新产生的写入。
     const autoCopyJob = autoCopyAfterAccountSwitch(report.fromUid, report.primaryUid, 'idle-switchback');
     const outcome = {
       status: 'switched',
@@ -5597,6 +5734,12 @@ async function automationAccountSwitchGuarded(account, detail) {
   limitFailoverNotify('warning', '定时任务仍在执行，已暂缓切回主账号（等回复跑完会自动收回）');
   return { ok: true, uid: String(target.uid || ''), switched: false, deferred: true, reason: settled.reason, waitedMs: settled.waitedMs };
 }
+function automationNotificationNamespace(task, runId) {
+  // Navigation-scoped popup cleanup is intentionally restartable. Its success
+  // notices describe the popup, so a task-level namespace lets a repeated page
+  // navigation update the existing toast instead of stacking another copy.
+  return taskIsPassiveCleanup(task) ? 'automation-task:' + task.id : 'automation:' + runId;
+}
 function startAutomationRun(task, event = null) {
   if (event && (event.navigationSerial == null || event.pageSessionId == null)) event = { ...event, navigationSerial: event.navigationSerial == null ? mainFrameNavigationSerial : event.navigationSerial, pageSessionId: event.pageSessionId || cdpPageSessionId };
   if (automationRuns.size > 200) {
@@ -5834,7 +5977,7 @@ function startAutomationRun(task, event = null) {
       return result;
     } finally { completionReportRunning = false; }
   };
-  const runNotifier = createAutomationNotifier(automationNotifyToast, 'automation:' + id);
+  const runNotifier = createAutomationNotifier(automationNotifyToast, automationNotificationNamespace(task, id));
   run.cleanupNotifications = runNotifier.cleanup;
   const publicAccounts = () => listAccounts(DATA_DIR).map(a => ({uid:a.uid,nickname:a.nickname,isPrimary:primaryAccountStore.get()===a.uid}));
   const publicCurrent = () => { const a = currentAccount(); return a ? {uid:a.uid,nickname:a.nickname,isPrimary:primaryAccountStore.get()===a.uid} : null; };
@@ -5942,8 +6085,97 @@ function saveCheckinCache(cache) {
 
 // 加密备份的刷新结果只在 daemon 生命周期内缓存，绝不把解密后的 token 写回磁盘。
 const backupAuthRuntimeCache = new Map();
+// ── B4（上游 1.2.13）：账号面板打开时「按日保活」全部账号 ──
+// 痛点：以前只有「切到某个账号」才会刷新它的 token ⇒ 长期不切的账号会一直过期，
+// 面板上显示的有效期也是旧的。现在把保活提到「面板打开」时统一做（每账号每天最多一次）。
+// ⚠️ 三条硬约束（照抄上游语义）：
+//   ① 只缓存**公开时间字段**（lastRefreshTime / expiresAt / refreshExpiresAt），
+//      密文备份刷新后**绝不**把解密出来的 token 写回磁盘（加密路径仍只进内存 backupAuthRuntimeCache）；
+//   ② `accountTokenRefreshInFlight` 复用进行中的批次 ⇒ 快速开关面板不会产生刷新风暴；
+//   ③ 单账号并发上限 3。
+let accountTokenRefreshInFlight = null;
+const TOKEN_REFRESH_STATE_FILE = path.join(DATA_DIR, 'token-refresh-state.json');
+let tokenRefreshState = null;
 
-/** 刷新备份账号凭证：临期惰性刷新，或距上次刷新超过一天时执行保活。 */
+/** 备份文件的「指纹」（mtime+size）：文件换了，落盘的那份刷新时间就不再可信。 */
+function accountBackupSignature(file) {
+  try {
+    const stat = fs.statSync(file);
+    return stat.mtimeMs + ':' + stat.size;
+  } catch (_) {
+    return '';
+  }
+}
+
+function loadTokenRefreshState() {
+  if (tokenRefreshState) return tokenRefreshState;
+  let parsed = null;
+  try { parsed = JSON.parse(fs.readFileSync(TOKEN_REFRESH_STATE_FILE, 'utf8')); } catch (_) {}
+  tokenRefreshState = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  if (!tokenRefreshState.accounts || typeof tokenRefreshState.accounts !== 'object' || Array.isArray(tokenRefreshState.accounts)) {
+    tokenRefreshState.accounts = {};
+  }
+  return tokenRefreshState;
+}
+
+function saveTokenRefreshState() {
+  const tmp = TOKEN_REFRESH_STATE_FILE + '.tmp.' + process.pid;
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(tmp, JSON.stringify(loadTokenRefreshState(), null, 2) + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, TOKEN_REFRESH_STATE_FILE);
+    try { fs.chmodSync(TOKEN_REFRESH_STATE_FILE, 0o600); } catch (_) {}
+  } catch (error) {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
+    log('[token-refresh] 写入每日刷新状态失败: ' + redactDiagnosticText((error && error.message) || error, 300));
+  }
+}
+
+/** 只有「备份文件未变」时，落盘的那份刷新时间才可信（否则宁可当没刷过）。 */
+function persistedTokenRefreshState(uid, signature) {
+  const record = loadTokenRefreshState().accounts[String(uid || '')];
+  if (!record || record.signature !== signature) return null;
+  return record;
+}
+
+function rememberTokenRefreshSuccess(uid, file, auth) {
+  const signature = accountBackupSignature(file);
+  if (!signature) return;
+  const lastRefreshTime = normalizeTokenTimestamp(auth && auth.lastRefreshTime) || Date.now();
+  loadTokenRefreshState().accounts[String(uid)] = {
+    signature,
+    lastRefreshTime,
+    expiresAt: normalizeTokenTimestamp(auth && auth.expiresAt),
+    refreshExpiresAt: normalizeTokenTimestamp(auth && auth.refreshExpiresAt),
+  };
+  saveTokenRefreshState();
+}
+
+/**
+ * 账号列表 + 运行时刷新的**公开时间字段**合并。
+ * 密文备份不能把解密后的 token 写回磁盘，但账号页仍应显示刚刷新出来的新有效期。
+ */
+function listAccountsWithRuntimeTokenCache() {
+  return listAccounts(DATA_DIR).map((account) => {
+    let file;
+    try { file = accountBackupFile(account.uid); } catch (_) { return account; }
+    const signature = accountBackupSignature(file);
+    const cached = backupAuthRuntimeCache.get(account.uid);
+    if (cached && cached.signature !== signature) backupAuthRuntimeCache.delete(account.uid);
+    const persisted = persistedTokenRefreshState(account.uid, signature);
+    const auth = cached && cached.signature === signature && cached.root && cached.root.auth
+      ? cached.root.auth
+      : persisted;
+    if (!auth) return account;
+    return Object.assign({}, account, {
+      tokenExpiresAt: auth.expiresAt || null,
+      refreshExpiresAt: auth.refreshExpiresAt || null,
+      lastRefreshTime: auth.lastRefreshTime || null,
+    });
+  });
+}
+
+/** 刷新备份账号凭证：临期惰性刷新，或当天尚未成功刷新时执行保活。 */
 async function refreshAccountBackupToken(uid, options = {}) {
   const file = path.join(DATA_DIR, 'accounts', uid + '.info');
   let root;
@@ -5964,10 +6196,17 @@ async function refreshAccountBackupToken(uid, options = {}) {
   const auth = root && root.auth && typeof root.auth === 'object' ? root.auth : null;
   if (!auth) return { root, skipped: true, reason: 'no-auth' };
   const now = Date.now();
-  const lastRefreshTime = normalizeTokenTimestamp(auth.lastRefreshTime);
+  const persisted = persistedTokenRefreshState(uid, sourceSignature);
+  // 备份里写的 lastRefreshTime 可能因「文件被换过」而作废 ⇒ 与落盘状态取较晚的一个。
+  const authLastRefreshTime = normalizeTokenTimestamp(auth.lastRefreshTime) || 0;
+  const persistedLastRefreshTime = normalizeTokenTimestamp(persisted && persisted.lastRefreshTime) || 0;
+  const lastRefreshTime = Math.max(authLastRefreshTime, persistedLastRefreshTime) || null;
+  // 判据按「自然日」而不是「满 24 小时」（上游 1.2.13）：跨零点即算新的一天。
+  const lastRefreshDay = lastRefreshTime === null ? null : todayStr(new Date(lastRefreshTime));
   const dailyDue = options.dailyKeepalive === true &&
-    (lastRefreshTime === null || now - lastRefreshTime >= TOKEN_REFRESH_DAY_MS);
-  if (!dailyDue && !shouldRefreshAccessToken(auth, now)) return { root, skipped: true };
+    (lastRefreshDay === null || lastRefreshDay !== todayStr(new Date(now)));
+  if (options.dailyKeepalive === true && !dailyDue) return { root, skipped: true };
+  if (options.force !== true && !dailyDue && !shouldRefreshAccessToken(auth, now)) return { root, skipped: true };
 
   const result = await refreshAuthToken(auth, { apiHost: PROFILE.apiHost, fetchImpl: globalThis.fetch, now });
   if (!result.ok) {
@@ -5991,7 +6230,46 @@ async function refreshAccountBackupToken(uid, options = {}) {
     return { root, refreshed: false, error: 'write-account-failed: ' + e.message };
   }
   backupAuthRuntimeCache.delete(uid);
+  rememberTokenRefreshSuccess(uid, file, result.auth);
   return { root: nextRoot, refreshed: true, persisted: true };
+}
+
+/**
+ * 打开账号面板时按日保活全部备份账号 —— 避免「只有切过去的账号才获得一次刷新机会」。
+ * 刷新请求限并发（3），并复用进行中的批次，避免快速开关面板造成 refresh token 风暴。
+ */
+async function refreshAllAccountTokensOnPanelOpen() {
+  if (accountTokenRefreshInFlight) return accountTokenRefreshInFlight;
+  const task = (async () => {
+    const accounts = listAccounts(DATA_DIR);
+    const results = new Array(accounts.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < accounts.length) {
+        const index = next++;
+        const uid = accounts[index].uid;
+        try {
+          const result = await refreshAccountBackupToken(uid, { dailyKeepalive: true, force: true });
+          results[index] = { refreshed: result.refreshed === true, skipped: result.skipped === true, failed: !!result.error };
+        } catch (_) {
+          results[index] = { refreshed: false, skipped: false, failed: true };
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, accounts.length) }, worker));
+    return {
+      ok: true,
+      total: results.length,
+      refreshed: results.filter((item) => item && item.refreshed).length,
+      skipped: results.filter((item) => item && item.skipped).length,
+      failed: results.filter((item) => item && item.failed).length,
+    };
+  })();
+  const wrapped = task.finally(() => {
+    if (accountTokenRefreshInFlight === wrapped) accountTokenRefreshInFlight = null;
+  });
+  accountTokenRefreshInFlight = wrapped;
+  return wrapped;
 }
 
 /**
@@ -8340,7 +8618,7 @@ async function prepareSessionExport(ids) {
   const selectedIds = normalizeSessionIdBatch(ids);
   if (!selectedIds.length) throw new Error('未选择会话');
   const rows = await sqliteQuery(
-    'SELECT ' + SESSION_COPY_COLUMNS.join(',') + ' FROM sessions WHERE id IN (' + sqlPlaceholders(selectedIds) + ') AND deleted_at IS NULL;',
+    'SELECT ' + SESSION_COPY_COLUMNS.join(',') + ' FROM sessions WHERE id IN (' + sqlPlaceholders(selectedIds) + ') AND deleted_at IS NULL AND COALESCE(is_background_automation, 0) = 0;',
     selectedIds
   );
   const byId = new Map(rows.map((row) => [String(row.id), row]));
@@ -8487,6 +8765,35 @@ async function copySessionRecord(src, targetUid, options = {}) {
     return { status: 'suppressed', sourceId: src.id, targetId: null, failedFiles: 0, copiedBytes: 0, suppressed: true };
   }
   const perform = async () => {
+  // ── A3（上游 1.2.12）：自动同步收尾时维护脏索引 ──
+  //   · 有内容写入（copiedBytes > 0）⇒ 给「源 + 目标」打**粘性** sessionSynced 标记：
+  //     保留双方继续被其他目的地选中的资格；具体谁还要干活由映射修订号决定。
+  //   · 无内容写入 ⇒ 清掉源上的非粘性脏标记（expectedAt 守卫：并发到来的新事件不许被旧的在飞清理抹掉）。
+  //   ⚠️ 只在 options.auto 生效 —— 手动复制一律不碰（dirtyMarker 也只在 auto 时才取）。
+  //   ⚠️ 本机该索引**当前没有消费者**（isAutoCopyRowCleanByDirty 的 fingerprintVersion===2 恒不成立）
+  //      ⇒ 这一段是**零行为变化**的铺路代码，为 A5（修订号快路径）预留，不是新功能。
+  //   ⚠️ 本地加固：整段 try/catch —— 索引异常绝不许影响复制主流程（与下面 fail-open 注释同精神）。
+  const dirtyIndex = options.auto && typeof getSessionDirtyIndex === 'function' ? getSessionDirtyIndex() : null;
+  const dirtyMarker = dirtyIndex ? dirtyIndex.get(sourceUid, src.id) : null;
+  const finishAutoDirty = (targetId, changed = false) => {
+    try {
+      if (!options.auto) return;
+      if (changed && typeof markSessionDirty === 'function') {
+        const retain = (uid, id) => {
+          const current = dirtyIndex && dirtyIndex.get(uid, id);
+          if (!current || current.event !== 'sessionSynced') {
+            markSessionDirty(uid, id, 'sessionSynced', current ? current.at : undefined);
+          }
+        };
+        retain(sourceUid, src.id);
+        if (targetId) retain(targetUid, targetId);
+        return;
+      }
+      if (dirtyMarker && dirtyMarker.event !== 'sessionSynced' && typeof clearSessionDirty === 'function') {
+        clearSessionDirty(sourceUid, src.id, dirtyMarker.at);
+      }
+    } catch (err) { log('[session-dirty] 收尾标记异常（忽略）: ' + ((err && err.message) || err)); }
+  };
   let ownerIds = lineageId ? getAutoCopySessionMemberRecords(DATA_DIR, lineageId).map((member) => member.id) : [];
   if (sourceUid && lineageId) {
     const mapping = getAutoCopyMapping(DATA_DIR, lineageId, targetUid);
@@ -8503,6 +8810,7 @@ const files = await copySessionFiles(wbHome, src.id, mapping.targetId, ownerIds,
           status: files.failed ? 'partial' : 'copied',
           failedFiles: files.failed,
         });
+        finishAutoDirty(mapping.targetId, Number(files.copiedBytes) > 0);
         return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: mapping.targetId, failedFiles: files.failed, copiedBytes: Number(files.copiedBytes) || 0, workspacePending: files.workspacePending };
       }
       deleteAutoCopyMapping(DATA_DIR, lineageId, targetUid);
@@ -8542,6 +8850,7 @@ const files = await copySessionFiles(wbHome, src.id, canonicalId, ownerIds, { sk
           status: files.failed ? 'partial' : 'copied',
           failedFiles: files.failed,
         });
+        finishAutoDirty(canonicalId, Number(files.copiedBytes) > 0);
         return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: canonicalId, failedFiles: files.failed, copiedBytes: Number(files.copiedBytes) || 0, workspacePending: files.workspacePending };
       }
     }
@@ -8563,6 +8872,7 @@ const files = await copySessionFiles(wbHome, src.id, canonicalId, ownerIds, { sk
       });
     }
     log(`[sessions-auto-copy] ${adopted.adopted === 'merge-lineage' ? '血缘被拆开但目标账号已有同源会话，已合并并复用' : '登记缺失但目标账号已有同源会话，复用'} ${String(adoptedId).slice(0, 8)}（源 ${String(src.id).slice(0, 8)}），未新建副本`);
+    finishAutoDirty(adoptedId, Number(files.copiedBytes) > 0);
     return { status: files.failed ? 'partial' : 'skipped', sourceId: src.id, targetId: adoptedId, failedFiles: files.failed, copiedBytes: Number(files.copiedBytes) || 0, workspacePending: files.workspacePending };
   }
 
@@ -8577,6 +8887,7 @@ const files = await copySessionFiles(wbHome, src.id, newId, ownerIds, { skipWork
       failedFiles: files.failed,
     });
   }
+  finishAutoDirty(newId, Number(files.copiedBytes) > 0);
   return { status: files.failed ? 'partial' : 'copied', sourceId: src.id, targetId: newId, failedFiles: files.failed, copiedBytes: Number(files.copiedBytes) || 0, workspacePending: files.workspacePending };
   };
   if (!lineageId) return perform();
@@ -8632,10 +8943,12 @@ function scheduleSessionDirtySave() {
   if (typeof state.timer.unref === 'function') state.timer.unref();
 }
 /** 记一条脏标记；**只有真变化才置脏**（同一时刻的重复通知不写盘）。 */
-function markSessionDirty(uid, sessionId, event) {
+function markSessionDirty(uid, sessionId, event, at) {
   const state = sessionDirtyState || (getSessionDirtyIndex(), sessionDirtyState);
   const before = state.index.get(uid, sessionId);
-  const marker = state.index.mark(uid, sessionId, event);
+  // at 是**可选**第 4 参（上游 1.2.12 起）：A3 收尾打 sessionSynced 时传「当前标记的原始时间戳」，
+  // 免得并发守卫把在飞的新事件误判成旧事件。缺省交给 session-dirty.js 的默认参数补 Date.now()。
+  const marker = state.index.mark(uid, sessionId, event, at);
   if (marker && (!before || before.at !== marker.at || before.event !== marker.event)) {
     state.dirty = true;
     scheduleSessionDirtySave();
@@ -8705,7 +9018,7 @@ async function buildAutoCopyPlan(sourceUid, targetUid) {
   const dirtyFastpathOn = autoCopyDirtyFastpathEnabled();
   const rows = await sqliteQuery(
     'SELECT id, cwd, user_id, title, custom_title, status, created_at, updated_at, last_activity_at, is_playground, source_mode, is_background_automation, mode, model, expert_id, expert_locale, expert_runtime_identity, expert_marketplace, permission_mode, use_sandbox_cli, project_id ' +
-    'FROM sessions WHERE deleted_at IS NULL AND user_id = ? ORDER BY created_at DESC;',
+    'FROM sessions WHERE deleted_at IS NULL AND COALESCE(is_background_automation, 0) = 0 AND user_id = ? ORDER BY created_at DESC;',
     [source]
   );
   const tPlan3 = Date.now();
@@ -10453,6 +10766,8 @@ const PUBLIC_API_PATHS = new Set([
   '/api/about/',
   '/api/update-check',
   '/api/update-status',
+  // 一键恢复重启：仅 loopback 可达，权限等同于本地 launcher；由用户在状态页确认触发，不静默执行。
+  '/api/client/relaunch',
 ]);
 
 function isAllowedApiOrigin(origin) {
@@ -15870,6 +16185,14 @@ function handleApiRoute(req, res) {
         port: cdp.port,
         error: cdp.error,
       },
+      client: {
+        // 客户端进程是否在跑 / 调试端口是否可达 / 是否命中「更新后丢失调试端口」状态
+        // running 由后台定时刷新（refreshClientRunning），请求线程直读缓存，不再同步探测
+        running: clientRunningState.value,
+        cdpReachable: cdp.connected,
+        needsDebugRelaunch: clientDebugState.needsDebugRelaunch,
+        debugStateUpdatedAt: clientDebugState.updatedAt || null,
+      },
       batch: {
         running: batchState.running,
         total: batchState.total,
@@ -15893,6 +16216,31 @@ function handleApiRoute(req, res) {
       }
     }
     return json(res, 200, status);
+  }
+
+  // 一键恢复：客户端在运行但调试端口丢失时（通常是官方自动更新后重启），
+  // 用带 --remote-debugging-port 的方式重启客户端以恢复注入。
+  // 放在 PUBLIC_API_PATHS：仅 loopback 可达，与 launcher 同等权限；
+  // 不做静默自动重启，由用户在状态页确认后触发。
+  if (req.method === 'POST' && p === '/api/client/relaunch') {
+    // The flag is deliberately sticky until CDP recovers, so re-check the
+    // process immediately before acting. A stale flag or an unknown probe
+    // must never turn this diagnostic action into an unsolicited launch.
+    const clientRunning = safeClientRunning();
+    if (clientRunning !== true) {
+      return json(res, 409, { ok: false, error: '客户端未在运行，无需重启' });
+    }
+    return (async () => {
+      // Electron is single-instance: spawning the executable while the
+      // update-restarted process is still alive can silently hand the new
+      // arguments to the old instance. Reuse the existing verified shutdown
+      // path before starting the debug-enabled process.
+      await quitWorkBuddy();
+      await relaunchWorkBuddy();
+      resetClientDebugState();
+      log('[cdp] 用户通过一键恢复重启了客户端，等待调试端口恢复');
+      return json(res, 202, { ok: true, pending: true });
+    })().catch((e) => json(res, 500, { ok: false, error: String((e && e.message) || e) }));
   }
 
   // The existing local API authorization gate requires the current profile token.
@@ -15983,6 +16331,9 @@ function handleApiRoute(req, res) {
         if (resetAt !== null && (!Number.isSafeInteger(resetAt) || resetAt < Date.now() - 86400000 || resetAt > Date.now() + 90 * 86400000)) {
           return json(res, 400, { ok: false, error: '解封时间无效' });
         }
+        if (resetAt !== null && await CREDIT_USAGE_STORE.hasModelRateLimitElsewhere({ uid, modelId, resetAt, now: Date.now() })) {
+          return json(res, 200, { ok: true, skipped: 'duplicate-across-accounts' });
+        }
         await CREDIT_USAGE_STORE.saveModelRateLimit({
           uid, modelId,
           modelName: String(body && body.modelName || '').slice(0, 256),
@@ -15998,8 +16349,17 @@ function handleApiRoute(req, res) {
     });
   }
 
+  if (req.method === 'POST' && p === '/api/accounts/refresh-tokens') {
+    return refreshAllAccountTokensOnPanelOpen()
+      .then((result) => json(res, 200, result))
+      .catch((error) => {
+        log('[token-refresh] 打开账号面板时刷新全部账号失败: ' + redactDiagnosticText((error && error.message) || error, 300));
+        return json(res, 500, { ok: false, error: '账号 token 刷新失败' });
+      });
+  }
+
   if (req.method === 'GET' && p === '/api/accounts') {
-    const accounts = listAccounts(DATA_DIR);
+    const accounts = listAccountsWithRuntimeTokenCache();
     const cache = loadCheckinCache();
     const today = todayStr();
     // F2：健康徽标。用**原始**签到缓存条目算，而不是 checkinDisplayValue 的投影 ——
@@ -17094,7 +17454,7 @@ function handleApiRoute(req, res) {
     const uid = uidParam === null ? (((currentAccount() || {}).uid || '').trim()) : uidParam.trim();
     const range = url.searchParams.get('range') || '7d';
     const rangeMs = sessionRangeMs(range);
-    const clauses = ["deleted_at IS NULL"];
+    const clauses = ["deleted_at IS NULL", "COALESCE(is_background_automation, 0) = 0"];
     const params = [];
     if (uid) { clauses.push('user_id = ?'); params.push(uid); }
     // A10：时间筛选**刻意不写进 SQL**。账号总量（totalBytes）必须覆盖被 range 挡掉的会话，
@@ -17739,7 +18099,7 @@ function handleApiRoute(req, res) {
       try {
         const rows = await sqliteQuery(
           'SELECT ' + SESSION_COPY_COLUMNS.join(',') +
-            ' FROM sessions WHERE id = ? AND user_id = ? AND deleted_at IS NULL LIMIT 1;',
+            ' FROM sessions WHERE id = ? AND user_id = ? AND deleted_at IS NULL AND COALESCE(is_background_automation, 0) = 0 LIMIT 1;',
           [id, uid]
         );
         if (!rows.length) return json(res, 404, { ok: false, error: '当前账号下没有该会话' });
@@ -17764,7 +18124,7 @@ function handleApiRoute(req, res) {
       try {
         // 1) 取出源会话（含 cwd 用于定位消息文件）
         const srcRows = await sqliteQuery(
-          "SELECT id, cwd, user_id, title, custom_title, status, created_at, updated_at, last_activity_at, is_playground, source_mode, is_background_automation, mode, model, expert_id, expert_locale, expert_runtime_identity, expert_marketplace, permission_mode, use_sandbox_cli, project_id FROM sessions WHERE id IN (" + sqlPlaceholders(ids) + ") AND deleted_at IS NULL;",
+          "SELECT id, cwd, user_id, title, custom_title, status, created_at, updated_at, last_activity_at, is_playground, source_mode, is_background_automation, mode, model, expert_id, expert_locale, expert_runtime_identity, expert_marketplace, permission_mode, use_sandbox_cli, project_id FROM sessions WHERE id IN (" + sqlPlaceholders(ids) + ") AND deleted_at IS NULL AND COALESCE(is_background_automation, 0) = 0;",
           ids
         );
         if (!srcRows.length) return json(res, 404, { ok: false, error: '源会话不存在' });
@@ -17791,7 +18151,7 @@ function handleApiRoute(req, res) {
       try {
         const placeholders = sqlPlaceholders(ids);
         const before = await sqliteQuery(
-          'SELECT id, user_id FROM sessions WHERE id IN (' + placeholders + ') AND deleted_at IS NULL;',
+          'SELECT id, user_id FROM sessions WHERE id IN (' + placeholders + ') AND deleted_at IS NULL AND COALESCE(is_background_automation, 0) = 0;',
           ids
         );
         await sqliteRun(
@@ -19050,6 +19410,19 @@ function startServer() {
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
       // web/ 调试界面已移除（web 目录不再打包），根路径返回自包含的状态提示页
       const c = currentAccount();
+      const needRelaunch = clientDebugState.needsDebugRelaunch;
+      const warnBlock = needRelaunch
+        ? '<div style="max-width:420px;margin:18px auto 0;padding:14px 16px;border:1px solid #7a4a1f;border-radius:10px;background:#2a1c0e;text-align:left">' +
+          '<p style="margin:0 0 8px;color:#f0b35e;font-weight:600">⚠ 检测到客户端需要恢复</p>' +
+          '<p style="margin:0 0 12px;color:#d8c9b0;font-size:13px;line-height:1.6">WorkBuddy 正在运行，但未以调试模式启动（通常是官方自动更新后自行重启导致），WorkDaddy 无法注入面板。点击下方按钮将以调试模式重启客户端，恢复右下角机器人按钮。</p>' +
+          '<button id="wbs-relaunch" style="padding:8px 18px;border:0;border-radius:8px;background:#1f8a4c;color:#fff;font-size:14px;cursor:pointer">重新启动客户端并恢复</button>' +
+          '<p id="wbs-relaunch-msg" style="margin:8px 0 0;color:#9a9aa0;font-size:12px"></p></div>' +
+          '<script>(function(){var b=document.getElementById("wbs-relaunch"),m=document.getElementById("wbs-relaunch-msg");' +
+          'b.onclick=function(){b.disabled=true;m.textContent="正在重启客户端…";' +
+          'fetch("/api/client/relaunch",{method:"POST"}).then(function(r){return r.json();}).then(function(j){' +
+          'm.textContent=j.ok?"已发送重启指令，请等待客户端重新出现":"恢复失败："+(j.error||"未知错误");b.disabled=false;}).catch(function(e){' +
+          'm.textContent="请求失败："+e.message;b.disabled=false;});};})();</script>'
+        : '';
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(
         '<!doctype html><html lang="zh"><meta charset="utf-8"><title>' + WORKDADDY_DISPLAY_NAME + '</title>' +
@@ -19057,7 +19430,8 @@ function startServer() {
         '<div style="text-align:center"><h1 style="margin:0 0 8px">' + WORKDADDY_DISPLAY_NAME + ' v' + DAEMON_VERSION + '</h1>' +
         '<p style="color:#9a9aa0;margin:0">面板入口：' + PROFILE.name + ' 右下角机器人按钮</p>' +
         '<p style="color:#555;font-size:12px;margin-top:16px">守护进程运行中 · CDP ' + (cdp.connected ? '已连接' : '未连接') +
-        (c && c.nickname ? ' · 当前账号：' + String(c.nickname).replace(/</g, '&lt;') : '') + '</p></div></body></html>'
+        (c && c.nickname ? ' · 当前账号：' + String(c.nickname).replace(/</g, '&lt;') : '') + '</p>' + warnBlock +
+        '</div></body></html>'
       );
     }
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -19180,8 +19554,16 @@ process.on('unhandledRejection', (reason) => {
   captureException(reason, { stage: 'daemon-unhandled-rejection' }).catch(() => {});
 });
 
+// 一次性子进程模式必须等到 safeClientRunning() 所需的所有依赖完成初始化后再执行。
+// 放在 daemon 锁、HTTP 服务和后台任务启动前，探测进程不会抢占正常 daemon 实例。
+if (PROBE_CLIENT_RUNNING) {
+  process.stdout.write(JSON.stringify({ running: safeClientRunning() }));
+  process.exit(0);
+}
+
 ensureDirs(DATA_DIR, log);
 if (!acquireDaemonLock()) process.exit(0);
+startClientRunningMonitor();
 const sessionBackupCleanup = sessionSync.pruneSyncBackups(path.join(DATA_DIR, 'session-sync-backups'));
 if (sessionBackupCleanup.removed || sessionBackupCleanup.retainedRecovery) {
   log(`[session-sync-backups] 启动清理 ${sessionBackupCleanup.removed} 个无用备份，保留 ${sessionBackupCleanup.retainedRecovery} 个 recovery-needed 备份`);

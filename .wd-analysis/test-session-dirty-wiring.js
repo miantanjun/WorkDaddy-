@@ -45,8 +45,8 @@ ok(/atomicWriteText\(SESSION_DIRTY_FILE, JSON\.stringify\(state\.index\.state\)/
   'A3 ⭐ 落盘走**本地口径** atomicWriteText（不照抄上游的 replaceFileWithRetry 名字）');
 ok(/}, 250\);/.test(SRC) && /if \(!state \|\| !state\.dirty \|\| state\.timer\) return;/.test(SRC) && /unref/.test(SRC),
   'A4 去抖 250ms + 已有定时器不重复注册 + unref（不为写一个索引把进程钉住）');
-ok(/function markSessionDirty\(uid, sessionId, event\) \{[\s\S]{0,520}before\.at !== marker\.at \|\| before\.event !== marker\.event/.test(SRC),
-  'A5 只有**真变化**才置脏（同一时刻的重复通知不写盘）');
+ok(/function markSessionDirty\(uid, sessionId, event, at\) \{[\s\S]{0,1000}before\.at !== marker\.at \|\| before\.event !== marker\.event/.test(SRC),
+  'A5 只有**真变化**才置脏（同一时刻的重复通知不写盘）；2026-10-13 吸纳 A3 后签名加可选第 4 参 at');
 ok(/function clearSessionDirty\(uid, sessionId, expectedAt\) \{[\s\S]{0,400}state\.index\.clear\(uid, sessionId, expectedAt\)/.test(SRC),
   'A6 clear 带 expectedAt（**并发到来的新事件不许被旧的在飞清理抹掉**）');
 

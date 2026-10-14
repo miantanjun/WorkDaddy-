@@ -52,9 +52,15 @@ function createDirtyIndex(raw) {
       const timestamp = Number(at);
       if (!item || !id || !Number.isFinite(timestamp) || timestamp <= 0) return null;
       const previous = item.sessions[id];
-      const marker = { at: timestamp, event: String(event || 'sessionUpdated').slice(0, 40) };
+      // Once a physical member has received synced content, later renderer
+      // lifecycle notifications must not turn its cross-account eligibility
+      // back into a marker consumed by one destination. Mapping revisions
+      // decide which destinations still need work; keep the latest timestamp
+      // for concurrent-event guards.
+      const marker = { at: timestamp, event: previous && previous.event === 'sessionSynced'
+        ? 'sessionSynced' : String(event || 'sessionUpdated').slice(0, 40) };
       item.sessions[id] = marker;
-      return previous && previous.at === marker.at ? previous : marker;
+      return previous && previous.at === marker.at && previous.event === marker.event ? previous : marker;
     },
     get(uid, sessionId) {
       const item = account(uid, false);

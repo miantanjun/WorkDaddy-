@@ -27,6 +27,11 @@ const APP_CBINTL = /\/CodeBuddy\.app(?:\/|$)/i;
 // 路径形如 ~/.local/share/workbuddy-ai/app/workbuddy/...，必须先于 CN 规则判定。
 const APP_AI_LINUX = /\/workbuddy-ai\//i;
 const APP_CN_LINUX = /\/opt\/WorkBuddy\//i;
+// Windows 没有 .app 包，renderer URL 直接落在安装目录的 resources/app.asar 下。
+// 目录可能位于任意盘符，但官方 CN/AI 目录名仍可作为 profile 强信号。
+const APP_AI_WIN = /\/WorkBuddy(?:%20| )?AI\/resources\/app\.asar(?:\/|$)/i;
+const APP_AI_WIN_COMPACT = /\/WorkBuddyAI\/resources\/app\.asar(?:\/|$)/i;
+const APP_CN_WIN = /\/WorkBuddy\/resources\/app\.asar(?:\/|$)/i;
 const DOMAIN_WB_AI = /https?:\/\/(?:[^/]+\.)?workbuddy\.ai(?:\/|$)/i;
 const DOMAIN_WB_CN = /https?:\/\/(?:[^/]+\.)?workbuddy\.cn(?:\/|$)/i;
 const DOMAIN_CB_CN = /https?:\/\/(?:[^/]+\.)?codebuddy\.cn(?:\/|$)/i;
@@ -42,8 +47,10 @@ function classifyTarget(url, title, description) {
   const u = normalizeTargetUrl(url);
   if (APP_AI.test(u)) return 'workbuddy-ai';
   if (APP_AI_LINUX.test(u)) return 'workbuddy-ai';
+  if (APP_AI_WIN.test(u) || APP_AI_WIN_COMPACT.test(u)) return 'workbuddy-ai';
   if (APP_CN.test(u)) return 'workbuddy-cn';
   if (APP_CN_LINUX.test(u)) return 'workbuddy-cn';
+  if (APP_CN_WIN.test(u)) return 'workbuddy-cn';
   if (APP_CBCN.test(u)) return 'codebuddy-cn';
   if (APP_CBINTL.test(u)) return 'codebuddy-intl';
   if (DOMAIN_WB_AI.test(u)) return 'workbuddy-ai';
@@ -88,6 +95,17 @@ function isTargetForProfile(target, profile) {
   const desc = String(target.description || '');
   const haystack = `${url} ${title} ${desc}`;
 
+  // Windows 官方安装目录的 app.asar 路径是比标题更可靠的归属证据，必须先于
+  // customTarget/标题兜底判断；企业目标仍保留自己的精确信号策略。
+  const cls = classifyTarget(url, title, desc);
+  const normalizedUrl = normalizeTargetUrl(url);
+  const windowsOfficialPath = /^file:\/\/\/[A-Za-z]:\//i.test(normalizedUrl) && (
+    APP_AI_WIN.test(normalizedUrl)
+    || APP_AI_WIN_COMPACT.test(normalizeTargetUrl(url))
+    || APP_CN_WIN.test(normalizedUrl)
+  );
+  if (windowsOfficialPath) return cls === profile.id;
+
   // 企业专享版沿用 CN/AI 的 UI 能力，但应用路径和登录域均由用户选择后生成。
   // 企业模式只接受它自己的精确信号，不再回落到官方域名或通用标题。
   if (profile.customTarget) {
@@ -101,8 +119,6 @@ function isTargetForProfile(target, profile) {
     return signals.some((signal) => lower.includes(signal));
   }
 
-  // 强信号：页面明确属于某客户端 → 必须与当前 profile 一致，否则一律拒绝
-  const cls = classifyTarget(url, title, desc);
   if (cls) return cls === profile.id;
 
   // CodeBuddy：Editor 模式的 target URL 通常是 vscode-file://，不包含产品名；

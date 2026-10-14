@@ -164,6 +164,9 @@ const world = {
   switchError: '',
   switchCalls: [],
   autoCopyCalls: [],
+  preSyncCalls: [],
+  preSyncError: '',
+  callOrder: [],
   runs: [],
   banner: { ok: true, hit: false },
   logs: [],
@@ -175,7 +178,7 @@ const factory = new Function(
   'currentAccount', 'limitFailoverPrimaryUid', 'limitFailoverAccountByUid', 'limitFailoverBlockedUntil',
   'limitFailoverInFlight', 'limitFailoverSwitchBack', 'automationRuns', 'automationSwitchAccount',
   'readLimitBanner', 'runCdpExpression', 'limitFailoverNotify', 'writeAccountSwitchDesktopLog',
-  'accountSwitchLog', 'accountSwitchLogFile', 'limitFailoverDesktopLogDir', 'autoCopyAfterAccountSwitch', 'idleSwitchback',
+  'accountSwitchLog', 'accountSwitchLogFile', 'limitFailoverDesktopLogDir', 'autoCopyAfterAccountSwitch', 'preSyncBeforeSwitch', 'idleSwitchback',
   block + '\nreturn { idleSwitchbackTick: idleSwitchbackTick, runIdleSwitchBack: runIdleSwitchBack, idleSwitchbackPublicState: idleSwitchbackPublicState, idleSwitchbackBusy: idleSwitchbackBusy, startIdleSwitchbackTicker: startIdleSwitchbackTicker, getDecision: function(){ return idleSwitchbackLastDecision; }, CONFIG_FILE: idleSwitchbackStore.file, STATE_FILE: idleSwitchbackStateStore.file };'
 );
 const accountSwitchLog = require(path.join(ROOT, 'scripts', 'account-switch-log.js'));
@@ -190,6 +193,7 @@ const api = factory(
   new Map(),
   async (account) => {
     world.switchCalls.push(String(account && account.uid || ''));
+    world.callOrder.push('switch');
     if (world.switchError) throw new Error(world.switchError);
     world.current = { uid: String(account.uid), nickname: '切回来的' };
     return { ok: true, uid: String(account.uid), switched: true };
@@ -204,6 +208,12 @@ const api = factory(
   (sourceUid, targetUid, reason) => {
     world.autoCopyCalls.push({ sourceUid: String(sourceUid), targetUid: String(targetUid), reason: String(reason || '') });
     return { id: 'copy-' + world.autoCopyCalls.length, total: 4 };
+  },
+  (fromUid, toUid, meta) => {
+    world.preSyncCalls.push({ sourceUid: String(fromUid), targetUid: String(toUid), reason: String(meta && meta.reason || '') });
+    world.callOrder.push('preSync');
+    if (world.preSyncError) return { ok: false, error: world.preSyncError };
+    return { ok: true, jobId: 'pre-' + world.preSyncCalls.length, skipped: false, waitedMs: 1 };
   },
   idle
 );
@@ -220,6 +230,9 @@ function resetWorld(over) {
   world.switchError = '';
   world.switchCalls = [];
   world.autoCopyCalls = [];
+  world.preSyncCalls = [];
+  world.preSyncError = '';
+  world.callOrder = [];
   world.logs = [];
   world.desktopLogs = [];
   Object.assign(world, over || {});
@@ -248,9 +261,24 @@ ok(world.autoCopyCalls.length === 1, 'J2c2 切号完成后触发了「切号复�
 ok(world.autoCopyCalls[0].sourceUid === 'B' && world.autoCopyCalls[0].targetUid === 'A',
   'J2c3 同步方向：离开的账号 B → 主账号 A', world.autoCopyCalls[0]);
 ok(world.autoCopyCalls[0].reason === 'idle-switchback', 'J2c4 带上来路标记', world.autoCopyCalls[0]);
+ok(world.callOrder.join(',') === 'preSync,switch',
+  'J2c6 ⭐ 顺序：先同步（preSync）再切号（switch）—— 2026-09-30 定的规则；本路径此前是「先切后同步」，' +
+  '复制正好落在 Page.reload 窗口里 ⇒ 撞上 applySnapshot 的 CAS 保护 ⇒ 作业 partial', world.callOrder);
+ok(world.preSyncCalls.length === 1 && world.preSyncCalls[0].sourceUid === 'B' && world.preSyncCalls[0].targetUid === 'A',
+  'J2c7 预同步方向：离开的账号 B → 主账号 A', world.preSyncCalls);
+ok(world.preSyncCalls[0].reason === 'idle-switchback', 'J2c8 预同步带上来路标记', world.preSyncCalls[0]);
 ok(/顺带做了/.test(world.desktopLogs[0].text) && /共 4 个/.test(world.desktopLogs[0].text), 'J2c5 日志写明顺带同步了几个会话');
 ok(/32 分|31 分|30 分/.test(world.desktopLogs[0].text), 'J2d 日志里写明了闲置多久', world.desktopLogs[0].text.slice(0, 80));
 ok(JSON.parse(fs.readFileSync(api.STATE_FILE, 'utf8')).uid === 'A', 'J2e 切完后闲置计时归到主账号（不会立刻又触发）');
+
+/* ---- J12 预同步失败 ⇒ 本轮不切号（用户选定的方案 1）---- */
+resetWorld({ preSyncError: '已有会话同步在进行，暂不能切号（请等它完成后再试）' });
+await api.idleSwitchbackTick();
+ok(world.switchCalls.length === 0,
+  'J12a 预同步失败 → 本轮不切号（宁可不切，也不在 reload 窗口里复制）', world.switchCalls);
+ok(world.desktopLogs.length === 1 && /切回失败/.test(world.desktopLogs[0].text),
+  'J12b 写下失败原因（下一拍会再试）', world.desktopLogs[0] && world.desktopLogs[0].text.slice(0, 70));
+ok(api.idleSwitchbackPublicState().switching === false, 'J12c 不卡住（switching 复位）');
 
 /* ---- J3 未到阈值 ---- */
 resetWorld({ current: { uid: 'B', nickname: '账号B' } });
@@ -282,6 +310,7 @@ const apiBusy = factory(
       world.autoCopyCalls.push({ sourceUid: String(sourceUid), targetUid: String(targetUid), reason: String(reason || '') });
       return { id: 'copy-busy', total: 4 };
     },
+    (fromUid, toUid) => { world.preSyncCalls.push({ sourceUid: String(fromUid), targetUid: String(toUid) }); return { ok: true, jobId: 'pre-busy' }; },
     idle
   );
 resetWorld();
