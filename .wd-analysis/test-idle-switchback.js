@@ -405,8 +405,11 @@ ok(inject.indexOf("'<div class=\"wbs-acct-list\"></div>' +\n        '<button cla
   'K1c 账号列表直接接「登录新账号」（三卡不再常驻列表下方抢高度）');
 ok(inject.indexOf('data-act="ops"') >= 0 && inject.indexOf('id="wbs-ops-dot"') >= 0, 'K1d 工具栏有「运维」入口 + 告警红点');
 ok(inject.indexOf('<div class=\"wbs-ops-popover\" id=\"wbs-ops-popover\"') >= 0 &&
-  inject.indexOf("'<div class=\"wbs-ops-body\">' +\n        '<div class=\"wbs-pcard wbs-idle-card\"") >= 0,
-  'K1e 三卡搬进「运维」弹出层（挂 .wbs-panel 内，避开 .wbs-body 的 overflow:hidden 裁切）');
+  inject.indexOf("'<div class=\"wbs-ops-body\">' +\n        '<div class=\"wbs-pcard wbs-ca-card") >= 0,
+  'K1e 弹出层只剩「上下文体检」（切号两卡已移到账号页常驻）；仍挂 .wbs-panel 内避开 overflow:hidden 裁切');
+ok(inject.indexOf('id="wbs-idle-card"') >= 0 && inject.indexOf('id="wbs-failover-card"') >= 0 &&
+  inject.indexOf('id="wbs-idle-card"') < inject.indexOf("'<div class=\"wbs-acct-list\"></div>' +"),
+  'K1e2 切号两张卡常驻账号页、且位于账号列表之前（2026-10-15 从运维弹出层移入）');
 ok(inject.indexOf('function setOpsFlag(') >= 0 && inject.indexOf("setOpsFlag('failover', running || dataRows.length > 0)") >= 0 &&
   inject.indexOf("setOpsFlag('audit', Number(counts.crit || 0) > 0)") >= 0,
   'K1f 红点由限流窗口 / 体检严重项回填');

@@ -109,8 +109,8 @@ ok(/if \(accountTokenRefreshInFlight === wrapped\) accountTokenRefreshInFlight =
 ok(/results\.filter\(\(item\) => item && item\.refreshed\)\.length/.test(daemon) &&
    /skipped: results\.filter/.test(daemon) && /failed: results\.filter/.test(daemon),
   'B9 返回 { total, refreshed, skipped, failed } 四件套（前端按 refreshed>0 决定是否重取快照）');
-ok(/rememberTokenRefreshSuccess\(uid, file, result\.auth\);/.test(daemon),
-  'B10 刷新成功后把**公开时间字段**记进状态文件');
+ok(/rememberTokenRefreshSuccess\(uid, file, (result|root)\.auth\);/.test(daemon),
+  'B10 刷新成功后把**公开时间字段**记进状态文件（上游 1.2.18 起这一步搬进 persistRefreshedAccount，参数是 nextRoot.auth）');
 
 /* ==================================================================== */
 section('[C] ⚠️ 隐私红线：解密后的 token 绝不写回磁盘');

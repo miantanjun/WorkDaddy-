@@ -219,7 +219,9 @@ const routeMiss = Object.entries(ROUTES)
 ok(routeMiss.length === 0, 'E1 六条新路由出现次数符合设计（export 主路径 GET+POST 各 1）', routeMiss);
 ok(DAEMON_SRC.split('/api/sessions/sync-backups/cleanup').length - 1 === 1,
   'E2 备份清理路由在（带 maxAgeDays 夹在 [1,365]）');
-ok(/const sessionSync = require\('\.\/session-sync\.js'\);/.test(DAEMON_SRC),
+// ⚠️ 只锁「直连 require」这个事实，不锁声明关键字：2026-10-19 阶段② 为了给 CodeBuddy
+// 顶替成历史树版本，这里已从 const 改成 let。锁 const 会把正确的改动判成回归。
+ok(/(?:const|let) sessionSync = require\('\.\/session-sync\.js'\);/.test(DAEMON_SRC),
   'E3 ⭐ daemon **直连** require session-sync（本地原来是经 auto-copy-judge 间接引用；漏了这条新路由会 ReferenceError）');
 ok(DAEMON_SRC.split('sessionSync.inspectSyncBackups').length - 1 >= 1 && DAEMON_SRC.split('sessionSync.pruneSyncBackups').length - 1 >= 1,
   'E4 新路由真的调到了 sessionSync 的两个新导出');

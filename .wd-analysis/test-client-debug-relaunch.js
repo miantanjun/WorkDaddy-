@@ -224,8 +224,9 @@ function main() {
       'B18 存在一次性探测模式开关（探测子进程复用同一入口）');
     ok(/execFile\(process\.execPath,\s*\[__filename,\s*'--probe-client-running'\]/.test(code),
       'B19 后台刷新走 execFile 子进程（不是 spawnSync —— 同步会阻塞事件循环数秒）');
-    ok(/const CLIENT_RUNNING_REFRESH_MS = 5000;/.test(code),
-      'B20 刷新间隔 5 秒（与 cdpLoop 同量级）');
+    // 2026-10-16 吸纳上游 1.2.40：5 秒比单轮探测耗时（旧实现实测 5.79s）还短，等于不间断跑 ⇒ 改 15 秒。
+    ok(/const CLIENT_RUNNING_REFRESH_MS = 15000;/.test(code),
+      'B20 刷新间隔 15 秒（上游 1.2.40 吸纳：原 5 秒几乎不间断）');
     ok(/if \(timer && typeof timer\.unref === 'function'\) timer\.unref\(\)/.test(code),
       'B21 定时器 unref —— 不得阻止 daemon 进程退出');
 
@@ -234,9 +235,11 @@ function main() {
     const ensureAt = code.indexOf('ensureDirs(DATA_DIR, log)');
     ok(pi >= 0 && ensureAt > pi,
       'B22 一次性探测块位于 ensureDirs / 抢锁之前（探测进程不抢占正常 daemon 实例）');
-    ok(probe.includes('process.stdout.write(JSON.stringify({ running: safeClientRunning() }))') &&
+    // 2026-10-16 吸纳上游 1.2.40：入口改用轻量 lightClientRunning()（tasklist，不经 WMI）；
+    // safeClientRunning() 的完整 CIM 验证留给切号等安全路径。
+    ok(probe.includes('process.stdout.write(JSON.stringify({ running: lightClientRunning() }))') &&
       probe.includes('process.exit(0)'),
-      'B23 探测块输出 JSON 后立即退出（不留常驻进程）');
+      'B23 探测块输出 JSON 后立即退出（不留常驻进程）；用轻量 lightClientRunning');
   }
 
   // ---------- C 组：反向守卫（防「顺手加自动重启」） ----------

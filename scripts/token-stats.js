@@ -198,6 +198,21 @@ function dateBounds(now, options = {}) {
   return { from, until, days };
 }
 
+// CodeBuddy 的 index.json 是「一行一整棵会话」：{messages:[], requests:[...]}。
+// 每条 request 才是独立用量记录，时间戳在内层 startedAt（外层没有），
+// 所以必须逐条展开；会话级归属字段（会话 id / 账号）要带到每一条上。
+function expandRecordLine(record) {
+  if (!record || typeof record !== 'object') return [record];
+  if (!Array.isArray(record.requests) || !record.requests.length) return [record];
+  const carry = {};
+  for (const key of ['conversationId', 'conversation_id', 'sessionId', 'session_id', 'userId', 'user_id', 'accountUid', 'accountId']) {
+    if (record[key] !== undefined && record[key] !== null) carry[key] = record[key];
+  }
+  return record.requests
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => ({ ...carry, ...item }));
+}
+
 function parseRecords(root, options = {}) {
   const now = Number(options.now) || Date.now();
   const lowerBound = Number.isFinite(options.lowerBound) ? options.lowerBound : now - MAX_CACHE_DAYS * DAY_MS;
@@ -234,56 +249,58 @@ function parseRecords(root, options = {}) {
         }
         continue;
       }
-      if (!record || typeof record !== 'object' || record.isSnapshotUpdate) continue;
-      const usage = findUsage(record.message && record.message.usage) || findUsage(record.providerData && record.providerData.usage) || findUsage(record);
-      if (!usage) continue;
-      const input = numberField(usage, TOKEN_FIELDS.input);
-      const output = numberField(usage, TOKEN_FIELDS.output);
-      // [2026-10-01 吸纳上游 1.2.10] 改用嵌套兜底版本（平铺字段缺失时往下找 details）
-      const cacheRead = cacheReadField(usage);
-      const cacheWrite = cacheWriteForRecord(record, usage);
-      if (!(input || output || cacheRead || cacheWrite)) continue;
-      // 纪律 1：时间戳拿不到就**留空**，绝不回落成 `now`。
-      // 旧实现回落成扫描时刻 ⇒ 导入的历史行会在时间轴上跳到今天，
-      // 而且总量仍然对得上（少的那块补到了今天），没人能看出来。
-      // 现在：这类记录不进任何日期维度，但进 `undated` 台账并被显式暴露。
-      const timestamp = discipline.firstTimestamp([record.timestamp, record.created_at, record.createdAt, usage.timestamp]);
-      if (timestamp === discipline.UNKNOWN_TIMESTAMP) {
-        undated.add({ input, output, calls: 1 });
-        continue;
+      for (const item of expandRecordLine(record)) {
+        if (!item || typeof item !== 'object' || item.isSnapshotUpdate) continue;
+        const usage = findUsage(item.message && item.message.usage) || findUsage(item.providerData && item.providerData.usage) || findUsage(item);
+        if (!usage) continue;
+        const input = numberField(usage, TOKEN_FIELDS.input);
+        const output = numberField(usage, TOKEN_FIELDS.output);
+        // [2026-10-01 吸纳上游 1.2.10] 改用嵌套兜底版本（平铺字段缺失时往下找 details）
+        const cacheRead = cacheReadField(usage);
+        const cacheWrite = cacheWriteForRecord(item, usage);
+        if (!(input || output || cacheRead || cacheWrite)) continue;
+        // 纪律 1：时间戳拿不到就**留空**，绝不回落成 `now`。
+        // 旧实现回落成扫描时刻 ⇒ 导入的历史行会在时间轴上跳到今天，
+        // 而且总量仍然对得上（少的那块补到了今天），没人能看出来。
+        // 现在：这类记录不进任何日期维度，但进 `undated` 台账并被显式暴露。
+        const timestamp = discipline.firstTimestamp([item.timestamp, item.created_at, item.createdAt, item.startedAt, usage.timestamp]);
+        if (timestamp === discipline.UNKNOWN_TIMESTAMP) {
+          undated.add({ input, output, calls: 1 });
+          continue;
+        }
+        if (timestamp < lowerBound || timestamp > upperBound) continue;
+        // 思维链 token：优先 usage，其次 providerData.rawUsage（WorkBuddy 多数落在这里）
+        const thinking = numberField(usage, THINKING_FIELDS) ||
+          numberField(item.providerData && item.providerData.rawUsage, THINKING_FIELDS);
+        // 记录 id：32 位 hex，是 workbuddy.db `session_usage.credit_json` 的键（实测 54/54 命中）。
+        const recordId = typeof item.id === 'string' && /^[0-9a-f]{32}$/i.test(item.id) ? item.id : '';
+        const model = findText(item, ['model', 'modelName', 'model_id', 'modelId']) || findText(usage, ['model', 'modelName', 'model_id', 'modelId']);
+        const account = findText(item, ['accountUid', 'accountId', 'uid', 'userId']) || findText(usage, ['accountUid', 'accountId', 'uid', 'userId']);
+        // Imports/copies preserve the entire JSONL row. Hash the whole item,
+        // not just requestId or token totals: a request can have multiple usage
+        // rows, and different calls can have identical token counts. Only the
+        // digest and usage metadata enter the cache; never persist message text.
+        const digest = createHash('sha256').update(JSON.stringify(item)).digest('hex');
+        const occurrence = (occurrences.get(digest) || 0) + 1;
+        occurrences.set(digest, occurrence);
+        records.push({
+          key: digest + ':' + occurrence,
+          file: relative,
+          sourceSession: (['sessionId', 'conversationId', 'session_id', 'conversation_id']
+            .map(field => item[field]).find(value => typeof value === 'string' && value.trim()) || '').trim(),
+          timestamp,
+          model: model || '',
+          account: account || '',
+          input,
+          output,
+          cacheRead,
+          cacheWrite,
+          thinking,
+          recordId,
+          calls: 1,
+        });
+        parsedLines++;
       }
-      if (timestamp < lowerBound || timestamp > upperBound) continue;
-      // 思维链 token：优先 usage，其次 providerData.rawUsage（WorkBuddy 多数落在这里）
-      const thinking = numberField(usage, THINKING_FIELDS) ||
-        numberField(record.providerData && record.providerData.rawUsage, THINKING_FIELDS);
-      // 记录 id：32 位 hex，是 workbuddy.db `session_usage.credit_json` 的键（实测 54/54 命中）。
-      const recordId = typeof record.id === 'string' && /^[0-9a-f]{32}$/i.test(record.id) ? record.id : '';
-      const model = findText(record, ['model', 'modelName', 'model_id', 'modelId']) || findText(usage, ['model', 'modelName', 'model_id', 'modelId']);
-      const account = findText(record, ['accountUid', 'accountId', 'uid', 'userId']) || findText(usage, ['accountUid', 'accountId', 'uid', 'userId']);
-      // Imports/copies preserve the entire JSONL row. Hash the whole record,
-      // not just requestId or token totals: a request can have multiple usage
-      // rows, and different calls can have identical token counts. Only the
-      // digest and usage metadata enter the cache; never persist message text.
-      const digest = createHash('sha256').update(JSON.stringify(record)).digest('hex');
-      const occurrence = (occurrences.get(digest) || 0) + 1;
-      occurrences.set(digest, occurrence);
-      records.push({
-        key: digest + ':' + occurrence,
-        file: relative,
-        sourceSession: (['sessionId', 'conversationId', 'session_id', 'conversation_id']
-          .map(field => record[field]).find(value => typeof value === 'string' && value.trim()) || '').trim(),
-        timestamp,
-        model: model || '',
-        account: account || '',
-        input,
-        output,
-        cacheRead,
-        cacheWrite,
-        thinking,
-        recordId,
-        calls: 1,
-      });
-      parsedLines++;
     }
   }
   return {
@@ -565,7 +582,9 @@ function scanTokenStatsCached(root, options = {}) {
   const file = cacheFile(root, options);
   const cache = readCache(file);
   const hadValidCache = usableCache(cache, now);
-  const currentFiles = walkJsonl(root, options.maxFiles || 5000);
+  // options.files：调用方（如 CodeBuddy 的历史树枚举）已给出精确文件清单时直接采用，
+  // 否则按目录遍历。两种路径产出的 relative 口径一致，缓存可共用。
+  const currentFiles = Array.isArray(options.files) ? options.files : walkJsonl(root, options.maxFiles || 5000);
   const todayFiles = {};
   // A scan that reuses every cached file changes nothing on disk, so rewriting
   // the (often multi-megabyte) cache only costs time. Skip it then: the cutoff

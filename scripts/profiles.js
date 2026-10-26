@@ -37,6 +37,23 @@ const appPath = (name, winExec, winDir) =>
       ? plat.linuxAppBinary(LINUX_APP_KIND[name] || 'workbuddy')
       : `/Applications/${name}.app`;
 
+// CodeBuddy 的 CN 与国际版共用安装目录名，exe 名也不稳定（旧版 CN 用 CodeBuddy.exe），
+// 只用 product.json 的 applicationName 才能可靠区分，避免误停另一个产品。
+function isCodeBuddyBinary(binary, profileId) {
+  if (!['codebuddy-cn', 'codebuddy-intl'].includes(profileId)) return false;
+  try {
+    const name = path.basename(binary).toLowerCase();
+    const validName = profileId === 'codebuddy-cn'
+      ? name === 'codebuddy cn.exe' || name === 'codebuddy.exe'
+      : name === 'codebuddy.exe';
+    if (!validName) return false;
+    const product = JSON.parse(fs.readFileSync(path.join(path.dirname(binary), 'resources', 'app', 'product.json'), 'utf8'));
+    return product.applicationName === (profileId === 'codebuddy-cn' ? 'buddycn' : 'buddy');
+  } catch (_) {
+    return false;
+  }
+}
+
 function sharedDataDir() {
   return path.join(appSupport, 'WorkDaddy');
 }
@@ -69,25 +86,55 @@ const PROFILES = {
     targetHints: ['workbuddy ai', 'workbuddy'],
   },
   'codebuddy-cn': {
-    id: 'codebuddy-cn', name: 'CodeBuddy CN', region: 'cn', kind: 'codebuddy', mode: 'auto',
-    appPath: appPath('CodeBuddy CN'),
-    dataRoot: path.join(appSupport, 'CodeBuddy CN'),
-    authFile: null,
+    id: 'codebuddy-cn', name: 'CodeBuddy CN', appName: 'WorkDaddy', region: 'cn', kind: 'codebuddy', mode: 'auto',
+    // IDE 形态：主程序是 VS Code fork，注入走 CDP（apiTransport: 'cdp'），不走 renderer 脚本直注。
+    appPath: appPath('CodeBuddy CN', 'CodeBuddy CN.exe'),
+    binaryNames: ['CodeBuddy CN.exe', 'CodeBuddy.exe'],
+    nativeDebugPort: 9244,
+    oauthPlatform: 'ide',
+    authApiHost: 'https://copilot.tencent.com',
+    // historyRoot 是 CodeBuddyExtension 的上级目录：会话历史/计划任务/检查点/文件树四棵树都挂在这下面。
+    historyRoot: path.dirname(path.dirname(extensionAuth)),
+    userDataRoot: path.join(appSupport, 'CodeBuddy CN'),
+    dataRoot: path.join(home, '.codebuddy'),
+    // 原生登录态由 CodeBuddy 主进程用 Electron 加密服务持久化，账号备份落在我们自己的目录。
+    authFile: path.join(sharedDataDir(), 'profiles', 'codebuddy-cn', 'native-current.info'),
     sessionDb: path.join(appSupport, 'CodeBuddy CN', 'codebuddy-sessions.vscdb'),
-    modelsFile: path.join(appSupport, 'CodeBuddy CN', 'User', 'globalStorage', 'state.vscdb'),
+    // 自定义模型配置由 Electron 主进程写到用户目录；state.vscdb 只是 VS Code 状态，不是模型配置。
+    modelsFile: path.join(home, '.codebuddy', 'models.json'),
     apiHost: 'https://www.codebuddy.cn',
-    capabilities: { accounts: false, sessions: true, models: false, stashPrompt: false, theme: false, checkin: true },
+    capabilities: {
+      accounts: true, sessions: true, models: true, stashPrompt: false,
+      nativeComposer: true, theme: true, themeTakeover: false, enhance: false,
+      panelAppearance: 'light', robotStyle: 'black', apiTransport: 'cdp',
+      checkin: true, growthDaily: true,
+      // 2026-10-22 轻量版：CodeBuddy 不是主力（只用来把编程任务分流过去），
+      // 面板只保留 账号/会话/空间/模型/关于 五个页签，摘掉 主题/自动化/电脑；
+      // daemon 侧同时停掉整套自动化调度与内置任务安装（否则每分钟刷一条失败日志）。
+      lite: true,
+    },
     targetHints: ['codebuddy cn'],
   },
   'codebuddy-intl': {
-    id: 'codebuddy-intl', name: 'CodeBuddy', region: 'intl', kind: 'codebuddy', mode: 'auto',
-    appPath: appPath('CodeBuddy'),
-    dataRoot: path.join(appSupport, 'CodeBuddy'),
-    authFile: null,
+    id: 'codebuddy-intl', name: 'CodeBuddy', appName: 'WorkDaddy', region: 'intl', kind: 'codebuddy', mode: 'auto',
+    appPath: appPath('CodeBuddy', 'CodeBuddy.exe'),
+    binaryNames: ['CodeBuddy.exe'],
+    nativeDebugPort: 9245,
+    oauthPlatform: 'ide',
+    authApiHost: 'https://www.codebuddy.ai',
+    historyRoot: path.dirname(path.dirname(extensionAuth)),
+    userDataRoot: path.join(appSupport, 'CodeBuddy'),
+    dataRoot: path.join(home, '.codebuddy'),
+    authFile: path.join(sharedDataDir(), 'profiles', 'codebuddy-intl', 'native-current.info'),
     sessionDb: path.join(appSupport, 'CodeBuddy', 'codebuddy-sessions.vscdb'),
-    modelsFile: path.join(appSupport, 'CodeBuddy', 'User', 'globalStorage', 'state.vscdb'),
+    modelsFile: path.join(home, '.codebuddy', 'models.json'),
     apiHost: 'https://www.codebuddy.ai',
-    capabilities: { accounts: false, sessions: true, models: false, stashPrompt: false, theme: false, checkin: true },
+    capabilities: {
+      accounts: true, sessions: true, models: true, stashPrompt: false,
+      nativeComposer: true, theme: true, themeTakeover: false, enhance: false,
+      panelAppearance: 'light', robotStyle: 'black', apiTransport: 'cdp',
+      checkin: false, builtinAutomations: false, lite: true,
+    },
     targetHints: ['codebuddy'],
   },
 };
@@ -171,4 +218,4 @@ function profileDataDir(profile, configured) {
   return path.join(sharedDataDir(), 'profiles', profile.id);
 }
 
-module.exports = { PROFILES, applyWorkBuddyTarget, getProfile, listProfiles, listInstalledModelSources, profileDataDir, sharedDataDir };
+module.exports = { PROFILES, applyWorkBuddyTarget, getProfile, listProfiles, listInstalledModelSources, profileDataDir, sharedDataDir, isCodeBuddyBinary };

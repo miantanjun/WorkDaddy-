@@ -64,10 +64,15 @@ async function selectAutomationModel({ model, conversationId, accountUid }) {
     await openMenu();
     const available = options();
     previousModel = available.find((item) => item.props.isSelected)?.option.id || null;
-    const target = available.find((item) => item.option.id === model);
+    // 上游 1.2.18：官方模型与自定义模型可能同名，优先精确 ID；
+    // 只有调用方漏了 custom-local: 前缀时才回退匹配（旧行为会静默选错模型）。
+    const target = available.find((item) => item.option.id === model) ||
+      (!model.startsWith('custom-local:') && available.find((item) => item.option.id === 'custom-local:' + model));
     if (!target) throw new Error('未知模型 ID；请从 WorkBuddy 模型列表选择有效 ID');
     if (target.option.disabled) throw new Error('指定模型当前不可用');
     if (!previousModel) throw new Error('无法确认当前模型');
+    // 解析成功后回写真实 ID：返回值与后续比对都要用带前缀的那个。
+    model = target.option.id;
     changed = previousModel !== model;
     if (changed) target.props.onSelect();
     for (let attempt = 0; attempt < 50; attempt++) {

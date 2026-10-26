@@ -87,8 +87,12 @@ const crlf = (latin.match(/\r\n/g) || []).length;
 const totalN = (latin.match(/\n/g) || []).length;
 ok(crlf > 0 && totalN - crlf === 0, 'A6 lib.js 纯 CRLF（裸 LF 必须为 0）', { crlf, bareLf: totalN - crlf });
 
-ok(!BLOCK.includes('writeFileSync') && !BLOCK.includes('JSON.stringify'),
-  'A7 区块内**没有**写盘/序列化调用 ⇒ 适配层自身不产生任何「明文落盘」路径');
+// 上游 1.2.18 起区块内多了 wdCompatEncryptAuthJson：它会 JSON.stringify 信封元数据（suite/nonce/authTag/cipher），
+// 那是内存里的一次序列化，不是落盘。守卫精确到「没有任何文件写入调用」+「唯一的 stringify 只用来拼信封」。
+// 注意：appendFileSync 是 wdCompatLog 的日志写入，本来就允许；这里只禁「写文件内容」的接口。
+ok(!/writeFileSync|createWriteStream|fs\.writeFile\b/.test(BLOCK)
+  && (!BLOCK.includes('JSON.stringify') || /envelope: Buffer\.from\(JSON\.stringify\(\{/.test(BLOCK)),
+  'A7 区块内没有任何文件写入调用，且唯一出现的 JSON.stringify 只用来拼信封元数据 ⇒ 适配层自身不产生「明文落盘」路径');
 ok((BLOCK.split('spawnSync').length - 1) === 1 && (BLOCK.split("_linkedBinding").length - 1) === 1,
   'A8 取钥入口唯一（恰 1 处 spawnSync + 1 处 _linkedBinding）');
 ok(BLOCK.includes("ELECTRON_RUN_AS_NODE: '1'") && BLOCK.includes('WD_COMPAT_KEY '),
@@ -218,15 +222,17 @@ ok(/写回仍用 raw 原字节/.test(switchFn), 'D4 switchTo 代码里留有「�
 const refreshFn = daemonSrc.slice(daemonSrc.indexOf('async function refreshAccountBackupToken('),
   daemonSrc.indexOf('async function refreshAccountBackupToken(') + 3600);
 ok(refreshFn.includes('encryptedAtRest')
-  && refreshFn.includes('persisted: false')
-  && refreshFn.includes('backupAuthRuntimeCache.set(uid,'),
-  'D5 ⭐⭐ 危险点已解决：refreshAccountBackupToken 检测到 `encryptedAtRest` 时**不落盘** —— '
-  + '刷新结果只进内存缓存并返回 `persisted: false`。这是「不解密结果写回加密备份」的落地形态');
-ok(refreshFn.includes("const stored = JSON.parse(fs.readFileSync(file, 'utf8'));")
-  && refreshFn.includes('wdCompatContainsEncryptedFields(stored)'),
+  && refreshFn.includes('persistRefreshedAccount('),
+  'D5 ⭐⭐ 加密态刷新结果按**原信封加密写回**（上游 1.2.18）：encryptedAtRest 分支不再「只丢内存」，'
+  + '而是交给 persistRefreshedAccount 用 template 重新封装 —— 既补上了「重启就退回旧 token」，也没有明文落盘');
+ok(refreshFn.includes("sourceText = fs.readFileSync(file, 'utf8')")
+  && refreshFn.includes('wdCompatContainsEncryptedFields(stored)')
+  && refreshFn.indexOf('wdCompatContainsEncryptedFields(stored)') < refreshFn.indexOf('wdCompatDecryptAuthJson'),
   'D6 且是「**先探测、后解密**」：先按原样解析判断是否信封，再决定是否解密 —— 顺序颠倒就检测不到加密');
-ok(refreshFn.includes("fs.writeFileSync(tmp, JSON.stringify(nextRoot, null, 2)"),
-  'D7 明文路径（≤5.5）的落盘分支原样保留 ⇒ 本机行为不变');
+ok(refreshFn.indexOf('wdCompatEncryptAuthJson(root, stored)') > 0
+  && refreshFn.indexOf('wdCompatEncryptAuthJson(root, stored)') < refreshFn.indexOf('await refreshAuthToken(auth'),
+  'D7 ⭐ 加密可写性在**刷新之前**预检：refresh token 一旦被上游轮换就无法回滚，'
+  + '不能等刷新成功才发现存不下（这正是上游 1.2.18 加预检的原因）');
 ok(!LIB_SRC.includes('wdCompatLog(key') && !/wdCompatLog\([^)]*\bkey\b/.test(LIB_SRC),
   'D6 密钥不进日志（wdCompatLog 的调用参数里不出现 key 变量）');
 

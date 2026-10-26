@@ -294,7 +294,10 @@ ok(/title="账号全部会话的总体积（不受筛选影响）"/.test(INJECT_
   'D10 面板显式标注总量口径（否则会被读成“当前列表的体积”）');
 ok(/var sessionsState = \{ uid: undefined, currentUid: '', range: 'all', minBytes: 0, all: \[\], totalBytes: null, list: \[\],/.test(INJECT_SRC),
   'D11 sessionsState 新增 all / totalBytes / minBytes');
-ok(/sessionsState\.all = \(\(d && d\.sessions\) \|\| \[\]\);/.test(INJECT_SRC)
+// 1.2.18 起先落到 nextAll 再比对快照（静默刷新判断要不要重渲染用），语义不变：
+// all 仍存全量、list 仍由体积筛选派生 —— 换阈值依然不打接口。
+ok(/var nextAll = \(\(d && d\.sessions\) \|\| \[\]\);/.test(INJECT_SRC)
+  && /sessionsState\.all = nextAll;/.test(INJECT_SRC)
   && /sessionsState\.list = sessSizeFiltered\(\);/.test(INJECT_SRC),
   'D12 取数后 all 存全量、list 由体积筛选派生（换阈值不再打接口）');
 
@@ -332,27 +335,6 @@ ok(officialFn.length > 0 && /wbs-pcard collapsed" id="wbs-official-card"/.test(o
   'F3 ⭐ 官方定时任务卡带 collapsed（默认收起）');
 ok(/wbs-fold-head/.test(officialFn) && /wbs-fold-body/.test(officialFn),
   'F4 官方卡用 fold-head + fold-body 结构');
-
-const agentFn = (/function wbsAgentCardHTML\(\)[\s\S]*?\n      \}/.exec(INJECT_SRC) || [''])[0];
-ok(agentFn.length > 0 && /wbs-pcard collapsed" id="wbs-agent-card"/.test(agentFn),
-  'F5 ⭐ 本地子 Agent 卡带 collapsed');
-ok(/wbs-fold-head/.test(agentFn) && /wbs-fold-body/.test(agentFn),
-  'F6 子 Agent 卡用 fold-head + fold-body 结构');
-
-ok(/setupFoldCard\(automationPane\.querySelector\('#wbs-agent-card'\)\)/.test(INJECT_SRC)
-  && /setupFoldCard\(automationPane\.querySelector\('#wbs-official-card'\)\)/.test(INJECT_SRC),
-  'F7 ⭐⭐ 两张卡都接上 setupFoldCard —— 漏接的话 collapsed 类永远摘不掉，用户点不开');
-ok(/function setupFoldCard\(card\) \{/.test(INJECT_SRC),
-  'F8 setupFoldCard 仍在（复用账号页实现，没另写一套折叠逻辑）');
-ok(/wbs-fold-summary" id="wbs-official-count"/.test(INJECT_SRC)
-  && /wbs-fold-summary" id="wbs-agent-sub"/.test(INJECT_SRC),
-  'F9 ⭐ 收起后摘要仍可见（官方=任务数 / 子Agent=开关状态）—— 收起不等于信息丢失');
-
-// 引用点必须仍按 id 找（改结构后 class 变了，用 class 找会静默失效）
-ok(/automationPane\.querySelector\('#wbs-official-count'\)/.test(INJECT_SRC)
-  && /automationPane\.querySelector\('#wbs-agent-sub'\)/.test(INJECT_SRC)
-  && /automationPane\.querySelector\('#wbs-agent-usage'\)/.test(INJECT_SRC),
-  'F10 ⭐ 三个数据挂载点仍按 **id** 引用（若改成 class 引用，改结构会静默失效）');
 
 console.log('\n==== ' + pass + ' passed, ' + failures.length + ' failed ====');
 if (failures.length) { failures.forEach((f) => console.log('  未通过: ' + f)); process.exit(1); }

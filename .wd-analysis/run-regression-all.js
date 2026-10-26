@@ -15,7 +15,7 @@ const SUITES = [
   ['test-space-ui.js', 70],
   ['test-limit-failover.js', 47],
   ['test-limit-switchback.js', 138],
-  ['test-idle-switchback.js', 134],
+  ['test-idle-switchback.js', 135],
   ['test-switch-sync.js', 63],  // 2026-09-21 手动强制覆盖：C18 形态更新 + C22–C27 六条新守卫
   ['test-lineage-dedupe.js', 34],
   ['test-cloud-ghosts.js', 86],
@@ -52,7 +52,7 @@ const SUITES = [
   ['test-session-dirty-wiring.js', 49],  // 上游 1.2.6 吸纳/批次 3（A1 + A5-B6）：脏索引接线。**接线就绪 + 开关默认关**。守：索引持久化（本地口径 atomicWriteText / 去抖 / unref）、POST /api/sessions/dirty 的三道守卫 + 隐私边界、renderer feed 独立订阅与解绑；[B] 组用「出仓代码里没人写 fingerprintVersion」**硬证明规划期快路径今天必然不可达**，并守住「没有动 archived 过滤链的形态」（那条链是归档不变量的守卫锚点）；[D]/[E] 组行为级守 fail-open（未建基线恒 true，写反=静默漏同步）与抖动过滤（账号 reload / 仅 lastActivityAt 漂移不算脏）
   ['test-account-token-refresh.js', 48],  // 上游 1.2.12 吸纳/B4：面板打开时刷新全部账号 token。[A] daemon 契约（状态文件落 DATA_DIR / in-flight 合并 / mtime+size 指纹 / 带签名比对的时间状态 / 新路由排在 GET /api/accounts 之前且失败落 500 不裸抛）+ [B] 保活改按**自然日**（跨零点即新一天，不再满 24h）+ 按天去重 + force 只放宽非 daily 路径 + 并发合并（快速开关面板不产生 token 风暴）+ 单账号并发上限 3 + 结束清 in-flight + 返回四件套 + [C] ⭐ 隐私红线（rememberTokenRefreshSuccess **只**写公开时间字段，函数体里不得出现任何 token 字段名；落盘 0600）+ [D] 列表合并优先级（内存缓存→落盘状态→原样，全过签名比对）+ [E] inject 侧（先快照后触发 / 仅本次打开 / **代际守卫**防旧副本写 DOM / 零刷新不再取快照 / 整链 catch 兜底）+ [F] 反向守卫（写状态文件处禁 token 字段 / 必须在 DATA_DIR 下 / 临时名带 pid / 刷新本体不直接落盘 / 两文件纯 CRLF）
   ['test-automation-protocol-v3.js', 111],  // 上游 1.2.5 吸纳/B 组协议 V3：校验负向门（V1/V2 拒 prepare、prepare 只读白名单、condition 形状）+ prepare/condition 真跑语义（切换前执行 / 跳过不切不跑 / 收尾还原不受影响）+ orderCheckinAccounts 稳定排序 + B4 闸门有界可取消 + A9 失败屏障 + A11 409 + 接线静态守卫（含「不搬上游 job.completion / waitAutomationSyncJob」的反向守卫）
-  ['test-upstream-125-step4-panel.js', 108],  // 上游 1.2.5 吸纳/Step 4：A7 作业指标（真跑切片函数 + 速率口径）+ A8 大会话提示 + A7/A8 面板文案整句入典（含重复 key 去重守卫）+ A10 会话体积/总量口径（总量不受筛选）+ 体积筛选字节精确
+  ['test-upstream-125-step4-panel.js', 102],  // 上游 1.2.5 吸纳/Step 4：A7 作业指标（真跑切片函数 + 速率口径）+ A8 大会话提示 + A7/A8 面板文案整句入典（含重复 key 去重守卫）+ A10 会话体积/总量口径（总量不受筛选）+ 体积筛选字节精确
   ['test-account-health.js', 139],  // v1.4.5 F2：13 层分类顺序（含两条反向对照）+ 三条迁移纪律（不加深 / 取更远者 / 硬不降级）+ A5 分级排除 + A8 双状态位与幂等 + daemon 端点与切片反向守卫 + 面板徽标/i18n/CSS + mac 白名单；2026-09-23 补 E25 传递闭包白名单守卫 +1
   ['test-failover-manual.js', 62],  // F5：手动「换号并续跑」入口 —— markBlocked 三态（缺省零变化 / false 不写限流窗口）+ ports 装配与 core 分居两处（含模块级名字打错的静态守卫）+ 手动路由两个前置刻意不要求且立即 202 + status 透出不带正文 + 面板整句词条与 data-wbs-i18n-skip（数据不被当文案翻）
   ['test-context-audit.js', 59],  // 省 token 吸纳：上下文体检（记忆/skill 体积 + 会话成本形状）—— frontmatter 块标量 / 阈值分级 / 目录树行数真数 / 副本行去重 / sessionRoot 默认值回归（第一版传 home 导致会话维度静默全零）+ daemon 路由只读性静态守卫
@@ -64,16 +64,34 @@ const SUITES = [
   ['test-upstream-127.js', 96],  // 上游 1.2.7 吸纳/批次 1+2+3：theme-patches 3 条新补丁（patch-102/103/104 逐条 CSS 片段 + 老条目未丢）+ usageModel 行为级四形状（旧代码是 [object Object]）+ 缓存版本 1→2（常量 + **行为级**：v1 忽略/v2 采纳）+ inject.js 六处定点 10 落点与 4 处旧形态消失 + toast 第四参向后兼容 + [F] Linux 三段（11 落点 + 上游 open-url 行为规范的 vm 真跑：三平台命令/参数/unref、非 http(s) 拒且不 spawn、缺 xdg-open 时 500 且**错误不回流 URL**）；含三条边界登记（数字 0 被 String(0) 采用 / usageModel(null) 抛 TypeError 但生产不可达 / 第二处 IS_WIN||IS_LINUX 属本地既有 CDP 路径）；2026-09-27 随 1.2.8 升到 100 条并加 A2b（patch-41 已按上游删除，不许回填）
   ['test-upstream-128.js', 63],  // 上游 1.2.8 吸纳（5 批全落地）：[A] 主题三件套必须同批（patch-105/106 + patch-41 已删 + theme-vars nebula 透明变量 + nebula theme.json）+ [B] 同步备份生命周期（prune/inspect 导出面、SYNC_BACKUP_DIR、changedTargetFiles 两处调用）+ [C] 模型限流表行为级（UPSERT/**过期自动清**/resetAt=null 只记不删/参数校验）+ [D] setAccountNote 行为级（原型污染串/白名单/2000 字/账号不存在/认证备份一字未动）+ [E] daemon 六路由与**直连 require session-sync**（漏了会 ReferenceError）+ [F] 本地红线与自研未被冲掉（无 firstTargetCopy / 无 mappingTargetLifecycleRevisionMatches / 4 个旧主题函数已删且无遗留调用 / 本地 5 处自研内容仍在 / 积分趋势仍 false）+ [G] 11 个关键文件行尾
   ['test-zh-reasoning.js', 29],  // 2026-09-29 中文思考开关（写入官方「全局自定义指令」settings.personalization.customPrompt）：vm 真跑纯函数 —— 块形状（起止标记精确包裹/首句直接思考指令/豁免代码命令路径/留语言出口）+ strip 安全性（空输入安全/无块不动/标记残缺不误删）+ ⭐ 开→关往返逐字节恢复用户内容 + 幂等（重复开启只一个块）+ ⭐ 与「决策弹窗」段共存互不干扰 + 两侧接线（daemon 两路由/启动刷新/关空时删键；inject 可见开关 + 失败回滚 UI 勾选态）
-  ['test-api-gateway.js', 68],  // 2026-09-30 反代网关集成（sidecar）：checksums 解析 + 凭证桥（毫秒→秒/realm 推断/缺字段拒绝/uid 清洗防穿越）+ config 三条安全默认（listen 锁回环 / api_key 非空强制 / 定时任务全关）+ 纯 JS zip 自解压（stored+deflate / zip slip 拒绝 / 非法压缩法拒绝 / 真实官方包 sha256 与 checksums 一致且解出 PE 头）+ 状态不落 api_key + 目录布局 + 模型闭环（id/name 加前缀让同名共存 / 重复注册幂等 / 裸 id 撞车由 occupied 保护 / 撤销后用户条目逐字节恢复）
+  ['test-api-gateway.js', 113],  // 2026-09-30 反代网关集成（sidecar）：checksums 解析 + 凭证桥（毫秒→秒/realm 推断/缺字段拒绝/uid 清洗防穿越）+ config 三条安全默认（listen 锁回环 / api_key 非空强制 / 定时任务全关）+ 纯 JS zip 自解压（stored+deflate / zip slip 拒绝 / 非法压缩法拒绝 / 真实官方包 sha256 与 checksums 一致且解出 PE 头）+ 状态不落 api_key + 目录布局 + 模型闭环（id/name 加前缀让同名共存 / 重复注册幂等 / 裸 id 撞车由 occupied 保护 / 撤销后用户条目逐字节恢复 / 接线 bili 后剥包裹前缀再判同源（否则 5 条已注册全判 absent、应用时多造一份副本））
   ['test-switch-presync.js', 73],
   ['test-skill-refs.js', 11],
   ['test-audit-fixes.js', 21],
   ['test-official-schedule.js', 20],
   ['test-upstream-1211.js', 26],
   ['test-launcher-privilege.js', 26],
-  ['test-daemon-probe-guard.js', 14],  // 2026-10-14 上游 1.2.14（1.2.38）吸纳：daemon 探测子进程不得递归派生。静态（守卫在 refreshClientRunning 体内 / 顶层无裸调用 / startClientRunningMonitor 落在 acquireDaemonLock 之后 / 两个探针超时常量已接线）+ 动态（真跑 --probe-client-running 入口 ×4 profile，preload 拦截 execFile 断言累计派生 0，且入口仍能应答 {running:…}）
-  ['test-agent-hint.js', 101],
-  // 2026-10-01 本地子 Agent 提醒开关 + 使用记录：规则写进官方全局自定义指令（每个会话生效）/ 关闭=既不提醒也不注入（摘除后用户内容原样保留 + 开→关字节级还原）/ jsonl 解析严格只认 name 为 Agent（防正文提模型名误报）/ 本地承担 vs 漏到云端 / 口径守卫（不得出现省 token 或划算这类推不出来的结论）/ 面板开关失败回滚 + i18n 整句入典  // 2026-10-01 官方 5.7.3 定时任务「融合」：只读官方 automations 表（硬约束：全仓无写操作）/ 时间戳单位按数量级判别（created_at 秒 vs next_run_at 毫秒）/ 冲突检测只判 daily / 面板引导 + i18n 整句入典 / 活体验证 nextSlot 年份合理  // 2026-10-01 全面审查 4 项修复：复制跳过特殊文件（含「必须放行符号链接」的回归守卫）/ cloud-ghosts 日志澄清（含 D12 契约反向守卫）/ 渲染层错误记录兜底（行为级验证不再出现 error: null）/ 代码索引覆盖扩容 4→10  // 2026-10-01 知识页「自愈」守卫：文件引用存在性 + 行号越界 + 反查表章节验真（借鉴 Hindsight Knowledge Pages 的 self-healing）  // 2026-09-30 切号「预同步+进度弹窗」：core 顺序重排（预同步先于切号 / 失败中止整轮不走 per-round catch / 可选端口守卫保证既有切片套件逐字等价 / 切片沙箱零标识符泄漏）+ 弹窗阶段机（惰性过期 / 取消复用既有中止机制 / 未活跃过不凭空造弹窗）+ 「只等 meta 阶段」判据 + 路由与 UI 静态守卫
+  ['test-codebuddy-launcher-identity.js', 16],  // 2026-10-22 CodeBuddy 启动入口（方案A 直跑 node 启动器）：A 进程身份白名单认识 "codebuddy cn.exe"（缺它 ⇒ Expected executable is not a WorkBuddy-family binary，重启客户端那步直接崩，实测复现）+ 反向两条（外来 exe / 带路径分隔符的进程名仍拒）+ B start-codebuddy.cmd 纯 CRLF 且清 ELECTRON_RUN_AS_NODE（否则 --remote-debugging-port 变 bad option exit 9，实测前后对照）+ NODE_OPTIONS + WBSWITCH_NATIVE_LAUNCHER（原生发现只认 WorkBuddy 名字）+ 内置 node + profile 绑定 + C 能力表自洽（cdp / nativeComposer / enhance:false / binaryNames 对齐）
+  ['test-codebuddy-lite-mode.js', 32],  // 2026-10-22 CodeBuddy 轻量版 + 注入健壮性：A daemon 漏导入 selectIdeTargets（每次 ideSyncScan 抛 ReferenceError ⇒ IDE 主窗口从未注入，实测 8 次/40 秒）+ B 全局错误钩子同类节流（CodeBuddy 的 AutomationBridge 失败 13 秒抛出 2870 条 unhandledrejection，250 条/秒，日志涨到 3.7MB）+ C 轻量版（codebuddy 两个 profile 标 lite，只摘 theme/automations/pc 页签且不碰 pane 容器；daemon 不装内置任务、不调度）+ D 行尾与语法
+  ['test-codebuddy-inject-wait.js', 37],  // 2026-10-23 「一堆注入报错」：A /api/inject 把「主连接未就绪」当失败（launcher 每秒一条，30 条刷屏）⇒ manual 注入先主动等主连接 8s + 失败后 20s 冷却（不许每次重试都硬耗 8s）+ B CodeBuddy 主 target agentManager.html 是懒创建的（不开 AI 面板就没有），而 IDE 通道 workbench.html 早已注入成功（实测 [cdp-ide] IDE 浮层已注入）⇒ ideChannelMounted 成立即返回 mounted:true，不再误报失败 + B-2 状态页不再误报「调试端口不可达，请一键恢复」+ C launcher 单次请求超时 5s→12s、重试 24 次递增退避（前 6 次 1s 后 3s）、进度日志只在第 1 次与 5 的倍数打印 + D 真跑 injectRetryDelay 与 waitForManualCdpReady 冷却语义 + E 行尾与语法
+  ['test-daemon-probe-guard.js', 14],
+  ['test-models-file-format.js', 43],  // 2026-10-23 「从 WorkBuddy 导入模型显示成功、CodeBuddy 里一个都看不到」：CodeBuddy 的 models.json 是**对象** { models: [...] }（主进程 buildLocalCustomModelsResponse 只读 e.models，裸数组 ⇒ 0 条），WorkBuddy 是裸数组 ⇒ 按 profile 决定形态。A lib.js 形态判据（modelsFilePrefersObject / buildModelsFileDoc / normalizeModelsFileFormat / read 按 wantObject / write 统一构建 / 导出）+ ⚠️ availableModels 是可见性白名单，缺失或空数组时客户端不过滤 ⇒ **绝不凭空创建**，已有的只做并集 + B daemon 三条写盘路径（register-models / set-model-context / 启动迁移幂等，且在 acquireDaemonLock 之后）+ C 隔离 HOME 真跑（codebuddy 落盘对象且无 availableModels、导入 2 条、重复幂等、迁移留 .bak-array 备份；workbuddy 全程仍是裸数组）+ D 行尾与语法  // 注意：断言网关那两行必须走 daemonFlat —— codeOnly 的块注释剥离会被「与其它 /api/* 同一条」里的 `/*` 带偏，整段 500 行凭空消失
+  ['test-upstream-1215.js', 30],  // 2026-10-16 上游 1.2.15 吸纳守卫（只取 1.2.40 + 1.2.41）：A 正向 19 条（lightClientRunning 走 tasklist 不碰 WMI / ⭐ 探测子进程入口真的改用它 / safeClientRunning 保留给安全路径 / 刷新 5s→15s + 环境变量覆盖 / 两处 CIM 都加 -Filter / 失效卷跳过 + 同卷根只提示一次 / ⭐ UPSTREAM_VERSION 同步 1.2.15）+ B 反向 4 条（⛔ 守住「不吸纳同步个性化」：persona 那批函数与路由一个都不许进来）+ C vm 桩测 6 条（tasklist 命中/未命中/探测失败三分支 + 首个命中即返回 + Linux 分支 + 异常兜底）+ D 真跑 --probe-client-running 入口不炸
+  ['test-close-popups-preset.js', 34],
+  ['test-gateway-account-sync.js', 33],  // 2026-10-16 网关账号池同步（修「新登录账号永远进不了池」：auths 原本只在 install 时写一次）：A syncAuthDocuments 增量语义真值 16 条（新增 / 幂等零写入含 mtime / 内容变了只重写一个 / 不在名单则删 / ⭐ 删除前三重保险：解析不出 uid、uid 与文件名不符、非 workbuddy- 前缀一律保留 / 异常入参不炸）+ B daemon 挂钩 10 条（网关未装零开销短路 / 新路由 / ⭐ scheduleBackup 后自动同步 / 启动同步 / status 透出 accountPool.missing / install 改走 sync 且旧全量调用已移除）+ C vm 切片真跑（未装 ⇒ skipped）+ D 面板抓手 6 条（漂移提示 + 「同步账号池」按钮 + 暗色样式）  // 2026-10-16 侧栏运营位轮播广告（Shadow DOM 内的 pc_fusion_carousel_close）纳入内置关闭任务：preset 静态（rev 3 + 两个历史 hash + 新定位器 5 组不丢旧 4 组 + ⭐ 定位器不得带 visible 否则 skipMove 点不动 + 挂在 delay 之前 + pageReady 触发不变）+ daemon 遮挡判定放宽到接受「命中 el 的祖先」（附 getRootNode 与 skipMove 判据）+ 真跑 installBuiltinTask（临时 dataDir：升级到 rev3 / 保留 enabled / 标记前进 / 用户改过则 skipped 且原样保留 / 重复升级幂等）  // 2026-10-14 上游 1.2.14（1.2.38）吸纳：daemon 探测子进程不得递归派生。静态（守卫在 refreshClientRunning 体内 / 顶层无裸调用 / startClientRunningMonitor 落在 acquireDaemonLock 之后 / 两个探针超时常量已接线）+ 动态（真跑 --probe-client-running 入口 ×4 profile，preload 拦截 execFile 断言累计派生 0，且入口仍能应答 {running:…}）
+  ['test-dsh-ops-integration.js', 62],  // 2026-10-15 吸纳 T-Auto/dsh-ops（Rust 原生检索/批处理 → MCP）：桥脚本随包（shebang / -wb 标记 / 只依赖 node 内置 / HERE 相对 worker 路径 / read_only 与 write_roots）+ daemon 四路由十一函数 + 固定上游包版本与 sha512 integrity + 镜像源环境变量 + 非 Windows 拒绝 + 卸载「目录精确相等 + manifest」双重守卫 + mcp.json 损坏时拒写 + inject 专用卡（旧通用 MCP 卡已彻底移除 + 四个 API 调用 + 主按钮/暗色适配 + armed 二次确认 + 平台不支持分支）+ vm 切片真值（tar 解析 5 项 / sha512 校验 4 项）+ mac 白名单两处；含三条自检（A5b 只 node 内置 import / A5c write_roots 圈定 / B7b 有 manifest 才删）
+  ['test-gateway-console.js', 171],  // 2026-10-15 反代网关「毛坯 → 控制台」重做：A 集成层真跑（版本钉 v1.13.0 + 资产名跟随 + 三条安全默认 + ⭐ preserve 升级不丢配置 12 条：用户改动保留 / 新键取模板默认 / 废弃键不带回 / 时间表保留而 *_enabled 不生效 / 管理键不被污染 / 不传 preserve 零回归 / 入参无副作用）+ B daemon（4 新路由 pool/log/set-enabled/probe + 5 新函数 + /api/gateway 改缓存快照 + healthz 的 healthy 是「可用账号数」不是布尔 + versionDrift/autoStart/registeredModelCount + install 三硬化：先停进程 / 复用 api_key 防 401 / preserve 旧配置 + 装完重拉 + 池快照白名单映射）+ C 面板（7 个新 DOM + 5 个新函数 + mini-btn 禁用态 + 启停互斥可用 + 自动拉起开关 + 日志懒加载 + 旧哑按钮写法清零）
+  ['test-codebuddy-session-store.js', 4],  // 阶段① 地基：CodeBuddy 虚拟 sessions 表（VS Code state.vscdb 的 ItemTable 是 key-value，不是 SQL；读写都走官方主进程服务）
+  ['test-codebuddy-files.js', 12],  // 阶段① 地基：CodeBuddy 四棵历史树（history/plan-task/check-point/file-tree）的归档/迁移/删除事务 + 用量按账号历史树采集（含已删除会话的墓碑）
+  ['test-codebuddy-native.js', 7],  // 阶段① 地基：CodeBuddy 原生登录态替换（经 CDP 找 ipcMain auth handler，不 patch app.asar、不伪造 renderer 状态）
+  ['test-codebuddy-native-recovery.js', 5],  // 阶段① 地基：CodeBuddy 原生会话恢复的选号判据（只用已确认可用的备份；显式退出登录不得自动恢复）
+  ['test-sidebar-ad-guard.js', 25],  // 2026-10-21 侧栏运营位（积分包/成长活动轮播）常驻清理器：[A] 注入位置与幂等（重注入必须停掉旧 setInterval）· [B] ⭐ 必须发完整 pointerdown→mousedown→pointerup→mouseup→click（简化序列静默失效）· [C] 不可见不扫 / 恢复可见立刻扫 / 点不掉兜底隐藏宿主 / slot 换内容要还原 / CodeBuddy 早退 · [D] 语法 + 纯 CRLF
+  ['test-codebuddy-daemon-wiring.js', 49],  // 阶段②③ 接缝（静态，因为真的读写要跑起客户端）：[A] 模块装配（sessionSync 必须 let）· [B] 会话库读写走 CODEBUDDY_SESSIONS 且旧手工正则嗅探已清除 · [C] Token 统计带历史树清单与兄弟 profile 隔离、思考效率页保持关闭 · [D] 注入层（selectIdeTargets / 只认 agentManager 的主连接 / binding 通道 / TrustedTypes bootstrap + 四处 innerHTML 重写 / injectWidget 必须 async · [E] inject 侧面板适配（mountPersistentOverlay / 浅色外观 / apiTransport=cdp 走 binding 桥 / nativeComposer 图标与配色 / CAPS.appName 的门控前置）· [E18–E22] daemon 侧发送路径按 profile 拼分支（声明必须在 sendExpr 之前）+ 改派发 click
+  // 2026-10-01 官方 5.7.3 定时任务「融合」：只读官方 automations 表（硬约束：全仓无写操作）/ 时间戳单位按数量级判别（created_at 秒 vs next_run_at 毫秒）/ 冲突检测只判 daily / 面板引导 + i18n 整句入典 / 活体验证 nextSlot 年份合理  // 2026-10-01 全面审查 4 项修复：复制跳过特殊文件（含「必须放行符号链接」的回归守卫）/ cloud-ghosts 日志澄清（含 D12 契约反向守卫）/ 渲染层错误记录兜底（行为级验证不再出现 error: null）/ 代码索引覆盖扩容 4→10  // 2026-10-01 知识页「自愈」守卫：文件引用存在性 + 行号越界 + 反查表章节验真（借鉴 Hindsight Knowledge Pages 的 self-healing）  // 2026-09-30 切号「预同步+进度弹窗」：core 顺序重排（预同步先于切号 / 失败中止整轮不走 per-round catch / 可选端口守卫保证既有切片套件逐字等价 / 切片沙箱零标识符泄漏）+ 弹窗阶段机（惰性过期 / 取消复用既有中止机制 / 未活跃过不凭空造弹窗）+ 「只等 meta 阶段」判据 + 路由与 UI 静态守卫
+  ['test-workbuddy-launch-env.js', 28],  // 上游 1.2.16 / #424：客户端「一重启就自动升级、不装完不让开窗」——官方 Windows updater 会在检查 feed 前恢复缓存的 Setup.exe，只钉 URL 拦不住。A 纯函数（TEMP/TMP 隔离到 <dataDir>/client-tmp/<id> 且真建目录 / 不套娃 / CN 与 intl 各自的更新域 / 配置目录与数据目录名 / 非 win32、codebuddy、customTarget 一律原样 / 路径非绝对时 throw 而不是静默不隔离 / 小写 temp 别名必须清 / 不 mutate 入参 / 保留无关变量）· B win-launcher 接线（引入 / launchWorkBuddy 走 getWorkBuddyLaunchEnv / 旧的「只补 CDP 变量」内联写法已清除 / environment 分支仍在）· C daemon 接线（relaunchWorkBuddy 同步接线 + 裸 process.env 副本已清除 + windowsHide:false 修「重启后只剩托盘」）· D 打包白名单两处 + 纯 CRLF
+  ['test-client-tmp-cleanup.js', 25],  // client-tmp 回收（TEMP 隔离的配套）：A 盘点 13（超龄入选 / 新鲜保留 / 目录按自身 mtime / 含子目录体积 / root 缺失与相对路径一律空计划 / maxEntries 截断 / 自定义保留期 / 符号链接只删链接 / isInside 拒同名前缀）· B 执行 6（dryRun 不动盘 / 真删文件与目录 / 新鲜文件留下 / EBUSY 计入 failed 不抛 / 只删盘点清单里的路径）· C daemon 接线 5（require / 启动一次 / 24h / timer.unref / root 取 clientTmpRoot(DATA_DIR)）· D 纯 CRLF + mac 白名单两处
+  ['test-token-persist-encrypted.js', 22],  // 上游 1.2.18：加密态账号「刷新成功但存不进文件」（旧行为=只丢内存+日志「仅保存在内存」，daemon 一重启就退回旧 token）。A 加密写回语义 4（无加密模板直接拒绝 / 解密→改→加密→再解密逐字段一致 / 写回仍是密态且不含明文 / 加解密共用同一 AAD）· B lib 结构 5（AAD 抽出 / setAAD 复用 / 写前先验证原信封可解 / 凭据白名单只封这几个 / 已导出）· C daemon 落盘 12（persistRefreshedAccount 定义 / ⭐ 双 CAS：签名 + 全文比对 / 加密态按原信封重加而非写明文 / wx 独占临时文件 + rename / 失败日志不带异常原文 / ⭐ 刷新前预检可写性否则 encrypt-account-unavailable 不刷 / pendingPersistence 标记 + 补写路径 / 旧「仅保存在内存」与旧 read-failed 拼消息已清除）· D 两个文件仍纯 CRLF。⚠️ A2–A4 依赖本机存在加密态账号备份，缺失时 skip 3 条（pass 变 19）
+  ['test-session-silent-refresh.js', 18],  // 上游 1.2.18：会话列表「后台刷新把用户勾选冲掉」（自动复制收尾会延迟重载，旧实现每次都 selected={} + 退出批量模式）。A 闸门 5（四个不刷场景：批量/有勾选/页面隐藏/弹窗可见 + 面板必须 active + 自动复制在跑不刷 + 入口再拦一次）· B 静默语义 10（options.silent 解析 / ⭐ readSerial 竞态只认最新响应 / 快照比对数据没变不重渲染 / 不动 selected / 不退出批量模式 / 保住滚动 / 静默失败不擦列表）· C 调用边界 2（自动收尾走静默；用户切筛选仍走普通刷新，该清勾选就清）· D 纯 CRLF
 ];
 
 // ── 0) 代码索引保鲜（2026-10-01 新增）─────────────────────────────────────────
@@ -102,10 +120,16 @@ for (const [file, expect] of SUITES) {
   }
   const lines = text.split(/\r?\n/).filter((l) => l.trim());
   const summary = lines.filter((l) => /pass|fail|通过|失败/i.test(l)).slice(-1)[0] || lines.slice(-1)[0] || '';
-  const m = summary.match(/(\d+)\s*pass\s*\/?\s*(\d+)?\s*fail/i)
-    || summary.match(/(\d+)\s*passed,\s*(\d+)\s*failed/i)
-    || summary.match(/passed=(\d+)\s+failed=(\d+)/i)
-    || summary.match(/结果：\s*(\d+)\s*通过\s*\/\s*(\d+)\s*失败/);
+  // node:test（TAP）风格：pass 与 fail 分两行输出（`# pass 12` / `# fail 0`），
+  // 不能只取最后一行，否则永远解析不到 → f 为 null → 误判整套 FAIL。
+  const tapPass = /^# pass (\d+)\s*$/m.exec(text);
+  const tapFail = /^# fail (\d+)\s*$/m.exec(text);
+  const m = (tapPass && tapFail)
+    ? [null, tapPass[1], tapFail[1]]
+    : summary.match(/(\d+)\s*pass\s*\/?\s*(\d+)?\s*fail/i)
+      || summary.match(/(\d+)\s*passed,\s*(\d+)\s*failed/i)
+      || summary.match(/passed=(\d+)\s+failed=(\d+)/i)
+      || summary.match(/结果：\s*(\d+)\s*通过\s*\/\s*(\d+)\s*失败/);
   const p = m ? Number(m[1]) : null;
   const f = m ? Number(m[2] || 0) : null;
   const okFlag = code === 0 && f === 0;

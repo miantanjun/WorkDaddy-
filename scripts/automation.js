@@ -316,7 +316,14 @@ function taskIsPassiveCleanup(task) {
   const walk = value => {
     if (Array.isArray(value)) value.forEach(walk);
     else if (value && typeof value === 'object') {
-      if (value.op) { if (!allowed.has(value.op)) valid = false; if (value.op === 'dom.click') { clicks++; const locators = value.locators || [value.locator]; if (!locators.every(l=>l && l.visible === true && (l.intent === 'dismiss' || /close|dismiss|关闭|不再展示/i.test(l.value || '')))) valid = false; } }
+      if (value.op) { if (!allowed.has(value.op)) valid = false; if (value.op === 'dom.click') {
+        clicks++;
+        const locators = value.locators || [value.locator];
+        // ⚠️ 不能用「visible === true」当必要条件：Shadow DOM 里的关闭按钮必须省略 visible，
+        //    否则 dom.click 会 skipMove（不先发 mouseMoved），按钮收不到 hover 就不响应点击。
+        //    只拒绝显式 visible:false（「连隐藏的也点」），缺省按可接受处理。
+        if (!locators.every(l => l && l.visible !== false && (l.intent === 'dismiss' || /close|dismiss|关闭|不再展示/i.test(l.value || '')))) valid = false;
+      } }
       Object.values(value).forEach(walk);
     }
   };

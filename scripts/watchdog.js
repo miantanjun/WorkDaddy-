@@ -20,7 +20,16 @@ const DATA_DIR = process.env.WBSWITCH_DATA_DIR || profileDataDir(PROFILE);
 const PID_FILE = path.join(DATA_DIR, 'watchdog.pid');
 const LOG_FILE = path.join(DATA_DIR, 'watchdog.log');
 const DAEMON_FILE = path.join(__dirname, 'daemon.js');
-const LOCK_PORT = PROFILE.id === 'workbuddy-ai' ? 47933 : 47932;
+// ⚠️ 2026-10-20（多 profile 并存）：单实例锁端口必须**按 profile 唯一**。
+//   原来只有 workbuddy-ai 单独占一个，其余三个 profile 全挤在 47932
+//   ⇒ 第二个 profile 的 watchdog 抢不到回环锁（EADDRINUSE）直接退出，
+//     workbuddy 与 codebuddy 根本无法并存。
+const LOCK_PORT = {
+  'workbuddy-cn': 47932,
+  'workbuddy-ai': 47933,
+  'codebuddy-cn': 47934,
+  'codebuddy-intl': 47935,
+}[PROFILE.id] || 47932;
 
 let child = null;
 let stopping = false;
@@ -89,7 +98,11 @@ function removePidFile() {
 
 function startDaemon() {
   if (stopping) return;
-  const args = ['--experimental-sqlite', DAEMON_FILE];
+  // ⚠️ 2026-10-20：--profile= 必须排在脚本路径**之后**（见下方注释；filterVerifiedNodeProcesses
+  //   要求脚本名后不能有参数），它让 launcher 能按 profile 枚举出本实例。
+  // ⚠️ 参数必须排在脚本路径**之后**：Node 会把脚本**之前**的 `--xxx` 当成自己的选项，
+  //   不认识就报 bad option 并 exit 9（2026-10-20 实测：daemon 每次启动 60ms 内退出）。
+  const args = ['--experimental-sqlite', DAEMON_FILE, '--profile=' + PROFILE_ID];
   log('启动 daemon: ' + process.execPath + ' ' + args.join(' '));
   const startedAt = restartBackoff.onStarted();
   child = spawn(process.execPath, args, { stdio: 'ignore', windowsHide: true, env: process.env });

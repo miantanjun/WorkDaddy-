@@ -181,16 +181,20 @@ function wdCompatStaticKey() {
   throw new Error(lastErr);
 }
 
-function wdCompatOpenEnvelope(env, key) {
+// AAD 构造抽出来供加密复用：写入时必须与打开时的 AAD 完全一致，否则客户端解不开。
+function wdCompatEnvelopeAAD(env) {
   const FRAMING_FIELD = 2, FMT_FIELD = 'WBEV1', AAD_DOMAIN = Buffer.from('WB-AAD\0', 'ascii');
   const lp = (s) => { const b = Buffer.from(s, 'utf8'); const l = Buffer.alloc(4); l.writeUInt32BE(b.length); return Buffer.concat([l, b]); };
   const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
-  const aad = Buffer.concat([
+  return Buffer.concat([
     AAD_DOMAIN, Buffer.from([1]), lp(FMT_FIELD), lp('sym-v1'), u32(env.suite || 1),
     lp(env.keyId || ''), Buffer.from([FRAMING_FIELD]), Buffer.from([0]), Buffer.from([0]),
   ]);
+}
+
+function wdCompatOpenEnvelope(env, key) {
   const d = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(env.nonce, 'base64'), { authTagLength: 16 });
-  d.setAAD(aad);
+  d.setAAD(wdCompatEnvelopeAAD(env));
   d.setAuthTag(Buffer.from(env.authTag, 'base64'));
   return Buffer.concat([d.update(Buffer.from(env.ciphertext, 'base64')), d.final()]).toString('utf8');
 }
@@ -217,6 +221,51 @@ function wdCompatDecryptAuthJson(json) {
   };
   walk(json);
   return json;
+}
+
+/** 按原备份的字段信封加密刷新结果；密钥或模板不可用时拒绝写入，绝不降级明文。 */
+function wdCompatEncryptAuthJson(json, template) {
+  if (!wdCompatContainsEncryptedFields(template)) throw new Error('missing-encryption-template');
+  const key = wdCompatStaticKey();
+  let fallbackEnvelope = null;
+  const envelopes = new Map();
+  const inspect = (node) => {
+    if (isWbEncryptedEnvelope(node)) {
+      const env = JSON.parse(Buffer.from(node.envelope, 'base64').toString('utf8'));
+      if (env.suite !== 1) throw new Error('unsupported-encryption-suite');
+      wdCompatOpenEnvelope(env, key); // 先验证原信封及密钥，再允许刷新/写入。
+      envelopes.set(node, env);
+      if (!fallbackEnvelope) fallbackEnvelope = env;
+    } else if (node && typeof node === 'object') Object.values(node).forEach(inspect);
+  };
+  inspect(template);
+  const seal = (value, env) => {
+    const nonce = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, nonce, { authTagLength: 16 });
+    cipher.setAAD(wdCompatEnvelopeAAD(env));
+    const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+    return { $wbEncrypted: 1, envelope: Buffer.from(JSON.stringify({
+      suite: env.suite, keyId: env.keyId || '', nonce: nonce.toString('base64'),
+      authTag: cipher.getAuthTag().toString('base64'), ciphertext: ciphertext.toString('base64'),
+    })).toString('base64') };
+  };
+  const credentialKeys = new Set(['accessToken', 'access_token', 'refreshToken', 'refresh_token', 'idToken', 'id_token', 'token']);
+  const walk = (value, original, inAuth = false, field = '') => {
+    if (isWbEncryptedEnvelope(original)) {
+      if (isWbEncryptedEnvelope(value) && value.envelope === original.envelope) return { ...original };
+      if (typeof value !== 'string') throw new Error('invalid-encrypted-field-type');
+      return seal(value, envelopes.get(original));
+    }
+    if (inAuth && credentialKeys.has(field) && typeof value === 'string') return seal(value, fallbackEnvelope);
+    if (Array.isArray(value)) return value.map((item, index) => walk(item, original && original[index], inAuth));
+    if (value && typeof value === 'object') {
+      const result = {};
+      for (const name of Object.keys(value)) result[name] = walk(value[name], original && original[name], inAuth || name === 'auth', name);
+      return result;
+    }
+    return value;
+  };
+  return walk(json, template);
 }
 // ===================== [wd-compat] 适配层结束 =====================
 
@@ -505,17 +554,86 @@ function checkinDisplayValue(record, today) {
   return { ok: !!record.ok, already: !!record.already, code: record.code, message: record.message };
 }
 
+// ⭐ CodeBuddy（VS Code fork）的自定义模型文件是**对象**结构 { models: [...] }：
+//   主进程 loadLocalCustomModelsFile() 只做 JSON.parse + typeof === "object" 检查，
+//   buildLocalCustomModelsResponse() 再只读 `.models` —— 裸数组能通过前者（数组也是 object），
+//   却在后者被解析成 0 条：面板提示「已导入 N 个模型」，客户端模型下拉里一个都没有。
+//   WorkBuddy 那边正好相反，用的是裸数组；两边不能混用 ⇒
+//   按「这个文件属于哪个 profile」决定形态，读和写共用同一判据。
+function modelsFilePrefersObject(file) {
+  try {
+    return ACTIVE_PROFILE.kind === 'codebuddy' && samePath(file, workbuddyModelsFile());
+  } catch (_) {
+    return false;
+  }
+}
+
+// models.json 的输出文档：wrapper 为 null 表示原文件是裸数组（或不存在）。
+// CodeBuddy 侧即使原文件是裸数组，也要输出成对象形态 —— 否则客户端的迁移永远不生效。
+function buildModelsFileDoc(file, wrapper, models) {
+  const list = Array.isArray(models) ? models : [];
+  const base = wrapper && typeof wrapper === 'object' && !Array.isArray(wrapper) ? wrapper : null;
+  if (!base && !modelsFilePrefersObject(file)) return list;
+  const output = Object.assign({}, base || {}, { models: list });
+  // availableModels 是 CodeBuddy 的可见性白名单：**缺失或空数组时它不过滤**
+  // （AvailableModelsFilterProvider.provide() 直接 return {}），所以在它不存在时
+  // **绝不凭空创建**这个键 —— 一创建就得自己长期维护，漏加一个 id 就表现为
+  // 「模型注册了但不出现」，比不写更难查。
+  // 已经存在的非空白名单是用户的显式选择：只做并集补入当前条目，不推翻、不清空。
+  const previous = base && Array.isArray(base.availableModels)
+    ? base.availableModels.filter((id) => typeof id === 'string' && id)
+    : [];
+  if (previous.length) {
+    const ids = list.map((model) => String((model && model.id) || '').trim()).filter(Boolean);
+    output.availableModels = Array.from(new Set(previous.concat(ids)));
+  }
+  return output;
+}
+
+/**
+ * 把磁盘上的 models.json 迁移到本客户端要的形态（幂等，可反复调用）。
+ * 现状：CodeBuddy 侧被历史版本写成了裸数组 ⇒ 客户端读不到任何模型。
+ * daemon 启动时主动搬一次，用户不必等到下一次「保存 / 导入」才修好。
+ * 只改外层形态（数组 → { models }），条目原样保留；先备份再原子替换。
+ */
+function normalizeModelsFileFormat(file = workbuddyModelsFile()) {
+  if (!modelsFilePrefersObject(file)) return { migrated: false, reason: 'not-object-format' };
+  let parsed;
+  try { parsed = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return { migrated: false, reason: 'missing-or-invalid' }; }
+  if (!Array.isArray(parsed)) return { migrated: false, reason: 'already-object' };
+  let backup = null;
+  try {
+    backup = `${file}.bak-array-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    fs.copyFileSync(file, backup);
+  } catch (_) { backup = null; }
+  writeModelsFile({ file, format: 'object', models: parsed, wrapper: {} }, parsed);
+  return { migrated: true, backup, count: parsed.length };
+}
+
 function readModelsFile(file = workbuddyModelsFile()) {
   // 文件不存在视为"还没有模型"，返回空列表而不是抛错——模型页应显示
   // "当前还未添加模型"占位，而不是"当前模型加载失败: 未找到模型配置文件"。
-  if (!fs.existsSync(file)) return { file, format: 'array', models: [] };
+  const wantObject = modelsFilePrefersObject(file);
+  // ⚠️ "文件不存在"时要按**本客户端要的形态**初始化。原来是硬编码 array，
+  //   于是 CodeBuddy 侧第一次写入就把文件写成了裸数组（历史 bug 的起点）。
+  if (!fs.existsSync(file)) {
+    return wantObject
+      ? { file, format: 'object', models: [], wrapper: {} }
+      : { file, format: 'array', models: [] };
+  }
   let parsed;
   try {
     parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (e) {
     throw new Error(`模型配置文件不是有效 JSON: ${e.message}`);
   }
-  if (Array.isArray(parsed)) return { file, format: 'array', models: parsed };
+  if (Array.isArray(parsed)) {
+    // 历史版本在 CodeBuddy 侧也按裸数组写过（~/.codebuddy/models.json）：
+    // 读到就按对象形态交出去，下一次写入自动纠正结构；daemon 启动时的
+    // normalizeModelsFileFormat() 会主动搬一次，用户不必等下次保存。
+    if (wantObject) return { file, format: 'object', models: parsed, wrapper: {} };
+    return { file, format: 'array', models: parsed };
+  }
   if (parsed && typeof parsed === 'object' && Array.isArray(parsed.models)) {
     return { file, format: 'object', models: parsed.models, wrapper: parsed };
   }
@@ -523,7 +641,7 @@ function readModelsFile(file = workbuddyModelsFile()) {
 }
 
 function writeModelsFile(parsed, models) {
-  const output = parsed.format === 'array' ? models : Object.assign({}, parsed.wrapper, { models });
+  const output = buildModelsFileDoc(parsed.file, parsed.format === 'object' ? parsed.wrapper : null, models);
   const file = parsed.file;
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true });
@@ -2199,11 +2317,14 @@ module.exports = {
   wdCompatHasAuthCredential, // [wd-compat]
   normalizeAccountImportJson, // [wd-compat]
   wdCompatDecryptAuthJson, // [wd-compat]
+  wdCompatEncryptAuthJson, // [wd-compat] 上游 1.2.18：加密备份刷新后按原信封写回
   getAccountOrder,
   setAccountOrder,
   setAccountNote,
   readModelsFile,
   writeModelsFile,
+  buildModelsFileDoc,
+  normalizeModelsFileFormat,
   writeModelBackup,
   AUTH_FILE,
   authDir,

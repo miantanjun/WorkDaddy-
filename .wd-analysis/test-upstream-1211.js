@@ -101,12 +101,16 @@ ok(/hint: reloaded \? '已切换并触发窗口刷新' : hint/.test(daemon),
 /* ============ C. 保持不动项（防误吸纳） ============ */
 section('C. 保持不动（上游 1.2.11 有，本地**明确不吸纳**）');
 
-ok(!/reloadIdeWorkbenchWindows/.test(codeOnly(daemon)),
-  'C1 ⭐ 未吸纳 reloadIdeWorkbenchWindows —— 它依赖本地不存在的 IDE 浮层管理器（idePages），'
-  + '且整个分支有 codebuddy 守卫，对本机是死代码'
-  + '（⚠️ 用 codeOnly 检查：注释里点名它是为了防漏更，不算引入）');
-ok(!/idePages\s*=\s*new Map\(\)/.test(codeOnly(daemon)),
-  'C2 ⭐ 未引入 IDE 浮层管理器（上一轮已判定保持不动，勿重复评估）');
+/**
+ * ⚠️ 判定已反转（2026-10-19，阶段③ 注入层）：
+ * 原先「保持不动」的理由是「本机不做 CodeBuddy IDE 支持 ⇒ 这两个东西是死代码」。
+ * 现在需求变成「把 WorkDaddy 助手拓展到 CodeBuddy」，IDE workbench 注入是**验收必需项**，
+ * 所以它们从「不该出现」变成「必须有」—— 守卫跟着反过来锁，防止后来者照旧注释又删掉。
+ */
+ok(/function reloadIdeWorkbenchWindows\s*\(/.test(codeOnly(daemon)),
+  'C1 ⭐ 已吸纳 reloadIdeWorkbenchWindows（阶段③：切换账号后通知 IDE 各窗口刷新面板）');
+ok(/idePages\s*=\s*new Map\(\)/.test(codeOnly(daemon)),
+  'C2 ⭐ 已引入 IDE 页面管理器（阶段③：workbench.html 逐窗独立 CDP 连接与注入）');
 ok(!/wbs-ide-menu-dedupe-style/.test(codeOnly(inject)),
   'C3 未引入 IDE 账号菜单去重样式（codebuddy workbench 专用，本机无该页面）');
 ok(!/PREVENT_DUP|preventDuplicateSessions/.test(codeOnly(daemon)),
@@ -131,12 +135,12 @@ ok(/^\d+\.\d+\.\d+$/.test(up || ''), 'E2 上游基线是三段式', up);
 // ⭐ 核心断言：已吸纳的上游版本必须**等于**我们实际同步到的版本。
 //    v1.9.5 吸纳了 1.2.10、v1.9.6 吸纳了 1.2.11，但两次都忘了改这个常量，
 //    于是 semverCompare(latest, 1.2.8) 恒 > 0 ⇒ 面板永远误报「上游有新版」。
-ok(up === '1.2.14',
-  'E3 ⭐⭐ 上游基线 = 1.2.14（与已吸纳的 1.2.12 / 1.2.13 / 1.2.14 对齐）', up);
+ok(up === '1.2.18',
+  'E3 ⭐⭐ 上游基线 = 1.2.18（2026-10-26：取 1.2.16 launch-env + 1.2.18 token 加密落盘等；wallpaper / client-launch-settings / 官方自动化同步 / 1.2.17 / persona 均不吸纳）', up);
 
 // 防止倒退：基线不该低于本轮实际吸纳的版本
-ok(semverGte(up, '1.2.14'),
-  'E4 ⭐ 上游基线不得低于 1.2.14（不许倒退）', up);
+ok(semverGte(up, '1.2.18'),
+  'E4 ⭐ 上游基线不得低于 1.2.18（不许倒退）', up);
 
 // 提醒：常量附近的注释必须写清「每次吸纳都要改这里」
 const around = daemon.slice(Math.max(0, daemon.indexOf("const UPSTREAM_VERSION = '") - 2600),

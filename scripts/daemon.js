@@ -22,13 +22,23 @@
  */
 'use strict';
 
+// ⭐ 2026-10-20（多 profile 并存）：daemon 的命令行必须带 `--profile=<id>`（排在脚本路径之后）。
+//   环境变量在进程枚举里看不到，脚本名 daemon.js 又被所有 profile 共用
+//   ⇒ 枚举无法区分实例，会把兄弟 profile 的 daemon 认成自己的。
+//   命令行是唯一可靠的归属标识：**优先采信它**，其次才是环境变量。
+const argvProfileArg = process.argv.find((arg) => String(arg || '').startsWith('--profile='));
+if (argvProfileArg) {
+  const argvProfileId = String(argvProfileArg).slice('--profile='.length).trim();
+  if (argvProfileId) process.env.WBSWITCH_PROFILE = argvProfileId;
+}
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const net = require('net');
-const sessionSync = require('./session-sync.js');
+let sessionSync = require('./session-sync.js');
 const { spawn, spawnSync, execFile } = require('child_process');
 const PROBE_CLIENT_RUNNING = process.argv.includes('--probe-client-running');
 const {
@@ -141,6 +151,8 @@ const {
   getAutoCopyLineageSyncedAt,
   setAutoCopyLineageSyncedAt,
   workbuddyModelsFile,
+  buildModelsFileDoc,
+  normalizeModelsFileFormat,
   listOfficialModels,
   readOfficialModel,
   deleteOfficialModels,
@@ -157,6 +169,7 @@ const {
   wdCompatText, // [wd-compat]
   wdCompatContainsEncryptedFields, // [wd-compat]
   wdCompatDecryptAuthJson, // [wd-compat] WorkBuddy 5.6+ 字段信封只读解密
+  wdCompatEncryptAuthJson, // [wd-compat] 上游 1.2.18：刷新结果按原信封加密写回
   wdCompatAuthToken, // [wd-compat] 仅返回可直接发送的明文 token
   normalizeAccountImportJson, // [wd-compat] 明文/信封账号导入归一化
   setAccountNote,
@@ -204,9 +217,14 @@ const {
 } = require('./sentry-report.js');
 const { createUsageReporter } = require('./usage-report.js');
 const { getProfile, profileDataDir, listInstalledModelSources } = require('./profiles.js');
+const { getWorkBuddyLaunchEnv } = require('./workbuddy-launch-env.js');
+const { clientTmpRoot, runClientTmpCleanup } = require('./client-tmp-cleanup.js');
 const plat = require('./platform.js');
 const { readWorkBuddyTarget } = require('./workbuddy-target.js');
-const { classifyTarget, looksLikeWbFamilyTarget, isTargetForProfile, selectPageTarget } = require('./cdp-targets.js');
+// CodeBuddy 渲染层受 CSP 限制，fetch http://127.0.0.1 会被直接拦掉；面板的 api() 改走
+// Runtime.addBinding 通道（页面内 __wbsApiFetch → bindingCalled → 这里回包）。
+const { BINDING, createRendererApiBridge, rendererBridgeSource } = require('./renderer-api-bridge.js');
+const { classifyTarget, looksLikeWbFamilyTarget, isTargetForProfile, selectPageTarget, selectIdeTargets } = require('./cdp-targets.js');
 const { createSessionDb, normalizeSessionIdBatch, parameterCount } = require('./session-db.js');
 const {
   createEncryptedExport,
@@ -216,6 +234,9 @@ const {
   resolveArchiveTarget,
 } = require('./secure-transfer.js');
 const { writeSessionTransfer, readSessionTransfer, receiveSessionUpload, createSessionExportJobs } = require('./session-transfer.js');
+const { createCodeBuddyFiles } = require('./codebuddy-files.js');
+const { createCodeBuddyNative } = require('./codebuddy-native.js');
+const { createCodeBuddySessionStore } = require('./codebuddy-session-store.js');
 const { forkedTitle, planForkAtMessage } = require('./session-fork.js');
 const { pipeline: transferPipeline } = require('node:stream/promises');
 const { replaceFileWithRetry } = require('./atomic-file-write.js');
@@ -247,9 +268,6 @@ const {
   atomicWriteText,
 } = require('./automation.js');
 const scheduledSend = require('./scheduled-send.js');
-// 本地子 Agent 的「使用记录 + 专长分析」（解析会话 jsonl 里的 Agent 调用；纯只读）
-const agentUsage = require('./agent-usage.js');
-const agentCatalog = require('./agent-catalog.js');
 const scheduleLedger = require('./schedule-ledger.js');
 
 /**
@@ -303,6 +321,279 @@ const cloudCleanup = require('./cloud-cleanup.js');
 const { createDirtyIndex } = require('./session-dirty.js'); // 批次 3：脏标记索引（纯函数判据层）
 const PROFILE = getProfile();
 const DATA_DIR = defaultDataDir();
+// CodeBuddy 的会话正文不在 workbuddy.db 那种 SQLite 里，而是官方扩展维护的四棵历史树
+// （history / plan-task / check-point / file-tree）。这一层只把它们的路径命名空间接到既有
+// 的快照/归档词汇上，让面板与同步事务继续共用同一套代码，不另开一条分支。
+const codeBuddyFiles = PROFILE.kind === 'codebuddy' ? createCodeBuddyFiles({ root: PROFILE.historyRoot, sync: sessionSync }) : null;
+if (codeBuddyFiles) sessionSync = codeBuddyFiles.sync;
+// 会话记录在官方主进程里，只能经 CDP 走它的服务读写；不 patch app.asar。
+const codeBuddyNative = PROFILE.kind === 'codebuddy' ? createCodeBuddyNative({ profile: PROFILE, WebSocketCtor }) : null;
+
+// ── dsh-ops 集成（Rust 原生检索 / 批处理工具接入 WorkBuddy）──────────────
+// 把上游 T-Auto/dsh-ops（MIT AND Apache-2.0）的原生 worker 与 vendored fastctx
+// 以 MCP stdio server 形态接进 WorkBuddy：WorkDaddy 负责下载（npm 官方源 + sha512 校验）、
+// 落盘、注册 mcp.json、启停与卸载；桥脚本由随包分发的 scripts/dsh-ops-bridge.mjs 提供。
+// ⚠️ 上游只发布 win32-x64 二进制，其余平台返回 unsupported（不假装支持）。
+const DSH_OPS_DIR = path.join(DATA_DIR, 'dsh-ops');
+const DSH_OPS_EXTERNAL_DIR = path.join(os.homedir(), '.workbuddy', 'mcp-servers', 'dsh-ops');
+const DSH_OPS_MCP_FILE = path.join(os.homedir(), '.workbuddy', 'mcp.json');
+const DSH_OPS_MANIFEST = 'dsh-ops.json';
+const DSH_OPS_REGISTRY = String(process.env.WORKDADDY_DSH_OPS_REGISTRY || 'https://registry.npmjs.org').replace(/\/+$/, '');
+const DSH_OPS_PACKAGES = [
+  {
+    key: 'worker',
+    pkg: 'dsh-ops',
+    version: '0.3.0',
+    file: 'dsh-ops-0.3.0.tgz',
+    integrity: 'sha512-DZhLjvxVuPrdhDzd6ySVK1reg4uZ0HE/ep3t+r8/3eMH/ZSbNwuhlAcr1M9lfEuwbf+Qq4u4wl8EkEbdsTk8yw==',
+    entry: 'package/runtime/win32-x64/dsh-ops-worker.exe',
+    dest: 'bin/dsh-ops-worker.exe',
+    license: 'MIT AND Apache-2.0',
+  },
+  {
+    key: 'fastctx',
+    pkg: '@dsh-ops/fastctx-win32-x64',
+    version: '0.2.1',
+    file: 'fastctx-win32-x64-0.2.1.tgz',
+    integrity: 'sha512-mwdh3auRfbk4Lfgjt2NKGVvn5kHWxsIsw4rrtjv5+RQLHq5bU/ZLCAVhd9zS8/NqstjXZMRYvirq0P9FsFjykQ==',
+    entry: 'package/bin/fastctx.exe',
+    dest: 'bin/fastctx.exe',
+    license: 'Apache-2.0',
+  },
+];
+// 归档内需要一并留存的文件（许可证合规 + 溯源）。
+const DSH_OPS_EXTRA_FILES = ['package/LICENSE', 'package/LICENSE.txt', 'package/NOTICE', 'package/NOTICE.txt', 'package/README.md', 'package/provenance.json'];
+
+/** 探测 WorkBuddy 自带的 node（mcp.json 里 dsh-ops 条目需要绝对路径）。 */
+function dshOpsFindNodeExe() {
+  const base = path.join(os.homedir(), '.workbuddy', 'binaries', 'node', 'versions');
+  let best = null;
+  try {
+    for (const d of fs.readdirSync(base)) {
+      const p = path.join(base, d, IS_WIN ? 'node.exe' : 'bin/node');
+      if (fs.existsSync(p) && (!best || d > best.d)) best = { d, p };
+    }
+  } catch (_) { /* 没有受管 node ⇒ 回退自身 */ }
+  return (best && best.p) || process.execPath;
+}
+
+/** 读某目录下的部署状态（不抛异常）。 */
+function dshOpsInspectDir(dir) {
+  const worker = path.join(dir, 'bin', 'dsh-ops-worker.exe');
+  const fastctx = path.join(dir, 'bin', 'fastctx.exe');
+  const bridge = path.join(dir, 'worker-mcp.mjs');
+  let manifest = null;
+  try { manifest = JSON.parse(fs.readFileSync(path.join(dir, DSH_OPS_MANIFEST), 'utf8')); } catch (_) { manifest = null; }
+  const hasWorker = fs.existsSync(worker);
+  const hasFastctx = fs.existsSync(fastctx);
+  return {
+    dir,
+    hasWorker,
+    hasFastctx,
+    hasBridge: fs.existsSync(bridge),
+    manifest,
+    complete: hasWorker && hasFastctx,
+  };
+}
+
+/** 读 mcp.json（严格：存在但损坏时抛错，绝不覆盖用户配置）。 */
+function dshOpsReadMcp() {
+  let raw = null;
+  try { raw = fs.readFileSync(DSH_OPS_MCP_FILE, 'utf8'); } catch (_) { return { config: {}, existed: false }; }
+  let cfg;
+  try { cfg = JSON.parse(raw); } catch (e) { throw new Error('mcp.json 解析失败（已中止，未改动文件）：' + e.message); }
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('mcp.json 结构异常（已中止，未改动文件）');
+  return { config: cfg, existed: true };
+}
+
+/** 综合状态：安装 / 注册 / 启用。 */
+function dshOpsStatus() {
+  const managed = dshOpsInspectDir(DSH_OPS_DIR);
+  const external = dshOpsInspectDir(DSH_OPS_EXTERNAL_DIR);
+  const active = managed.complete ? managed : (external.complete ? external : null);
+  let servers = {};
+  try { servers = (dshOpsReadMcp().config.mcpServers) || {}; } catch (_) { servers = {}; }
+  const hasFastctx = !!servers.fastctx;
+  const hasWorker = !!servers['dsh-ops'];
+  const registered = hasFastctx && hasWorker;
+  const enabled = registered && servers.fastctx.disabled !== true && servers['dsh-ops'].disabled !== true;
+  return {
+    platform: process.platform,
+    supported: IS_WIN,
+    dir: active ? active.dir : null,
+    managedDir: DSH_OPS_DIR,
+    externalDir: DSH_OPS_EXTERNAL_DIR,
+    installed: !!active,
+    managed: !!(active && active.dir === DSH_OPS_DIR),
+    versions: active ? ((active.manifest && active.manifest.versions) || null) : null,
+    packages: DSH_OPS_PACKAGES.map((x) => ({ key: x.key, pkg: x.pkg, version: x.version })),
+    registered,
+    enabled,
+    nodeExe: dshOpsFindNodeExe(),
+    registry: DSH_OPS_REGISTRY,
+  };
+}
+
+/** 下载（跟随重定向，120s 超时，200MB 上限）。 */
+function dshOpsHttpGet(url, redirectsLeft) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(url); } catch (e) { return reject(new Error('非法 URL：' + url)); }
+    const mod = u.protocol === 'http:' ? require('http') : require('https');
+    const req = mod.get({
+      hostname: u.hostname,
+      port: u.port || undefined,
+      path: u.pathname + u.search,
+      headers: { 'user-agent': 'WorkDaddy/' + DAEMON_VERSION, accept: '*/*' },
+    }, (res) => {
+      const code = res.statusCode || 0;
+      if (code >= 300 && code < 400 && res.headers.location && redirectsLeft > 0) {
+        res.resume();
+        return resolve(dshOpsHttpGet(new URL(res.headers.location, url).href, redirectsLeft - 1));
+      }
+      if (code !== 200) { res.resume(); return reject(new Error('下载失败 HTTP ' + code + '（' + url + '）')); }
+      const chunks = [];
+      let size = 0;
+      res.on('data', (c) => { chunks.push(c); size += c.length; if (size > 200 * 1024 * 1024) { req.destroy(); reject(new Error('响应超过 200MB 上限')); } });
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    });
+    req.on('error', (e) => reject(new Error('下载失败：' + e.message)));
+    req.setTimeout(120000, () => { req.destroy(new Error('下载超时（120s）')); });
+  });
+}
+
+/** 最小 tar 解析（npm tarball 为 ustar；只取普通文件，其余跳过）。 */
+function dshOpsUntar(buf) {
+  const out = {};
+  let off = 0;
+  while (off + 512 <= buf.length) {
+    const nameRaw = buf.toString('utf8', off, off + 100);
+    if (nameRaw.charCodeAt(0) === 0) { off += 512; continue; }
+    const name = nameRaw.replace(/\0[\s\S]*$/, '');
+    if (!name) break;
+    const sizeStr = buf.toString('utf8', off + 124, off + 136).replace(/\0[\s\S]*$/, '').trim();
+    const size = parseInt(sizeStr, 8);
+    if (!Number.isFinite(size) || size < 0) break;
+    const typeFlag = buf.toString('utf8', off + 156, off + 157);
+    const isFile = typeFlag === '0' || typeFlag === '\u0000' || typeFlag === '';
+    const dataStart = off + 512;
+    if (isFile) out[name] = buf.subarray(dataStart, dataStart + size);
+    off = dataStart + Math.ceil(size / 512) * 512;
+  }
+  return out;
+}
+
+/** sha512 完整性校验（integrity 形如 sha512-<base64>）。 */
+function dshOpsVerifyIntegrity(buf, integrity) {
+  const m = /^sha512-(.+)$/.exec(String(integrity || ''));
+  if (!m) throw new Error('缺少可用的 sha512 校验值');
+  const actual = crypto.createHash('sha512').update(buf).digest('base64');
+  if (actual !== m[1]) throw new Error('完整性校验失败：下载内容与官方 sha512 不一致（已中止，未落盘）');
+}
+
+/** 把 dir 写成 mcp.json 里的 fastctx + dsh-ops 两条（幂等，保留既有 disabled 状态）。 */
+function dshOpsRegister(dir) {
+  const { config } = dshOpsReadMcp();
+  if (!config.mcpServers || typeof config.mcpServers !== 'object') config.mcpServers = {};
+  const prevFast = config.mcpServers.fastctx || {};
+  const prevWorker = config.mcpServers['dsh-ops'] || {};
+  config.mcpServers.fastctx = { command: path.join(dir, 'bin', 'fastctx.exe'), args: ['serve'], disabled: prevFast.disabled === true };
+  config.mcpServers['dsh-ops'] = { command: dshOpsFindNodeExe(), args: [path.join(dir, 'worker-mcp.mjs')], disabled: prevWorker.disabled === true };
+  try { fs.mkdirSync(path.dirname(DSH_OPS_MCP_FILE), { recursive: true }); } catch (_) {}
+  replaceFileWithRetry(DSH_OPS_MCP_FILE, JSON.stringify(config, null, 2) + '\n');
+  return { dir, nodeExe: config.mcpServers['dsh-ops'].command };
+}
+
+/** 安装：复用已有部署优先；否则从 npm 下载并校验后落盘。 */
+function dshOpsInstall(opts) {
+  const force = !!(opts && opts.force);
+  return Promise.resolve().then(() => {
+    if (!IS_WIN) throw new Error('当前平台不支持：上游仅发布 win32-x64 二进制');
+    const managed = dshOpsInspectDir(DSH_OPS_DIR);
+    const external = dshOpsInspectDir(DSH_OPS_EXTERNAL_DIR);
+    if (!force && (managed.complete || external.complete)) {
+      const dir = managed.complete ? managed.dir : external.dir;
+      const reg = dshOpsRegister(dir);
+      log('[dsh-ops] 复用已有部署 ' + dir);
+      return { reused: true, dir, versions: (dshOpsInspectDir(dir).manifest || {}).versions || null, registered: reg };
+    }
+    const dir = DSH_OPS_DIR;
+    fs.mkdirSync(path.join(dir, 'bin'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'licenses'), { recursive: true });
+    const bridgeSrc = path.join(__dirname, 'dsh-ops-bridge.mjs');
+    if (!fs.existsSync(bridgeSrc)) throw new Error('随包桥脚本缺失：scripts/dsh-ops-bridge.mjs');
+    const versions = {};
+    let chain = Promise.resolve();
+    DSH_OPS_PACKAGES.forEach((pk) => {
+      chain = chain.then(() => {
+        const url = DSH_OPS_REGISTRY + '/' + pk.pkg + '/-/' + pk.file;
+        log('[dsh-ops] 下载 ' + pk.pkg + '@' + pk.version + ' …');
+        return dshOpsHttpGet(url, 5).then((raw) => {
+          dshOpsVerifyIntegrity(raw, pk.integrity);
+          const files = dshOpsUntar(require('zlib').gunzipSync(raw));
+          const entryBuf = files[pk.entry];
+          if (!entryBuf || !entryBuf.length) throw new Error('归档内未找到 ' + pk.entry);
+          fs.writeFileSync(path.join(dir, pk.dest), entryBuf);
+          DSH_OPS_EXTRA_FILES.forEach((lf) => {
+            if (!files[lf]) return;
+            fs.writeFileSync(path.join(dir, 'licenses', pk.key + '-' + path.basename(lf)), files[lf]);
+          });
+          versions[pk.key] = pk.version;
+          log('[dsh-ops] ' + pk.key + ' 已校验并落盘（' + entryBuf.length + ' 字节）');
+        });
+      });
+    });
+    return chain.then(() => {
+      fs.copyFileSync(bridgeSrc, path.join(dir, 'worker-mcp.mjs'));
+      const manifest = {
+        tool: 'dsh-ops',
+        managedBy: 'WorkDaddy',
+        installedAt: new Date().toISOString(),
+        registry: DSH_OPS_REGISTRY,
+        versions,
+        packages: DSH_OPS_PACKAGES.map((x) => ({ key: x.key, pkg: x.pkg, version: x.version, integrity: x.integrity, dest: x.dest })),
+      };
+      replaceFileWithRetry(path.join(dir, DSH_OPS_MANIFEST), JSON.stringify(manifest, null, 2) + '\n');
+      const reg = dshOpsRegister(dir);
+      log('[dsh-ops] 安装完成 → ' + dir);
+      return { reused: false, dir, versions, registered: reg };
+    });
+  });
+}
+
+/** 启用 / 停用（只改 mcp.json 两条的 disabled）。 */
+function dshOpsToggle(enabled) {
+  const { config } = dshOpsReadMcp();
+  const servers = config.mcpServers || {};
+  const missing = ['fastctx', 'dsh-ops'].filter((n) => !servers[n]);
+  if (missing.length) throw new Error('尚未注册：' + missing.join(' / '));
+  ['fastctx', 'dsh-ops'].forEach((n) => { servers[n].disabled = !enabled; });
+  replaceFileWithRetry(DSH_OPS_MCP_FILE, JSON.stringify(config, null, 2) + '\n');
+  log('[dsh-ops] 已' + (enabled ? '启用' : '停用') + '（需重启 WorkBuddy 生效）');
+  return { enabled, restartRequired: true };
+}
+
+/** 从 mcp.json 注销；purge=true 时另删 WorkDaddy 自己装的目录（有 manifest 才删）。 */
+function dshOpsUninstall(opts) {
+  const purge = !!(opts && opts.purge);
+  let removedFromMcp = false;
+  const { config } = dshOpsReadMcp();
+  if (config.mcpServers) {
+    ['fastctx', 'dsh-ops'].forEach((n) => { if (config.mcpServers[n]) { delete config.mcpServers[n]; removedFromMcp = true; } });
+    if (removedFromMcp) replaceFileWithRetry(DSH_OPS_MCP_FILE, JSON.stringify(config, null, 2) + '\n');
+  }
+  let purged = false;
+  if (purge) {
+    const managed = dshOpsInspectDir(DSH_OPS_DIR);
+    // 三重守卫：路径必须精确等于 WorkDaddy 自己的子目录、必须是托管安装（有 manifest）、删的只能是它。
+    if (managed.manifest && path.resolve(managed.dir) === path.resolve(DSH_OPS_DIR)) {
+      try { fs.rmSync(DSH_OPS_DIR, { recursive: true, force: true }); purged = true; log('[dsh-ops] 已删除 ' + DSH_OPS_DIR); }
+      catch (e) { log('[dsh-ops] 删除失败：' + e.message); }
+    }
+  }
+  return { removedFromMcp, purged };
+}
+
 const thirdPartyModels = createThirdPartyImport({ targetFile: workbuddyModelsFile(), dataDir: DATA_DIR });
 const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.existsSync(accountBackupFile(uid)));
 // 版本号：改动 daemon/inject/theme-patches/builtin 资产后递增，launcher 检测到运行中版本不一致会强制用 app 内置代码重启
@@ -555,6 +846,10 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         （删 acIsDarkTheme / watchThemeForButtons / syncAccountFade / syncModelFade）。
 //         同版修复：会话同步冲突误报 / 切号后需再切一次才能同步 / 模型限流写入被服务端白名单拒 /「空间」
 //         分组反复折叠 / 引导会话被暂存队列永久暂停；新增「中文思考」开关（写入官方全局自定义指令）。
+// 1.2.15 吸纳（2026-10-16，未发版）：只取 **1.2.40 客户端探测轻量化**（探测子进程改用 tasklist、
+//         CIM 查询加 -Filter 服务端过滤、周期性刷新 5s→15s）与 **1.2.41 失效卷保护**（会话工作目录巡检
+//         跳过卷已不存在的 cwd，同卷根只提示一次）；1.2.42–1.2.46 的「同步个性化」（persona 共享）
+//         **明确不吸纳**（用户判定对自己没用）。
 const DAEMON_VERSION = '1.9.7';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
@@ -576,7 +871,18 @@ const DAEMON_VERSION = '1.9.7';
 //            —— 上游自己在 inject.js 里把 UI 入口全部注释停用了。
 // ⚠️ 另注：`scripts/session-sync.js` 的 fixture 基线**仍是 1.2.8**（那是产物溯源用的真实原文，
 //    逐字节可 diff），它与这里的「发布版本基线」是两件事，不要混为一谈。
-const UPSTREAM_VERSION = '1.2.14';
+// ⭐ 1.2.15（= 上游内部 1.2.46）吸纳范围（2026-10-16）：**只取 1.2.40 客户端探测轻量化 + 1.2.41 失效卷保护**；
+//   1.2.42–1.2.46 的「同步个性化」（persona 共享）**明确不吸纳**（用户判定对自己没用）⇒ 此处照标 1.2.15，
+//   面板不再提示「上游有新版」。⚠️ 每次吸纳都要改这里，漏更会让面板恒报有更新。
+// ⭐ 1.2.16–1.2.18 吸纳范围（2026-10-26）：
+//   ✅ 1.2.16 `workbuddy-launch-env.js` —— TEMP 隔离，掐掉「一重启就静默升级」（issue #424）；
+//   ✅ 1.2.18 token 加密落盘（lib.wdCompatEncryptAuthJson + daemon.persistRefreshedAccount）、
+//      automation-model 精确 ID + custom-local 前缀回退、inject 会话列表静默刷新、cwd 修复退避；
+//   ❌ 不取 1.2.16 的 wallpaper-rotation / client-launch-settings（后者硬编码只支持 workbuddy-ai）/
+//      official-automation-sync + automation-account-sync（官方 automations 表跨账号 reconcile，判定不需要）；
+//   ❌ 1.2.17 整体跳过（官方导航改 CSS 隐藏 —— 本仓压根没有 remove 官方导航那条路径）；
+//   ❌ persona 系列一仍不吸纳。
+const UPSTREAM_VERSION = '1.2.18';
 // 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.5）。
 // 本机 fork 用自己的修改版版本号（当前 1.8.x = 上游 1.2.6 基线 + 本地增强），否则更新检查会误判。
 // 1.5.0-b：省 token 专项批次 —— 账号页通用折叠卡片（自动切换 / 换号续跑 / 上下文体检三卡默认收起，
@@ -813,6 +1119,23 @@ function runScheduleVerify(reason) {
 const WATCH_INTERVAL = 3000; // 文件监听兜底
 const BACKUP_DEBOUNCE = 1500; // CDP 事件触发的备份防抖
 const CDP_RECONNECT_MS = 5000;
+// 2026-10-23：manual（launcher 显式 /api/inject）注入前主动等主连接就绪的窗口。
+// 取 8 秒：launcher 侧 INJECT_REQUEST_TIMEOUT_MS 是 12 秒，留 4 秒给真正的注入动作；
+// 客户端冷启动实测 10~60 秒，等不满的部分交给 launcher 的后续重试，不在这一次里硬耗。
+const MANUAL_INJECT_CDP_WAIT_MS = 8000;
+// 等满一次仍连不上，说明主 target 当前确实不存在（CodeBuddy 的 AI 面板未打开），
+// 后续重试就不该再各耗 8 秒——否则 launcher 的 24 次重试会拖成好几分钟。
+// 冷却期内只做「快查 + IDE 通道补扫」，等客户端真的起了新 target 再由 cdpLoop 接上。
+const MANUAL_INJECT_WAIT_COOLDOWN_MS = 20000;
+let manualInjectWaitCooldownUntil = 0;
+
+async function waitForManualCdpReady() {
+  if (cdp.connected) return true;
+  if (Date.now() < manualInjectWaitCooldownUntil) return false;
+  const ok = await waitForCdpReady(MANUAL_INJECT_CDP_WAIT_MS);
+  if (!ok) manualInjectWaitCooldownUntil = Date.now() + MANUAL_INJECT_WAIT_COOLDOWN_MS;
+  return ok;
+}
 
 // API token 是当前 profile 的本地能力凭证：只注入 WorkBuddy renderer，不写日志、不回传状态接口。
 // 用 wx + 重读避免两个 watchdog 进程启动竞态时各自生成一枚 token。
@@ -839,6 +1162,7 @@ function loadApiToken() {
 }
 
 const API_TOKEN = loadApiToken();
+const handleRendererApiBinding = createRendererApiBridge({ token: API_TOKEN, port: () => ACTUAL_PORT, send: cdpSend });
 
 // 遥测开关统一控制远程 Sentry 与本地脱敏渲染器诊断；每次读取都能响应关于页的即时修改。
 let diagnosticsState = { value: null, checkedAt: 0 };
@@ -2309,6 +2633,9 @@ function scheduleBackup(reason) {
     } catch (e) {
       log(`[sync] ${reason} 触发备份失败: ${e.message}`);
     }
+    // ⭐ 顺带把网关账号池对齐（2026-10-16）：新登录的账号在这一次备份之后立刻进池。
+    //    没装网关时 gatewaySyncAccounts 直接返回「未安装」，零开销。
+    gatewaySyncAccountsQuiet(reason || '账号备份后');
   }, BACKUP_DEBOUNCE);
 }
 
@@ -2766,6 +3093,11 @@ function dispatchAutomationEvent(type, detail = {}) {
 
 function onCdpEvent(method, params) {
   switch (method) {
+    case 'Runtime.bindingCalled': {
+      // 只有 CodeBuddy 走 binding 通道；WorkBuddy 的渲染层能直接 fetch，binding 不会触发。
+      if (PROFILE.kind === 'codebuddy') handleRendererApiBinding(params).catch(() => {});
+      break;
+    }
     case 'Network.requestWillBeSent': {
       const url = (params.request && params.request.url) || '';
       if (/auth|realms|login|token/i.test(url)) scheduleBackup('cdp-auth');
@@ -2871,6 +3203,13 @@ function updateClientDebugState({ cdpConnected, clientRunning }) {
   if (cdpConnected || clientRunning === false) {
     return resetClientDebugState();
   }
+  // CodeBuddy：主 target（agentManager.html）是懒创建的 —— 用户没点开 AI 面板时主连接
+  // 永远不成立，但 IDE 通道已把同一份完整面板挂进 workbench.html，组件在正常工作。
+  // 这里若照旧累计 miss，状态页会一直提示「调试端口不可达，请一键恢复」，
+  // 用户点恢复只会白重启一次客户端。IDE 通道在 ⇒ 直接当作正常状态。
+  let ideServing = false;
+  try { ideServing = ideChannelMounted(); } catch (_) { ideServing = false; }
+  if (ideServing) return resetClientDebugState();
   if (clientRunning !== true) return clientDebugState;
   clientDebugState.consecutiveMiss += 1;
   if (clientDebugState.consecutiveMiss >= CLIENT_DEBUG_MISS_THRESHOLD && !clientDebugState.needsDebugRelaunch) {
@@ -2906,6 +3245,40 @@ function safeClientRunning() {
   }
 }
 
+// 轻量客户端存在性探测（上游 1.2.40 吸纳）：仅供周期性状态刷新（/api/status 展示、调试端口丢失检测）。
+// Windows 用 tasklist（原生 NT API，不经 WMI/PowerShell）：原实现每轮冷启 PowerShell 做两轮
+// Win32_Process 全量枚举 + 对每个匹配进程 GetOwner（实测 10 个宿主进程的 GetOwner 就要 ~1.4s），
+// 导致 WmiPrvSE 持续高 CPU。账号切换、一键恢复等安全路径仍走 safeClientRunning() 的完整 CIM 验证，
+// 本函数只回答「在不在跑」。
+function lightClientRunning() {
+  try {
+    if (IS_WIN) {
+      const names = [...PROFILE_BINARY_NAMES];
+      let probed = false;
+      for (const name of names) {
+        const result = spawnSync('tasklist', ['/FI', `IMAGENAME eq ${name}`, '/NH', '/FO', 'CSV'], {
+          encoding: 'utf8', timeout: 5000, windowsHide: true,
+        });
+        if (result.error || result.status !== 0) continue;
+        probed = true;
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (new RegExp(`"${escaped}"\\s*,\\s*"\\d+"`, 'i').test(String(result.stdout || ''))) return true;
+      }
+      return probed ? false : null;
+    }
+    if (IS_LINUX) {
+      return linuxWorkBuddyPids(WORKBUDDY_BINARY).length > 0;
+    }
+    const result = spawnSync('pgrep', ['-f', WORKBUDDY_APP], {
+      stdio: 'ignore', timeout: CLIENT_RUNNING_MAC_SCAN_TIMEOUT_MS,
+    });
+    if (result.error || result.status === null) return null;
+    return result.status === 0;
+  } catch (_) {
+    return null;
+  }
+}
+
 // /api/status 曾直接在请求线程里调用 safeClientRunning()：Windows 上这会同步冷启
 // PowerShell 做 CIM 进程枚举（实测 2.4-6.7s），把状态接口拖到远超 launcher HTTP
 // 探测预算（1500ms）的程度，温启动时 launcher 发现不到已在监听的 daemon，误选
@@ -2915,7 +3288,15 @@ function safeClientRunning() {
 // 注意：刷新必须走一次性子进程（--probe-client-running）——同步探测会阻塞 daemon
 // 事件循环数秒，放在主线程里只会把「每次请求慢」变成「周期性不可用」。
 const clientRunningState = { value: null, checkedAt: 0 };
-const CLIENT_RUNNING_REFRESH_MS = 5000;
+// 上游 1.2.40：原值 5000 过密 —— 每轮都要冷启一次进程做进程枚举（实测单轮 2.4–6.7s），
+// 5s 间隔等于让它几乎不间断执行（WmiPrvSE 高 CPU）。探测子进程改用 lightClientRunning() 后
+// 负担已大幅下降；如需更快响应可调小此值或设环境变量。
+const CLIENT_RUNNING_REFRESH_MS = 15000;
+// 环境变量覆盖延迟到调用时读取：vm 测试切片会原样执行本段代码，而测试上下文
+// 不提供 process，顶层读取会直接抛 ReferenceError。
+function clientRunningRefreshDelay() {
+  return Number(process.env && process.env.WORKDADDY_CLIENT_REFRESH_MS) || CLIENT_RUNNING_REFRESH_MS;
+}
 // macOS 的 pgrep 会扫描所有进程；系统过载时必须快速返回未知，不能让多个慢探针叠加。
 const CLIENT_RUNNING_MAC_SCAN_TIMEOUT_MS = 2000;
 // Windows 的验证包含 CIM 查询，保留较长预算；macOS 探针则在扫描超时前结束。
@@ -2946,7 +3327,7 @@ function refreshClientRunning() {
 function startClientRunningMonitor() {
   refreshClientRunning().catch(() => {});
   if (typeof setInterval === 'function') {
-    const timer = setInterval(() => { refreshClientRunning().catch(() => {}); }, CLIENT_RUNNING_REFRESH_MS);
+    const timer = setInterval(() => { refreshClientRunning().catch(() => {}); }, clientRunningRefreshDelay());
     if (timer && typeof timer.unref === 'function') timer.unref();
   }
 }
@@ -2970,8 +3351,192 @@ async function cdpLoop() {
     } catch (e) {
       log(`[cdp] 客户端状态探测异常: ${e.message}`);
     }
+    // IDE 主窗口（workbench.html）不走主连接：这里每轮独立扫一遍并注入（详见上面的管理器）。
+    ideSyncScan().catch((e) => log(`[cdp-ide] IDE 扫描异常: ${e.message}`));
     await new Promise((r) => setTimeout(r, CDP_RECONNECT_MS));
   }
+}
+
+// ===== [CodeBuddy IDE 状态栏] IDE 主窗口浮层管理器 =====
+// 主连接（connectCdp）保持 1.2.9 原行为：只绑定 agentManager.html（完整面板）。
+// IDE 主窗口（workbench.html）由本管理器并行维护：每个 IDE 窗口一条独立 ws，
+// 注入与主连接同一份完整面板脚本（1.2.10 起 IDE 与 Agents 共用面板；inject.js
+// 按 location.href 为 workbench 追加原生账号菜单去重样式）。
+// 主连接单 target 且不重选：若让 workbench 走主连接，先出现的 workbench 会被
+// 绑定，后打开的 agents 窗口将永远等不到注入（实测回归），故必须双路。
+const idePages = new Map(); // Per-target connection, navigation and injection retry state.
+const IDE_INJECT_MAX_ATTEMPTS = 3;
+const IDE_COMMAND_TIMEOUT_MS = 10000;
+
+function ideSend(entry, method, params = {}) {
+  return new Promise((resolve, reject) => {
+    if (!entry.ws || entry.ws.readyState !== 1) return reject(new Error('IDE ws 未连接'));
+    const id = ++entry.msgId;
+    const timer = setTimeout(() => {
+      entry.pending.delete(id);
+      reject(new Error('IDE CDP request timed out'));
+    }, IDE_COMMAND_TIMEOUT_MS);
+    entry.pending.set(id, { resolve, reject, timer });
+    try {
+      entry.ws.send(JSON.stringify({ id, method, params }));
+    } catch (e) {
+      entry.pending.delete(id);
+      clearTimeout(timer);
+      reject(e);
+    }
+  });
+}
+
+function ideInjectPage(entry, reason) {
+  if (entry.injecting) return entry.injecting;
+  if (entry.closed || entry.mounted || entry.attempts >= IDE_INJECT_MAX_ATTEMPTS || Date.now() < entry.retryAt) return Promise.resolve();
+  const navigation = entry.navigation;
+  entry.attempts++;
+  entry.injecting = (async () => {
+    try {
+      const script = buildInjectScript();
+      // 与主连接注入管线一致：先注册 binding（rendererBridgeSource 的 __wbsApiFetch 依赖它）
+      await ideSend(entry, 'Runtime.addBinding', { name: BINDING });
+      if (entry.closed || entry.navigation !== navigation) return;
+      // 脚本顶部 cleanup IIFE 已移除 #wbs-ide-statusbar-root，这里不重复清理
+      const result = await ideSend(entry, 'Runtime.evaluate', { expression: script, returnByValue: false });
+      if (result && result.exceptionDetails) {
+        const ex = result.exceptionDetails.exception;
+        log(`[cdp-ide] IDE 浮层注入抛错(${reason}): ${redactDiagnosticText((ex && (ex.description || ex.value)) || result.exceptionDetails.text || '', 300)}`);
+        return;
+      }
+      // IDE workbench 挂的是完整面板根（.wbs-root）；旧轻量浮层根保留兼容探测
+      let mounted = false;
+      for (let attempt = 0; attempt < 3 && !mounted && !entry.closed && entry.navigation === navigation; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 200 : 600));
+        if (entry.closed || entry.navigation !== navigation) return;
+        // IDE 分支挂完整面板（.wbs-root）；旧轻量浮层根（wbs-ide-statusbar-root）保留兼容
+        const check = await ideSend(entry, 'Runtime.evaluate', {
+          expression: 'JSON.stringify({ fab: !!(document.querySelector(".wbs-root") || document.getElementById("wbs-ide-statusbar-root")), ready: document.readyState })',
+          returnByValue: true,
+        }).catch(() => null);
+        const state = check && check.result && check.result.value ? JSON.parse(check.result.value) : {};
+        mounted = !!state.fab;
+        if (attempt === 2) log(`[cdp-ide] IDE 浮层注入${mounted ? '确认' : '未确认'}(${reason}): ${JSON.stringify(state)}`);
+      }
+      if (entry.closed || entry.navigation !== navigation) return;
+      entry.mounted = mounted;
+      if (mounted) log(`[cdp-ide] IDE 浮层已注入(${reason}) target=${String(entry.url || '').slice(-64)}`);
+    } catch (e) {
+      log(`[cdp-ide] IDE 浮层注入失败(${reason}): ${e.message}`);
+    }
+  })().finally(() => {
+    entry.injecting = null;
+    if (!entry.closed && entry.navigation === navigation && !entry.mounted) {
+      entry.retryAt = Date.now() + 1000 * (2 ** (entry.attempts - 1));
+    }
+  });
+  return entry.injecting;
+}
+
+function ideConnectPage(target) {
+  const entry = { ws: null, url: target.url, msgId: 0, pending: new Map(), reloadTimer: null,
+    injecting: null, mounted: false, attempts: 0, retryAt: 0, navigation: 0, closed: false };
+  idePages.set(target.id, entry);
+  // [CodeBuddy IDE 状态栏] workbench 页面 CSP 禁止直接 fetch http://，api() 走
+  // __wbsApiFetch（Runtime.bindingCalled 通道）。主连接的 bridge 把 send 绑死在
+  // cdpSend 上，因此每个 IDE 页面必须建自己的 bridge 实例，回复才能回到同一页面。
+  entry.bridge = createRendererApiBridge({ token: API_TOKEN, port: () => ACTUAL_PORT, send: (method, params) => ideSend(entry, method, params) });
+  const ws = new WebSocketCtor(target.webSocketDebuggerUrl);
+  entry.ws = ws;
+  ws.onopen = () => {
+    ideSend(entry, 'Page.enable').catch(() => {}); // 监听 loadEventFired 以便刷新后补注入
+    ideInjectPage(entry, 'connect');
+  };
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    if (msg.id !== undefined) {
+      const p = entry.pending.get(msg.id);
+      if (p) {
+        entry.pending.delete(msg.id);
+        clearTimeout(p.timer);
+        msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result);
+      }
+      return;
+    }
+    // IDE 浮层 FAB 的账号列表/切换请求经 binding 通道进来，用本页 bridge 应答
+    if (msg.method === 'Runtime.bindingCalled') {
+      entry.bridge(msg.params || {}).catch(() => {});
+      return;
+    }
+    // workbench 刷新会重建 DOM，加载完成后补一次注入（脚本幂等）
+    if (msg.method === 'Page.loadEventFired') {
+      entry.navigation++;
+      entry.mounted = false;
+      entry.attempts = 0;
+      entry.retryAt = Date.now() + 400;
+      if (entry.reloadTimer) clearTimeout(entry.reloadTimer);
+      entry.reloadTimer = setTimeout(() => {
+        entry.reloadTimer = null;
+        if (entry.ws && entry.ws.readyState === 1) ideInjectPage(entry, 'reload');
+      }, 400);
+    }
+  };
+  ws.onclose = () => {
+    entry.closed = true;
+    for (const pending of entry.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('IDE CDP connection closed'));
+    }
+    entry.pending.clear();
+    if (entry.reloadTimer) clearTimeout(entry.reloadTimer);
+    if (idePages.get(target.id) === entry) idePages.delete(target.id);
+    log(`[cdp-ide] IDE 页面连接关闭 target=${String(target.url || '').slice(-64)}`);
+  };
+  ws.onerror = () => {};
+}
+
+async function ideSyncScan() {
+  if (PROFILE.kind !== 'codebuddy' || !WebSocketCtor) return;
+  let port = cdp.port;
+  if (!port) port = await findCdpEndpoint();
+  if (!port) return;
+  let list;
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1500) });
+    list = await r.json();
+  } catch (_) {
+    return; // 端口不可达，跳过本轮
+  }
+  const targets = selectIdeTargets(list, PROFILE);
+  for (const target of targets) {
+    if (!target.webSocketDebuggerUrl) continue;
+    const entry = idePages.get(target.id);
+    if (!entry) ideConnectPage(target);
+    else if (entry.ws && entry.ws.readyState === 1) ideInjectPage(entry, 'retry');
+  }
+  // 兜底清理：target 已消失但 ws 尚未触发 close 的陈旧条目
+  const alive = new Set(targets.map((t) => t.id));
+  for (const [id, entry] of idePages) {
+    if (!alive.has(id) && (!entry.ws || entry.ws.readyState !== 1)) idePages.delete(id);
+  }
+}
+
+// [CodeBuddy 会话同步] 手动同步（copy/migrate）后刷新 IDE workbench 窗口。
+// 根因：genie 扩展宿主的会话列表 indexCache（LRU，TTL 5 分钟）不会因外部写入
+// history index.json 而失效（无文件监听），v2 广播对新会话只做 rename/delete——
+// applyUpsert 对缓存外会话直接跳过（"upsert skip, not in this EH"）。侧边栏因此
+// 只能等缓存过期或重启。手动同步是显式用户动作，直接 Page.reload（与账号切换
+// 同级别）。自动复制（切号触发）不刷新：账号切换的 session-change 事件本身
+// 会触发 clearHistoryIndexCache。reload 后 loadEventFired 处理器会自动补注入。
+function reloadIdeWorkbenchWindows(reason) {
+  if (PROFILE.kind !== 'codebuddy') return false;
+  let scheduled = 0;
+  for (const entry of idePages.values()) {
+    if (!entry.ws || entry.ws.readyState !== 1) continue;
+    scheduled++;
+    ideSend(entry, 'Page.reload', { ignoreCache: false })
+      .then(() => log(`[sessions-sync] 已刷新 IDE 窗口(${reason}) target=${String(entry.url || '').slice(-48)}`))
+      .catch((e) => log(`[sessions-sync] IDE 窗口刷新失败(${reason}): ${e.message}`));
+  }
+  if (!scheduled) log(`[sessions-sync] 无已连接的 IDE 窗口可刷新(${reason})`);
+  return scheduled > 0;
 }
 
 async function reloadWorkBuddyPage() {
@@ -3145,7 +3710,7 @@ function queryWindowsWorkBuddyProcesses() {
   const names = [...PROFILE_BINARY_NAMES].map((name) => `\"${name}\"`).join(',');
   const helper = path.join(__dirname, 'windows-process-boundary.ps1');
   const command = buildNativeProcessQuery(helper,
-    `$names=@(${names}); Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $names -contains $_.Name }`);
+    `$names=@(${names}); Get-CimInstance Win32_Process -Filter (($names | ForEach-Object { "Name='$_'" }) -join ' OR ') -ErrorAction Stop | Where-Object { $names -contains $_.Name }`);
   const result = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
     encoding: 'utf8', timeout: 10000, windowsHide: true,
   });
@@ -3570,7 +4135,7 @@ function relaunchWorkBuddy() {
       }
       // 日志用 ASCII 标记（非用户可见文案，无需进 i18n 词典）
       log(`[logout] 以 ${environmentMode ? '环境变量' : '命令行参数'} CDP=${port} 重启 WorkBuddy: ${command}${viaLauncher ? ' [via launcher]' : ''}`);
-      const childEnv = { ...process.env };
+      const childEnv = getWorkBuddyLaunchEnv(PROFILE, DATA_DIR, process.platform, process.env);
       if (environmentMode) childEnv.WORKBUDDY_REMOTE_DEBUGGING_PORT = String(port);
       if (viaLauncher) {
         // 关键：启动器要用它自己环境的 $HOME 反推真实家目录，必须还原真实 HOME
@@ -3580,7 +4145,9 @@ function relaunchWorkBuddy() {
       const child = spawn(command, environmentMode ? [] : [`--remote-debugging-port=${port}`, ...(PROFILE.nativeDebugPort ? [`--inspect=127.0.0.1:${PROFILE.nativeDebugPort}`] : [])], {
         detached: true,
         stdio: 'ignore',
-        windowsHide: true,
+        // 上游 1.2.18：GUI 程序用 windowsHide:true 会把 STARTUPINFO.wShowWindow 置成 SW_HIDE，
+        // Electron 主窗口走 ShowWindow(SW_SHOWDEFAULT) 会继承该值 ⇒ 重启后只剩托盘、看不到窗口。
+        windowsHide: false,
         env: childEnv,
       });
       await new Promise((resolve, reject) => {
@@ -3854,8 +4421,13 @@ async function automationDomAction(op, locator, detail) {
   if (!cdp.connected) throw new Error('CDP 未连接');
   const expr = automationDeepLocatorExpression(locator);
   const attribute = JSON.stringify(String(detail && (detail.attribute || detail.until && detail.until.attribute) || ''));
+  // ⚠️ 遮挡判定（blocked）**同时接受两种命中**：① 命中的就是 el 自己或其子孙；② 命中的是 el 的**祖先容器**。
+  //    多出来的第 ② 条是 2026-10-16 实测补的：侧栏运营位轮播卡（shadow DOM 内 `.cb > #x`）那个 16×16 关闭按钮，
+  //    `shadowRoot.elementFromPoint()` 返回的是外层 `.cb` 而不是按钮本身（同一坐标、按钮确实可见可点、真实鼠标事件也落在了按钮上），
+  //    只按 ① 判会把「能点」误判成「被遮挡」而直接抛错。真被遮住时命中的是**别的分支**（不是 el 的祖先，例如整块遮罩），
+  //    注入实验已验证那种情况仍然判为 blocked=true ⇒ 保护没有被削弱。
   const inspect = `(function(){var el=${expr};if(!el)return null;var r=el.getBoundingClientRect();var cs=getComputedStyle(el);var blocked=false;
-    if(${op === 'dom.click' || op === 'dom.wait'}){var root=el.getRootNode();var hit=root.elementFromPoint(r.x+r.width/2,r.y+r.height/2);blocked=!hit||!(hit===el||el.contains(hit))||el.disabled===true||el.getAttribute('aria-disabled')==='true';}
+    if(${op === 'dom.click' || op === 'dom.wait'}){var root=el.getRootNode();var hit=root.elementFromPoint(r.x+r.width/2,r.y+r.height/2);blocked=!hit||!(hit===el||el.contains(hit)||hit.contains(el))||el.disabled===true||el.getAttribute('aria-disabled')==='true';}
     return {inFrame:el.ownerDocument!==document,editable:el.isContentEditable||/^(INPUT|TEXTAREA)$/.test(el.tagName),x:r.x,y:r.y,w:r.width,h:r.height,blocked:blocked,visible:cs.display!=='none'&&cs.visibility!=='hidden'&&r.width>0&&r.height>0,text:(el.innerText||el.textContent||el.value||'').trim().slice(0,100000),value:el.value||'',attribute:el.getAttribute(${attribute})}})()`;
   const read = async () => {
     assertActive();
@@ -3944,7 +4516,11 @@ function automationPublicRun(run) { return { id: run.id, taskId: run.taskId, sta
 // 实现：不注入 <style> 硬改 display（老板 09-07：旧法会连 FAB 一起藏 / 破坏面板 DOM 状态），
 // 而是 dispatch 事件让 inject 走「点关闭按钮」同一条 setOpen(false) —— 等价于点一次面板关闭。
 // 运行结束若运行前面板本是展开的，再走「点机器人按钮」同一条 setOpen(true) 恢复。全程可逆。
-function automationPanelSetInputActive(active) {
+function automationPanelSetInputActive(active, why) {
+  // ⭐ 2026-10-19：面板「打开就关」追溯用 —— 每次抢/放渲染器都记一条，带调用方标签，
+  //   否则只能看到 inject 侧收到 open:false，完全不知道是哪个任务、哪条路径发的。
+  //   默认关：一个任务有几步 DOM 就有几条，常态下纯噪音；排查时设 WD_TRACE_PANEL_INPUT=1。
+  if (why && process.env.WD_TRACE_PANEL_INPUT === '1') log('[automation] panel-input ' + (active ? 'take' : 'release') + ' why=' + why);
   automationInputActive = !!active;
   if (!cdp.connected) return active ? Promise.reject(new Error('CDP 未连接')) : Promise.resolve();
   return cdpSend('Runtime.evaluate', {
@@ -5764,7 +6340,11 @@ function startAutomationRun(task, event = null) {
   };
   automationRuns.set(id, run);
   run.wasPanelOpen = false;
-  const requiresLease = taskNeedsPanelClosed(task) && !taskIsPassiveCleanup(task);
+  // ⭐ 由「打开面板」触发的任务**不许**抢渲染器 / 关面板：用户刚点开就被它收起来，
+  //    再点又触发一次，就会变成「一直点一直关」的循环（2026-10-19 实测确认）。
+  //    这类任务即使含 dom./session. 步骤也照常执行，只是不动面板开合。
+  const byPanelOpened = !!(event && event.type === 'panelOpened');
+  const requiresLease = taskNeedsPanelClosed(task) && !taskIsPassiveCleanup(task) && !byPanelOpened;
   run.phase = requiresLease ? 'queued' : 'executing';
   // 运行前若面板正展开，先「点一下关闭按钮」把它收起（走 inject 同一 setOpen，等价于点面板 ✕），
   // 避免面板 contenteditable/悬浮层干扰官方 composer 键入与发送（用户实测：面板开着发不出去）。
@@ -5773,7 +6353,7 @@ function startAutomationRun(task, event = null) {
   const panelPrepare = (requiresLease ? acquireAutomationRenderer(isCancelled).then(release => { releaseRenderer = release; run.phase = 'executing'; return automationPanelIsOpen(); }) : Promise.resolve(false)).then((open) => {
     if (isCancelled()) return;
     run.wasPanelOpen = open;
-    log('[automation-focus-diagnostics] automation:panel-state ' + JSON.stringify({ runId: id, open }));
+    log('[automation-focus-diagnostics] automation:panel-state ' + JSON.stringify({ runId: id, open, requiresLease: requiresLease, byPanelOpened: byPanelOpened, taskId: task.id }));
     if (open) return automationPanelSetOpen(false).then((result) => {
       log('[automation-focus-diagnostics] automation:panel-close ' + JSON.stringify({ runId: id, result }));
       return result;
@@ -5787,11 +6367,11 @@ function startAutomationRun(task, event = null) {
     try {
       if (requiresLease) {
         if (await automationPanelIsOpen()) run.wasPanelOpen = true;
-        await automationPanelSetInputActive(true);
+        await automationPanelSetInputActive(true, 'withInput:' + task.id + '/' + id);
       }
       return await fn();
     } finally {
-      try { if (requiresLease) await automationPanelSetInputActive(false).catch(() => {}); }
+      try { if (requiresLease) await automationPanelSetInputActive(false, 'withInput-end:' + task.id + '/' + id).catch(() => {}); }
       finally { release(); }
     }
   };
@@ -6176,22 +6756,58 @@ function listAccountsWithRuntimeTokenCache() {
 }
 
 /** 刷新备份账号凭证：临期惰性刷新，或当天尚未成功刷新时执行保活。 */
+/**
+ * 上游 1.2.18：把刷新结果写回账号备份。
+ * 三条硬要求 —— ① 落盘前做 CAS（签名 + 全文比对），刷新期间账号被切走就放弃写，
+ * 免得把 A 的 token 写进 B 的备份；② 加密态必须按原信封重新加密，绝不降级明文；
+ * ③ 失败日志不带凭据，也不把异常原文打到日志里。
+ */
+function persistRefreshedAccount(uid, file, root, stored, sourceSignature, sourceText) {
+  const tmp = `${file}.tmp.${process.pid}.${Math.random().toString(36).slice(2)}`;
+  try {
+    if (accountBackupSignature(file) !== sourceSignature || fs.readFileSync(file, 'utf8') !== sourceText) {
+      backupAuthRuntimeCache.delete(uid);
+      return { root: null, refreshed: false, persisted: false, error: 'account-changed-during-refresh' };
+    }
+    const output = wdCompatContainsEncryptedFields(stored) ? wdCompatEncryptAuthJson(root, stored) : root;
+    fs.writeFileSync(tmp, JSON.stringify(output, null, 2), { mode: 0o600, flag: 'wx' });
+    fs.renameSync(tmp, file);
+  } catch (_) {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
+    // 不记录原始加密/文件异常，避免错误文本带出凭据或账号备份内容。
+    log(`[token-refresh] 账号 ${uid} 刷新结果落盘失败，将重试保存`);
+    return { root, refreshed: true, persisted: false, error: 'write-account-failed' };
+  }
+  backupAuthRuntimeCache.delete(uid);
+  rememberTokenRefreshSuccess(uid, file, root.auth);
+  return { root, refreshed: true, persisted: true };
+}
+
+/** 账号备份刷新：读 → 刷 → 按原信封加密写回。加密态在刷新前先预检可写性。 */
 async function refreshAccountBackupToken(uid, options = {}) {
-  const file = path.join(DATA_DIR, 'accounts', uid + '.info');
+  const file = accountBackupFile(uid);
   let root;
+  let stored;
+  let sourceText;
   let encryptedAtRest = false;
   let sourceSignature = '';
   try {
     const stat = fs.statSync(file);
     sourceSignature = `${stat.mtimeMs}:${stat.size}`;
-    const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+    sourceText = fs.readFileSync(file, 'utf8');
+    stored = JSON.parse(sourceText);
     encryptedAtRest = wdCompatContainsEncryptedFields(stored);
     const cached = backupAuthRuntimeCache.get(uid);
+    if (cached && cached.signature !== sourceSignature) backupAuthRuntimeCache.delete(uid);
     root = cached && cached.signature === sourceSignature
       ? cached.root
-      : wdCompatDecryptAuthJson(stored); // [wd-compat]
-  } catch (e) {
-    return { root: null, error: 'read-account-failed: ' + e.message };
+      : wdCompatDecryptAuthJson(JSON.parse(sourceText)); // 保留原信封作为写入模板。
+    // 上一次刷新成功但没写进去（进程被杀 / 文件被占用）⇒ 这一轮先补写，不再打上游。
+    if (cached && cached.signature === sourceSignature && cached.pendingPersistence) {
+      return persistRefreshedAccount(uid, file, root, stored, sourceSignature, sourceText);
+    }
+  } catch (_) {
+    return { root: null, error: 'read-account-failed' };
   }
   const auth = root && root.auth && typeof root.auth === 'object' ? root.auth : null;
   if (!auth) return { root, skipped: true, reason: 'no-auth' };
@@ -6208,30 +6824,28 @@ async function refreshAccountBackupToken(uid, options = {}) {
   if (options.dailyKeepalive === true && !dailyDue) return { root, skipped: true };
   if (options.force !== true && !dailyDue && !shouldRefreshAccessToken(auth, now)) return { root, skipped: true };
 
+  if (encryptedAtRest) {
+    try {
+      // 在可能轮换 refresh token 的请求之前确认能重新加密 ——
+      // 不能等到刷新成功才发现存不下（refresh token 已被上游换掉，旧的就废了）。
+      wdCompatEncryptAuthJson(root, stored);
+      if (typeof (auth.accessToken ?? auth.access_token) !== 'string' ||
+          typeof (auth.refreshToken ?? auth.refresh_token) !== 'string') throw new Error('encrypted-credentials-unavailable');
+    } catch (_) {
+      return { root, refreshed: false, error: 'encrypt-account-unavailable' };
+    }
+  }
+
   const result = await refreshAuthToken(auth, { apiHost: PROFILE.apiHost, fetchImpl: globalThis.fetch, now });
   if (!result.ok) {
     log(`[token-refresh] 账号 ${uid} 刷新失败: ${redactDiagnosticText(result.error, 300)}`);
     return { root, refreshed: false, error: result.error };
   }
   const nextRoot = Object.assign({}, root, { auth: result.auth });
-  if (encryptedAtRest) {
-    backupAuthRuntimeCache.set(uid, { signature: sourceSignature, root: nextRoot });
-    log(`[token-refresh] 账号 ${uid} 已刷新（加密备份仅保存在内存）`);
-    return { root: nextRoot, refreshed: true, persisted: false };
-  }
-  const tmp = file + '.tmp';
-  try {
-    fs.writeFileSync(tmp, JSON.stringify(nextRoot, null, 2), { mode: 0o600 });
-    fs.renameSync(tmp, file);
-    fs.chmodSync(file, 0o600);
-  } catch (e) {
-    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
-    log(`[token-refresh] 账号 ${uid} 刷新结果落盘失败: ${e.message}`);
-    return { root, refreshed: false, error: 'write-account-failed: ' + e.message };
-  }
-  backupAuthRuntimeCache.delete(uid);
-  rememberTokenRefreshSuccess(uid, file, result.auth);
-  return { root: nextRoot, refreshed: true, persisted: true };
+  // 先在缓存里标 pendingPersistence：即便下面写盘失败，下一轮也能凭它补写，
+  // 不必再打一次上游（refresh token 可能已经被轮换）。
+  backupAuthRuntimeCache.set(uid, { signature: sourceSignature, root: nextRoot, pendingPersistence: true });
+  return persistRefreshedAccount(uid, file, nextRoot, stored, sourceSignature, sourceText);
 }
 
 /**
@@ -6380,7 +6994,7 @@ async function performAccountCheckin(uid) {
 }
 
 /** 通过 CDP 把右下角组件注入到 WorkBuddy 渲染进程（幂等，可反复调用） */
-function injectWidget(reason, executionContextId) {
+async function injectWidget(reason, executionContextId) {
   if (!cdp.connected) {
     return Promise.reject(new Error('CDP 未连接，无法注入组件'));
   }
@@ -6414,6 +7028,8 @@ function injectWidget(reason, executionContextId) {
   lastInjectTs = now;
   let script;
   try {
+    // binding 必须在脚本执行前注册：脚本一落地就会发第一帧请求（版本/账号）。
+    if (PROFILE.kind === 'codebuddy') await cdpSend('Runtime.addBinding', { name: BINDING });
     script = buildInjectScript();
   } catch (e) {
     return Promise.reject(new Error('读取注入脚本失败: ' + e.message));
@@ -6438,7 +7054,7 @@ function injectWidget(reason, executionContextId) {
     )
     // Reinjection and daemon replacement must reflect the current input lease,
     // including a reset after an interrupted run. Reply-waiting never locks UI.
-    .then(async (r) => { await automationPanelSetInputActive(automationInputActive); return r; })
+    .then(async (r) => { await automationPanelSetInputActive(automationInputActive, 'reinject:' + reason); return r; })
     // 注入脚本若在页面抛错，CDP 协议不报错（无 protocol error），会被误判为"已注入"；
     // 显式检查 exceptionDetails 让失败可见、留痕，便于定位 WorkBuddy 版本差异导致的挂载失败。
     .then((r) => {
@@ -6518,9 +7134,42 @@ function buildInjectScript() {
     }
     injectScript = injectScript.replace(anchor, pickerCode + '\n' + anchor);
   }
+  // CodeBuddy 的渲染层强制 Trusted Types（CSP require-trusted-types-for 'script'），
+  // 直接赋 innerHTML 会被浏览器拒绝。做法不是去改宿主，而是给自己造一个受认可的出口：
+  // 用官方已注册的策略名造 policy（复用同一个策略，不新增 CSP 白名单），把它包成
+  // Element.prototype.__wbsHTML —— 只替换**我们这份脚本**里的写入点（见下面的源码重写），
+  // 宿主的 innerHTML setter 原样不动。
+  const trustedTypesBootstrap = PROFILE.kind === 'codebuddy' ? `(function(){
+    var d=Object.getOwnPropertyDescriptor(Element.prototype,'innerHTML');
+    var p=window.__wbsTrustedHtmlPolicy;
+    if(!p && typeof trustedTypes!=='undefined') {
+      try { p=trustedTypes.createPolicy('notebookChatEditController',{createHTML:function(v){return String(v);}}); }
+      catch(_) { p=null; }
+      window.__wbsTrustedHtmlPolicy=p;
+    }
+    function html(v){return p?p.createHTML(v):v;}
+    Object.defineProperty(Element.prototype,'__wbsHTML',{configurable:true,get:d.get,
+      set:function(v){return d.set.call(this,html(v));}});
+    var outer=Object.getOwnPropertyDescriptor(Element.prototype,'outerHTML');
+    Object.defineProperty(Element.prototype,'__wbsOuterHTML',{configurable:true,get:outer.get,
+      set:function(v){return outer.set.call(this,html(v));}});
+    var adjacent=Element.prototype.insertAdjacentHTML;
+    Object.defineProperty(Element.prototype,'__wbsInsertAdjacentHTML',{configurable:true,
+      value:function(position,v){return adjacent.call(this,position,html(v));}});
+  })();\n` : '';
   // 组件内通过 fetch 调用本机 API，注入时写入实际端口
   // ⚠️ 拼接顺序：markdownScript 必须在最前（inject.js 依赖 window.__wbsMarkdownPreview）。
-  return (markdownScript + '\n' + toastScript + '\n' + compatScript + '\n' + injectScript)
+  // ⚠️ markdownScript（map 产物）与 trustedTypesBootstrap **不进重写**：前者自带可选 policy 引用。
+  let source = (PROFILE.kind === 'codebuddy' ? rendererBridgeSource() : '') + toastScript + '\n' + compatScript + '\n' + injectScript;
+  if (PROFILE.kind === 'codebuddy') {
+    // 只重写我们自己这份脚本里的 HTML 写入点；markdown 渲染器与 bootstrap 在字符串外。
+    source = source
+      .replace(/\.innerHTML\b/g, '.__wbsHTML')
+      .replace(/\binnerHTML\s*:/g, '__wbsHTML:')
+      .replace(/\.outerHTML\b/g, '.__wbsOuterHTML')
+      .replace(/\.insertAdjacentHTML\b/g, '.__wbsInsertAdjacentHTML');
+  }
+  return (trustedTypesBootstrap + markdownScript + '\n' + source)
     .replace(/__WBS_API__/g, `http://${HOST}:${ACTUAL_PORT}`)
     .replace(/__WBS_VERSION__/g, DAEMON_VERSION)
     // 注入本地 API 能力凭证；旧版面板不会携带该 header，但新版 daemon 会在启动时重新注入新版面板。
@@ -6534,9 +7183,54 @@ function buildInjectScript() {
     .replace(/__WBS_PLATFORM__/g, JSON.stringify(process.platform));
 }
 
+// 2026-10-23：launcher 派发启动请求后约 2 秒就会打这个接口，此时客户端刚起，两种"连不上"都是
+//   正常过渡态，以前却一律 reject，害得 launcher 每秒重试一次、刷满「CDP 未连接」——用户看到
+//   的就是一整屏报错：
+//   ① daemon 的 CDP 长连接在客户端重启瞬间被 onclose 置为断开，重连靠 cdpLoop 每
+//      CDP_RECONNECT_MS(5s) 才轮一次；
+//   ② CodeBuddy 是 VS Code fork，主 target（agentManager.html）**懒创建**：用户没点开 AI
+//      面板时端口在听、却没有这个 target，主连接永远不会成立。
+// 现在分三步，任一步成立都算注入成功：
+//   a. 先主动等主连接（最多 MANUAL_INJECT_CDP_WAIT_MS，主动 connect 而不是干等轮询）；
+//   b. 等不到就让 IDE 通道补扫一次——IDE 主窗口挂的是同一份完整面板，功能不缺；
+//   c. 都不成才把原始错误交出去，由 launcher 按自己的节奏继续重试。
+async function waitForCdpReady(timeoutMs) {
+  if (cdp.connected) return true;
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  for (;;) {
+    if (cdp.connected) return true;
+    if (Date.now() >= deadline) return false;
+    try { await connectCdp(); } catch (_) {}
+    if (cdp.connected) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 600));
+  }
+}
+
+function ideChannelMounted() {
+  for (const entry of idePages.values()) {
+    if (entry && entry.mounted && !entry.closed) return true;
+  }
+  return false;
+}
+
 function injectWidgetManual() {
   if (manualInjectPromise) return manualInjectPromise;
-  manualInjectPromise = injectWidget('manual').finally(() => {
+  manualInjectPromise = (async () => {
+    // 顺序很关键：实测「先等主连接」会让 CodeBuddy 每次启动都硬拖 8 秒——
+    // 因为 AI 面板没打开时主 target 根本不存在，等到超时是必然结果。
+    // 所以先花几十毫秒看一眼两条通道的现状，只有都不可用时才值得等。
+    if (cdp.connected) return injectWidget('manual');
+    await ideSyncScan().catch(() => {});
+    if (ideChannelMounted()) return { mounted: true, via: 'ide' };
+    // 两条都没挂上 ⇒ 客户端刚开始起（或还没起），这时才等主连接。
+    await waitForManualCdpReady();
+    if (cdp.connected) return injectWidget('manual');
+    // 等完仍未连上，再补扫一次 IDE 通道（这段时间里 workbench 可能刚就绪）。
+    await ideSyncScan().catch(() => {});
+    if (ideChannelMounted()) return { mounted: true, via: 'ide' };
+    return injectWidget('manual');
+  })().finally(() => {
     manualInjectPromise = null;
   });
   return manualInjectPromise;
@@ -6609,64 +7303,69 @@ async function writeDiagnosticsSnapshot(reason) {
 // ===== SESSIONS_API_MARK：会话管理（读 WorkBuddy workbuddy.db）=====
 const SESSIONS_DB = PROFILE.sessionDb;
 const SESSION_DB = createSessionDb({ dbPath: SESSIONS_DB });
+// CodeBuddy 没有 workbuddy.db：官方把会话记录放在 vscdb 的 ItemTable（key-value）里。
+// 这里把它虚拟成内存 SQLite 的同名 sessions 表 —— 读走任意 SELECT，写回官方主进程服务，
+// 这样上面几十处既有 SQL 调用点一句都不用改。手工正则嗅探 SQL 的老做法已删除：
+// 它只认得出三种谓词，遇到 ORDER BY / LIMIT / 组合条件就静默返回全表。
+const CODEBUDDY_SESSIONS = PROFILE.kind === 'codebuddy' ? createCodeBuddySessionStore({
+  readItems: async () => {
+    const items = await codeBuddyNative.sessionItems();
+    for (const item of items) {
+      try {
+        const row = JSON.parse(item.value);
+        if (row && row.userId && row.cwd) codeBuddyFiles.register({ id: row.conversationId, user_id: row.userId, cwd: row.cwd });
+      } catch (_) { /* 单条脏记录不该让整张会话表不可读 */ }
+    }
+    return items;
+  },
+  writeChanges: async (changes) => {
+    await assertCodeBuddySessionsIdle(changes.map((change) => change.id));
+    return codeBuddyFiles.commit(changes, () => codeBuddyNative.writeSessions(changes));
+  },
+}) : null;
+
+// CodeBuddy CN 与 intl 共用同一棵历史树，但账号库是按 profile 分开的。
+// 统计时把兄弟 profile 已登记的账号排除掉，避免两个客户端互相串味；
+// 认不出来的 owner 保留（可能是删掉的账号或旧安装留下的），宁可多算也不静默丢。
+function codeBuddyProfileOwnerIds(profileId) {
+  try {
+    const accountsDir = path.join(profileDataDir(getProfile(profileId)), 'accounts');
+    return new Set(fs.readdirSync(accountsDir)
+      .filter((name) => /^[-A-Za-z0-9_]{1,200}\.info$/.test(name))
+      .map((name) => name.slice(0, -5)));
+  } catch (_) {
+    return new Set();
+  }
+}
+function codeBuddyForeignOwnerIds() {
+  if (PROFILE.kind !== 'codebuddy') return [];
+  const sibling = PROFILE.id === 'codebuddy-cn' ? 'codebuddy-intl'
+    : PROFILE.id === 'codebuddy-intl' ? 'codebuddy-cn' : '';
+  if (!sibling) return [];
+  const currentOwners = codeBuddyProfileOwnerIds(PROFILE.id);
+  return [...codeBuddyProfileOwnerIds(sibling)].filter((owner) => !currentOwners.has(owner));
+}
+
+// 与 WorkBuddy 的 __wbsSessionsBusy 判据不同：CodeBuddy 的运行状态只存在于官方主进程，
+// 渲染层问不到。运行中的会话被改归属会丢正文，所以写入前必须先问一次。
+async function assertCodeBuddySessionsIdle(sessionIds = []) {
+  if (PROFILE.kind !== 'codebuddy') return;
+  const ids = Array.isArray(sessionIds) ? sessionIds.map((id) => String(id || '').trim()).filter(Boolean) : [];
+  const sessions = (await codeBuddyNative.sessionItems()).map((item) => JSON.parse(item.value));
+  if (sessions.some((s) => s && (!ids.length || ids.includes(String(s.conversationId))) && ['Working', 'Planning'].includes(s.status))) {
+    throw new Error('当前账号有会话仍在运行，请等待完成或停止后再同步');
+  }
+}
 
 function sqliteRun(sql, params = []) {
-  if (PROFILE.kind === 'codebuddy') {
-    return Promise.reject(new Error(`${PROFILE.name} 会话库暂只支持读取`));
-  }
-  return SESSION_DB.run(sql, params);
-}
-function codeBuddySessionRows() {
-  return SESSION_DB.all("SELECT key, value FROM ItemTable WHERE key LIKE 'session:%'")
-    .then((items) => items.map((item) => {
-        let value = {};
-        try { value = typeof item.value === 'string' ? JSON.parse(item.value) : (item.value || {}); } catch (_) {}
-        const id = String(value.conversationId || String(item.key || '').replace(/^session:/, ''));
-        return {
-          id, cwd: value.cwd || '', user_id: value.userId || '', title: value.title || '', custom_title: value.title || '',
-          status: value.status || '', created_at: value.createdAt || null, updated_at: value.updatedAt || null,
-          last_activity_at: value.updatedAt || null, is_playground: value.isPlayground ? 1 : 0,
-          deleted_at: null, source_mode: value.mode || 'agents', mode: value.mode || 'agents', model: value.model || '',
-        };
-      }))
-    .catch((e) => { throw new Error('CodeBuddy 会话库读取失败: ' + e.message); });
-}
-function sqlParamAt(textSql, params, questionIndex) {
-  return params[parameterCount(textSql.slice(0, questionIndex + 1)) - 1];
+  return (CODEBUDDY_SESSIONS || SESSION_DB).run(sql, params);
 }
 async function sqliteQuery(sql, params = []) {
   const expectedParams = parameterCount(sql);
   if (expectedParams !== params.length) {
     throw new Error(`sqlite 参数数量不匹配: SQL 需要 ${expectedParams} 个，实际收到 ${params.length} 个`);
   }
-  if (PROFILE.kind === 'codebuddy') {
-    const rows = await codeBuddySessionRows();
-    const textSql = String(sql || '');
-    const uidMatch = /user_id\s*=\s*\?/i.exec(textSql);
-    const idMatch = /id\s+IN\s*\(([^)]*)\)/i.exec(textSql);
-    const singleIdMatch = /\bid\s*=\s*\?/i.exec(textSql);
-    let filtered = rows;
-    if (uidMatch) {
-      const questionIndex = textSql.indexOf('?', uidMatch.index);
-      const uid = sqlParamAt(textSql, params, questionIndex);
-      filtered = filtered.filter((r) => String(r.user_id) === String(uid));
-    }
-    if (idMatch) {
-      const questionIndex = textSql.indexOf('?', idMatch.index);
-      const start = parameterCount(textSql.slice(0, questionIndex + 1)) - 1;
-      const ids = new Set(params.slice(start, start + parameterCount(idMatch[1])).map(String));
-      filtered = filtered.filter((r) => ids.has(String(r.id)));
-    }
-    if (singleIdMatch) {
-      const questionIndex = textSql.indexOf('?', singleIdMatch.index);
-      const id = sqlParamAt(textSql, params, questionIndex);
-      filtered = filtered.filter((r) => String(r.id) === String(id));
-    }
-    if (/SELECT\s+DISTINCT\s+cwd/i.test(textSql)) return Array.from(new Set(filtered.map((r) => r.cwd).filter(Boolean))).map((cwd) => ({ cwd }));
-    if (/SELECT\s+user_id/i.test(textSql) && /LIMIT\s+1/i.test(textSql)) return filtered.slice(0, 1).map((r) => ({ user_id: r.user_id }));
-    return filtered;
-  }
-  const rows = await SESSION_DB.all(sql, params);
+  const rows = await (CODEBUDDY_SESSIONS || SESSION_DB).all(sql, params);
   // Keep the existing API contract (SQLite cells were strings, NULL was empty)
   // while avoiding the delimiter/newline corruption of the former text parser.
   return rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [
@@ -6806,6 +7505,10 @@ function createDirectoryNoFollow(directory) {
 }
 
 let sessionCwdRepairInFlight = null;
+// 上游 1.2.41 吸纳：只去重提示；每轮仍检查卷状态，盘符或共享恢复后无需重启 daemon。
+const reportedMissingCwdRoots = new Set();
+// 上游 1.2.18：同一路径失败后按退避重试（30s 起翻倍、封顶 5 分钟），不再每 5 秒撞一次。
+const sessionCwdRepairFailures = new Map();
 function repairMissingSessionWorkspaces() {
   if (sessionCwdRepairInFlight) return sessionCwdRepairInFlight;
   sessionCwdRepairInFlight = (async () => {
@@ -6813,19 +7516,62 @@ function repairMissingSessionWorkspaces() {
     const wbHome = path.dirname(SESSIONS_DB);
     const rows = await sqliteQuery("SELECT id, cwd FROM sessions WHERE deleted_at IS NULL AND cwd IS NOT NULL AND cwd != '';" );
     const repaired = [];
+    const missingCwdRoots = new Set();
+    const activeCwds = new Set();
     let skipped = 0;
     for (const row of rows.slice(0, 2000)) {
       const cwd = String(row.cwd || '').trim();
-      if (!cwd || fs.existsSync(cwd) || !sessionPayloadExists(wbHome, row.id)) { skipped++; continue; }
+      if (!cwd) { skipped++; continue; }
+      const key = path.resolve(cwd).toLowerCase();
+      if (fs.existsSync(cwd)) {
+        // 目录已经在 ⇒ 清掉这条的失败账，避免旧退避挡住在别处恢复后的重试。
+        sessionCwdRepairFailures.delete(key);
+        skipped++;
+        continue;
+      }
+      if (!sessionPayloadExists(wbHome, row.id)) { skipped++; continue; }
+      activeCwds.add(key);
+      // 上游 1.2.41：cwd 落在已消失的卷（拔掉的移动盘 / 断开的网络盘）上时直接跳过 ——
+      // 否则本函数 5 秒一拍，每轮都要 createDirectory → 失败 → 写日志。
+      const root = path.parse(cwd).root;
+      if (root && !fs.existsSync(root)) {
+        skipped++;
+        missingCwdRoots.add(root);
+        continue;
+      }
+      const previous = sessionCwdRepairFailures.get(key);
+      if (previous && Date.now() < previous.nextRetryAt) { skipped++; continue; }
       try {
         createDirectoryNoFollow(cwd);
-        if (fs.statSync(cwd).isDirectory()) repaired.push(cwd);
+        if (fs.statSync(cwd).isDirectory()) {
+          repaired.push(cwd);
+          sessionCwdRepairFailures.delete(key);
+        }
       } catch (error) {
         skipped++;
-        log(`[sessions-cwd-repair] 跳过 ${cwd}: ${error.message}`);
+        // 不写完整路径、不写异常原文：两者都可能把私有工作区路径带进日志。
+        const code = ['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'EEXIST'].includes(error.code) ? error.code : 'UNSAFE_PATH';
+        const attempts = previous ? Math.min(previous.attempts + 1, 5) : 1;
+        sessionCwdRepairFailures.set(key, { attempts, code,
+          nextRetryAt: Date.now() + Math.min(30000 * Math.pow(2, attempts - 1), 300000) });
+        if (!previous || previous.code !== code) {
+          log(code === 'UNSAFE_PATH'
+            ? '[sessions-cwd-repair] 跳过不安全的会话工作目录（符号链接或非目录路径），稍后重试'
+            : `[sessions-cwd-repair] 会话工作目录恢复失败（${code}），稍后重试`);
+        }
       }
     }
+    // 已不在结果集里的路径不必再记退避账（换号 / 删会话后不占内存）。
+    for (const key of sessionCwdRepairFailures.keys()) {
+      if (!activeCwds.has(key)) sessionCwdRepairFailures.delete(key);
+    }
     if (repaired.length) log(`[sessions-cwd-repair] 已恢复 ${repaired.length} 个会话工作目录（消息文件未改动）`);
+    // 缺失卷的提示只记录卷根，避免把完整会话路径写进日志。
+    for (const root of missingCwdRoots) {
+      if (reportedMissingCwdRoots.has(root)) continue;
+      reportedMissingCwdRoots.add(root);
+      log(`[sessions-cwd-repair] 跳过所在卷不存在的会话：${root}`);
+    }
     return { repaired, skipped };
   })();
   sessionCwdRepairInFlight.finally(() => { sessionCwdRepairInFlight = null; }).catch(() => {});
@@ -11102,337 +11848,6 @@ function refreshZhReasoningIfEnabled() {
   }
 }
 
-/* ================= 本地子 Agent 提示（全局自定义指令注入） =================
- * 与「决策弹窗」「中文思考」**共用同一条官方通道**：settings.personalization.customPrompt
- * → 渲染进 user-context-identity.tpl 的 <user_custom_instructions> 区块（模板原文
- * "You MUST follow them in all responses"）—— 对**每个会话全局生效**。
- *
- * 解决什么问题（2026-10-01 用户明确的需求）：
- *   主 AI 能调用本地子 Agent（qwen3.8-27b）协同干活，但**上下文一多就忘了它存在**，
- *   要用户反复提醒；换到别的任务会话更不会主动用。
- *   ⇒ 把「你有一个可用的本地子 Agent」写进全局自定义指令，让**每个会话开局就知道**它存在。
- *
- * 开关行为：**关闭时既不提醒也不注入** —— 整段规则从 customPrompt 里摘掉，
- *   用户其它的自定义指令原样保留；用户本来就没写内容时把键一起删掉（开→关字节级还原）。
- *   ⚠️ 「关闭」只停**提醒**，不影响用户在对话里手动要求使用。
- */
-const AGENT_HINT_TAG_START = '<!-- wbs-agent-hint:start -->';
-const AGENT_HINT_TAG_END = '<!-- wbs-agent-hint:end -->';
-/**
- * [2026-10-01 探针评估报告 §7.3] 从**已发生的派活记录**推导每个模型的健康状态。
- *
- * ⚠️ 为什么不做「固定间隔自动探活」：本地探活**必须发真实 chat 请求**
- *    （引擎崩后 /v1/models 仍返 200，轻量探测全是假的），而真实请求本身要占推理资源
- *    （显存余量仅约 1GB）⇒ 定时探测会**制造它想预防的拥塞**。
- *    ⇒ 改用「观测驱动」：状态来自已经发生的事实，零额外开销。
- *
- * 判据：**连续失败**次数 ≥ 阈值，且失败原因属于引擎类（503 / Paged KV / admission）。
- *   连续失败数按时间倒序累计，遇到一次成功即清零。
- *
- * ⚠️ 三条刻意的取舍（被独立复核追问过，在此写死语义）：
- *   ① **非引擎类失败不参与计数、也不清零** —— 任务本身逻辑出错不代表引擎有问题，
- *      不该把引擎的连续失败「洗白」。所以「引擎失败 → 任务失败 → 引擎失败」仍计 2 次。
- *   ② **从未有结果的模型不进 Map** —— 我们对它一无所知时**不贴任何标签**。
- *      注意这与「读不到 = 健康」是两回事：读不到就是不知道，不是健康。
- *   ③ 只有**引擎类**失败才推进计数；其余分支一律不写回 Map（避免无意义的 set）。
- *
- * @param {Array} records 台账记录（agent-usage 的 records）
- * @returns {Map<string, {consecutiveFailures:number, lastFailureKind:string}>}
- */
-const AGENT_UNHEALTHY_THRESHOLD = 2;
-const ENGINE_FAILURE_RE = /503|inference engine is unavailable|Paged KV|waiting for admission/i;
-
-function deriveAgentHealth(records) {
-  const byModel = new Map();
-  const list = Array.isArray(records) ? records.slice() : [];
-  // 按时间正序，便于累计「连续失败」
-  list.sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
-  for (const r of list) {
-    const id = String((r && r.model) || '').trim();
-    if (!id) continue;
-    const state = byModel.get(id) || { consecutiveFailures: 0, lastFailureKind: '' };
-    if (r.failed) {
-      const text = String(r.outputHead || '');
-      if (ENGINE_FAILURE_RE.test(text)) {
-        state.consecutiveFailures += 1;
-        state.lastFailureKind = /503/i.test(text) ? 'engine-unavailable'
-          : /Paged KV/i.test(text) ? 'engine-corrupt'
-          : 'admission-timeout';
-        byModel.set(id, state);
-      }
-      // 非引擎类失败（如任务本身出错）**不累计** —— 那不是引擎的问题
-    } else if (r.paired) {
-      // 有结果且不是失败 ⇒ 健康，清零
-      state.consecutiveFailures = 0;
-      state.lastFailureKind = '';
-      byModel.set(id, state);
-    }
-  }
-  return byModel;
-}
-
-/**
- * 子 Agent 提醒规则（**按目录动态生成**，2026-10-01 通用化）。
- *
- * ⚠️ 旧版把 `model="qwen3.8-27b"` **写死在文案里** —— 接入任何别的 AI 之后提醒就失真
- *    （AI 只会照着文案去调那一个模型）。现在清单来自用户在模型页的**声明**
- *    （`agent-catalog.js` 里 `delegate: true` 的那些）。
- *
- * @param {Array<{id:string,kind:string,label:string}>} models 可委派的模型（非空）
- */
-function buildAgentHintRule(models, health) {
-  const healthMap = health instanceof Map ? health : new Map();
-  // [2026-10-01 探针评估报告 §7.3] 把「最近不稳」直接写进清单行 ——
-  // 让主 AI 在**决定要不要派活之前**就知道风险，比事后收失败回执更好。
-  const rows = models.map((m) => {
-    const h = healthMap.get(m.id);
-    const warn = h && h.consecutiveFailures >= AGENT_UNHEALTHY_THRESHOLD
-      ? '  [WARNING: last ' + h.consecutiveFailures + ' delegations failed (' + h.lastFailureKind + ')]'
-      : '';
-    return '  - ' + m.id + '   (' + m.kind + ')' + warn;
-  }).join('\n');
-  const example = models[0].id;
-  return [
-    'You can delegate work to one of these sub-agent models:',
-    rows,
-    '',
-    // [2026-10-07 改造] 从「禁令清单」升级为「派活指南」。
-    //   旧版 4 条规则全是「别做什么」——把 AI 教得**不敢用**，却没说**怎么用才有效**。
-    //   新版按 何时值得派 / 怎么派才有效 / 失败了怎么办 三段组织，
-    //   并把家里 AI 侧实测出来的经验搬进来（材料 20-30K 最快、输出越明确越快、
-    //   带历史续写几乎免费、专名要挂表）。
-    //   ⚠️ 保留原有实测得来的硬约束原句（串行 / 不重试 / 关键路径不外包）——
-    //      它们是回归断言（A4/H1/H2）的锚点，也是真踩过坑的结论，不要改写措辞。
-    'Call it with Agent(subagent_type="general-purpose", model="' + example + '", prompt="...")',
-    // [2026-10-07 补] ⚠️ 必须显式传 model —— 实测踩坑：不传 model 时 Agent 工具**静默回落**
-    //   到本会话自己的云端模型（调用照常成功、无任何报错），既花了 API 钱、
-    //   又完全没用到本地引擎。这是个**不可见的失败模式**，提示里不点名 AI 无从得知。
-    '⚠️ Always pass model= explicitly (' + example + ' or any id listed above). Omitting it does NOT',
-    'fail — the task silently runs on this session\'s own model instead, billed as normal usage,',
-    'with the intended model never touched. No error, no warning, so you cannot tell it happened.',
-    '',
-    'WHEN IT PAYS OFF',
-    '"Read a lot, return a little": extracting a list from large files, surveying a directory',
-    'tree, summarizing logs, cross-checking two documents. It reads and copies reliably but',
-    'does not decide — never delegate writing code, editing files, or design work.',
-    '',
-    'HOW TO DELEGATE WELL',
-    // ⚠️ [2026-10-01] 规则 1 的补充句来自实证：台账显示 2026-09-29 17:11:10
-    //    **同一秒内发起 4 个不同任务** → 6 条失败（全 admission timeout）
-    //    ⇒ 「串行」这条约束确实被违反过 ⇒ 光靠文案不够，要把边界说死。
-    // ⚠️ 断行位置有约束：回归断言 H1 检查「Never issue more than one Agent call in the same message」
-    //    必须在**同一行**（跨行就匹配不到）——所以这句不能在中途折行。
-    '1. Delegate one at a time, serially.',
-    '   Never issue more than one Agent call in the same message: the local engine is serial',
-    '   and a concurrent call crashes it.',
-    '2. Trim the material to 20-30K tokens first — that range prefills in about a second.',
-    '   Larger input still works (up to roughly 133K) but gets slower; do not refuse a big',
-    '   task for size alone, just expect it to take longer.',
-    '3. Say exactly what to return ("return only the table, no commentary") — tighter output',
-    '   comes back faster and is far less likely to be cut off.',
-    '4. On a follow-up about the same material, carry the whole history instead of re-stating',
-    '   the task: the prompt cache makes the re-send nearly free.',
-    '5. For text full of proper nouns (ports, document names, trade terms), paste the relevant',
-    '   name list into the prompt — the model does not recall these reliably.',
-    '',
-    'WHEN IT FAILS',
-    '- If a delegation fails, fall back to your own work and move on. Do not retry the same task repeatedly.',
-    '- After two consecutive failures, stop delegating for the rest of this session.',
-    '- An empty body or a truncated answer means the output budget ran out: ask for a shorter',
-    '  answer instead of re-running the same prompt unchanged.',
-    '- An image returning vision_disabled means the current backend cannot see images: drop the',
-    '  image and retry as plain text.',
-    '',
-    'Every delegation is recorded locally. Consult that history (WorkDaddy panel -> Models) when you need',
-    'to judge what kinds of tasks they have actually been good at.',
-    '',
-    // [2026-10-01 注入时机缺口] 实测：用户在面板开关提醒后，**已在进行中的会话**
-    // 不会立刻拿到新的 customPrompt —— 它由官方在「每轮用户消息」时读取
-    // （本会话实证：10:20 开启 → 10:42 才进上下文）。
-    // ⇒ 无法强制刷新，但可以让主 AI **自己知道**这条清单可能滞后：
-    //   若清单里写的模型实际不可用，按 WHEN IT FAILS 降级即可，不要反复重试。
-    'Note: this list is refreshed per user turn. If a listed model turns out to be unavailable,',
-    'treat it as a failed delegation (see WHEN IT FAILS) — do not retry or investigate.'
-  ].join('\n');
-}
-
-/**
- * 生成提醒块。
- * ⚠️ **可委派的模型一个都没有 ⇒ 返回空串 ⇒ 整段不注入** ——
- *    宁可不提，也不要让 AI 去调一个不存在的模型。调用方需自行处理空串
- *    （`setAgentHint` 会据此拒绝开启并给出可操作提示）。
- */
-function buildAgentHintBlock() {
-  const list = agentCatalog.delegatable(agentCatalog.readCatalog(DATA_DIR));
-  if (!list.length) return '';
-  // [2026-10-01 探针评估报告 §7.3] 把「最近连续失败」写进提醒文案。
-  // ⚠️ 读台账失败时**静默降级为空健康表**（不标警），绝不因为读不到状态就不生成提醒 ——
-  //    提醒本身仍有价值（告诉 AI 有子 Agent 可用），健康标注只是增量信息。
-  let health = new Map();
-  try { health = deriveAgentHealth(collectAgentUsage().records); } catch (_) {}
-  return AGENT_HINT_TAG_START + '\n' + buildAgentHintRule(list, health) + '\n' + AGENT_HINT_TAG_END;
-}
-
-/** 从 customPrompt 中移除子 Agent 提示段（保留用户其它内容，**且不改动用户原文一个字节**）。 */
-function stripAgentHint(customPrompt) {
-  if (typeof customPrompt !== 'string') return '';
-  const start = customPrompt.indexOf(AGENT_HINT_TAG_START);
-  const end = customPrompt.indexOf(AGENT_HINT_TAG_END);
-  if (start === -1 || end === -1 || end < start) return customPrompt;
-  const before = customPrompt.slice(0, start);
-  const after = customPrompt.slice(end + AGENT_HINT_TAG_END.length);
-  // ⚠️⚠️ 这里**既不能 trim、也不能折叠空行** —— 那正是 2026-10-01 被独立复核抓到的：
-  //     原实现 `(before + after).replace(/\n{3,}/g,'\n\n').trim()` 会顺手改动**用户自己**的
-  //     首尾空白 ⇒ 注释里声称的「开→关字节级还原」其实**只在用户原文无尾随空白时成立**。
-  //     现改为：**只吃掉「开启时补在块前面那两个换行」**（见 setAgentHint 的 join('\n\n')），
-  //     其余一律原样。这样任意用户原文都能精确还原。
-  return before.replace(/\n{1,2}$/, '') + after;
-}
-
-function getAgentHintState() {
-  const settings = readWorkbuddySettings();
-  const customPrompt = (settings && settings.personalization && typeof settings.personalization.customPrompt === 'string')
-    ? settings.personalization.customPrompt
-    : '';
-  const enabled = customPrompt.includes(AGENT_HINT_TAG_START) && customPrompt.includes(AGENT_HINT_TAG_END);
-  // 预览里把三段插件规则都遮掉，只让用户看到自己写的内容
-  const userOnly = customPrompt
-    .replace(/<!-- wbs-ask-mode:start -->[\s\S]*?<!-- wbs-ask-mode:end -->/g, '')
-    .replace(/<!-- wbs-zh-reasoning:start -->[\s\S]*?<!-- wbs-zh-reasoning:end -->/g, '')
-    .replace(/<!-- wbs-agent-hint:start -->[\s\S]*?<!-- wbs-agent-hint:end -->/g, '')
-    .replace(/\n{3,}/g, '\n\n').trim();
-  return {
-    enabled,
-    hasUserCustomPrompt: !!userOnly,
-    userCustomPromptPreview: userOnly.slice(0, 120),
-  };
-}
-
-function setAgentHint(enabled) {
-  const settings = readWorkbuddySettings();
-  if (!settings.personalization || typeof settings.personalization !== 'object') settings.personalization = {};
-  const existing = typeof settings.personalization.customPrompt === 'string' ? settings.personalization.customPrompt : '';
-  const stripped = stripAgentHint(existing);
-  if (enabled) {
-    const block = buildAgentHintBlock();
-    // ⚠️ 没有任何「可委派」的模型 ⇒ 块为空 ⇒ **拒绝开启**。
-    //    否则用户以为开了、面板也显示"已开"，实际却什么都没注入 —— 那是最坏的一种骗人。
-    if (!block) {
-      const err = new Error('请先在「模型」页把至少一个模型标记为「可委派」，再打开这个开关');
-      err.code = 'NO_DELEGATABLE_MODEL';
-      throw err;
-    }
-    settings.personalization.customPrompt = [stripped, block].filter(Boolean).join('\n\n');
-  } else if (stripped) {
-    settings.personalization.customPrompt = stripped;
-  } else {
-    // 关且用户本来就没写自定义指令 ⇒ 把键一起摘掉，保证「开→关」字节级回到原状
-    delete settings.personalization.customPrompt;
-    if (Object.keys(settings.personalization).length === 0) delete settings.personalization;
-  }
-  writeWorkbuddySettings(settings);
-  return getAgentHintState();
-}
-
-/**
- * [2026-10-01 探针评估报告 §5·弱耦合] 目录变更后**立即**刷新提醒块。
- *
- * ⚠️ 修的问题：`refreshAgentHintIfEnabled` 原本**只在 daemon 启动时跑一次** ⇒
- *    取消「可委派」后，customPrompt 里那段注明「已停用模型」的过期提醒**不会立即消失**，
- *    要等 daemon 重启才被摘除。窗口期内 AI 会读到失真信息。
- *
- * 行为（与启动时一致）：
- *   · 提醒开着 ⇒ 用最新名单重建块（同时把新加入的可委派模型写进去）
- *   · 提醒开着但名单已空 ⇒ 摘除旧块（不报错）
- *   · 提醒关着 ⇒ 什么都不做
- */
-function refreshAgentHintAfterCatalogChange() {
-  if (PROFILE.kind !== 'workbuddy') return;
-  try {
-    if (!getAgentHintState().enabled) return;
-    setAgentHint(true);
-    log('[agent-hint] 目录变更后已刷新提醒块');
-  } catch (e) {
-    if (e && e.code === 'NO_DELEGATABLE_MODEL') {
-      try { setAgentHint(false); log('[agent-hint] 已无可委派模型，提醒块已摘除'); } catch (_) {}
-      return;
-    }
-    log('[agent-hint] 目录变更后刷新失败: ' + e.message);
-  }
-}
-
-/** 启动时调用：如已开启，把旧的提示规则替换为最新版本（用标记精确识别）。 */
-function refreshAgentHintIfEnabled() {
-  if (PROFILE.kind !== 'workbuddy') return;
-  try {
-    if (!getAgentHintState().enabled) return;
-    setAgentHint(true);
-    log('[agent-hint] 启动时已刷新子 Agent 提示为最新版本');
-  } catch (e) {
-    // ⚠️ 最常见的原因：用户把「可委派」全关了 ⇒ 块为空 ⇒ setAgentHint 拒绝开启。
-    //    这时**应当把旧块摘掉** —— 否则会留着一份"写着已经停用的模型"的过期提醒。
-    if (e && e.code === 'NO_DELEGATABLE_MODEL') {
-      try { setAgentHint(false); log('[agent-hint] 已无可委派模型，过期提示已自动摘除'); } catch (_) {}
-      return;
-    }
-    log('[agent-hint] 刷新失败: ' + e.message);
-  }
-}
-
-/**
- * 扫会话 jsonl，抽出「派给子 Agent」的调用并聚合（**只读**，带 5 分钟缓存）。
- *
- * 判据严格用 `name === 'Agent'` —— 实测用「文本含模型名」判定会大量误报
- * （`Read` / `Bash` 的记录正文里也会提到模型名）。
- *
- * ⚠️ 性能：只扫**最近 60 天修改过**的 jsonl；不活跃的会话直接跳过。
- *    实测全量约 150 个文件，加过滤后通常只剩十来个，够快。
- */
-let agentUsageCache = { at: 0, data: null };
-const AGENT_USAGE_CACHE_MS = 5 * 60 * 1000;
-
-function collectAgentUsage() {
-  if (agentUsageCache.data && (Date.now() - agentUsageCache.at) < AGENT_USAGE_CACHE_MS) {
-    return Object.assign({ cached: true }, agentUsageCache.data);
-  }
-  const projects = path.join(path.dirname(SESSIONS_DB), 'projects');
-  const records = [];
-  let scannedFiles = 0;
-  let skippedOld = 0;
-  const cutoff = Date.now() - 60 * 24 * 3600 * 1000;
-  try {
-    for (const proj of fs.readdirSync(projects, { withFileTypes: true })) {
-      if (!proj.isDirectory() || proj.isSymbolicLink()) continue;
-      const dir = path.join(projects, proj.name);
-      let names = [];
-      try { names = fs.readdirSync(dir); } catch (_) { continue; }
-      for (const name of names) {
-        if (!name.endsWith('.jsonl')) continue;
-        const full = path.join(dir, name);
-        try {
-          if (fs.statSync(full).mtimeMs < cutoff) { skippedOld += 1; continue; }
-          const text = fs.readFileSync(full, 'utf8');
-          if (text.indexOf('"Agent"') < 0) continue;      // 绝大多数文件不含派活，快速跳过
-          scannedFiles += 1;
-          const parsed = agentUsage.parseAgentCalls(text, { sessionId: name.replace(/\.jsonl$/, '') });
-          for (const item of parsed) records.push(item);
-        } catch (_) {}
-      }
-    }
-  } catch (_) {}
-  // ⭐ 按目录的「记录」开关做**读时过滤** —— 汇总与明细用同一份过滤结果，保持一致
-  const catalog = agentCatalog.readCatalog(DATA_DIR);
-  const data = {
-    ok: true,
-    scannedFiles,
-    skippedOld,
-    summary: agentUsage.summarizeUsage(records, catalog),
-    records: agentCatalog.filterRecords(catalog, records).slice(-80),   // 明细只回最近 80 条，避免响应体过大
-  };
-  agentUsageCache = { at: Date.now(), data };
-  return Object.assign({ cached: false }, data);
-}
-
 /* ================= 免打扰模块（No-Disturb）：基于 WorkBuddy 官方 sandbox 配置通道 ================= */
 // 原理（逆向 app.asar 内 cli/dist/codebuddy.js）：
 //  - CLI 的沙箱入口 shouldSandbox() 读 settings.json 的 sandbox 键：命中 excludedCommands 直接本地执行，
@@ -12283,22 +12698,57 @@ function accountBackupFile(uid) {
 let gatewayChild = null;
 let gatewayInstallInFlight = null;
 
+
 function gatewayStatus() {
   const paths = apiGateway.gatewayPaths(DATA_DIR);
   const state = apiGateway.readGatewayState(paths.stateFile);
   const installed = fs.existsSync(paths.exe) && fs.existsSync(paths.config);
   let accountCount = 0;
   try { accountCount = fs.readdirSync(paths.authDir).filter((n) => /^workbuddy.*\.json$/.test(n)).length; } catch (_) {}
-  const running = !!(gatewayChild && gatewayChild.pid && gatewayChild.exitCode === null);
+  // ⭐ 账号池对齐度（2026-10-16）：本仓已登录账号 vs auths/ 里实际有的（只比文件名，不解密）。
+  //    missing = 本仓有但池里没有（用户加的账号没进池）；stale = 池里有但本仓已删。
+  const accountPool = (() => {
+    const pool = new Set();
+    try {
+      for (const name of fs.readdirSync(paths.authDir)) {
+        const m = /^workbuddy-([A-Za-z0-9_-]+)\.json$/.exec(name);
+        if (m) pool.add(m[1]);
+      }
+    } catch (_) {}
+    const local = new Set();
+    try {
+      for (const name of fs.readdirSync(path.join(DATA_DIR, 'accounts'))) {
+        if (name.endsWith('.info')) local.add(name.slice(0, -5));
+      }
+    } catch (_) {}
+    return {
+      local: local.size,
+      pool: pool.size,
+      missing: Array.from(local).filter((uid) => !pool.has(uid)).length,
+      stale: Array.from(pool).filter((uid) => !local.has(uid)).length,
+    };
+  })();
+  const ownRunning = !!(gatewayChild && gatewayChild.pid && gatewayChild.exitCode === null);
+  // ⭐ 网关是独立服务：daemon 重启不会带走它 ⇒ 用探活结果兜底，
+  //   否则面板「明明能应答却显示未运行」，用户点停止也停不掉。
+  const running = ownRunning || !!gatewayHealthCache.info;
   return Object.assign({}, state, {
     paths: { root: paths.root, exe: paths.exe, config: paths.config, log: paths.log },
     installed: installed,
     running: running,
-    pid: running ? gatewayChild.pid : 0,
+    pid: ownRunning ? gatewayChild.pid : 0,
+    ownsProcess: ownRunning,
     accountCount: accountCount,
+    accountPool: accountPool,
     panelUrl: 'http://127.0.0.1:' + (Number(state.port) || apiGateway.DEFAULT_PORT) + '/panel/',
     // ⚠️ 只回指纹，绝不回 api_key 明文
     apiKeyHint: state.apiKeyHint || '',
+    // 面板要用的额外面（2026-10-15 补）：期望版本 / 版本漂移 / 自动拉起意图 / 已注册模型数 / 日志体积
+    expectedVersion: apiGateway.GATEWAY_VERSION,
+    versionDrift: !!(installed && state.gatewayVersion && state.gatewayVersion !== apiGateway.GATEWAY_VERSION),
+    autoStart: gatewayReadEnabled(),
+    registeredModelCount: Array.isArray(state.registeredModelIds) ? state.registeredModelIds.length : 0,
+    logSize: (() => { try { return fs.statSync(paths.logFile).size; } catch (_) { return 0; } })(),
   });
 }
 
@@ -12331,6 +12781,57 @@ function gatewayCollectAccounts() {
   return { accounts: accounts, errors: errors };
 }
 
+/**
+ * 把「本仓已登录账号」同步进网关账号池（`gateway/auths/`）。**幂等**，任意时机可重复调用。
+ *
+ * ⚠️ 为什么需要它（2026-10-16 修的 bug）：账号文档原本**只在 `gatewayInstall` 时写一次** ——
+ *    安装/升级网关那一刻的账号快照被固化下来，之后再登录的账号**永远不会进池**，
+ *    网关就一直少一个可用账号（面板上「账号池」数量也少一个）。
+ *
+ * 调用时机：① 账号备份之后（`scheduleBackup`，新账号一登录就进池）；② daemon 启动；
+ *          ③ 面板「同步账号池」按钮；④ 安装/更新网关。
+ *
+ * @returns {{ok:boolean, skipped?:string, added?:number, updated?:number, removed?:number,
+ *            unchanged?:number, total?:number, errors?:string[]}}
+ */
+function gatewaySyncAccounts(options) {
+  const opt = options && typeof options === 'object' ? options : {};
+  const paths = apiGateway.gatewayPaths(DATA_DIR);
+  // 没装网关 ⇒ 直接返回（零开销；本函数会被高频调用）
+  if (!fs.existsSync(paths.exe) || !fs.existsSync(paths.config)) return { ok: false, skipped: 'not-installed' };
+  const collected = gatewayCollectAccounts();
+  const docs = collected.accounts.map(apiGateway.buildAuthDocument).filter(Boolean);
+  if (!docs.length) return { ok: false, skipped: 'no-accounts', errors: collected.errors };
+  const r = apiGateway.syncAuthDocuments(paths.authDir, docs, {});
+  const uidOf = (name) => String(name).replace(/^workbuddy-/, '').replace(/\.json$/, '');
+  return {
+    ok: true,
+    added: r.added.length,
+    updated: r.updated.length,
+    removed: r.removed.length,
+    unchanged: r.unchanged,
+    total: r.total,
+    addedUids: r.added.map(uidOf),
+    addedNames: r.added.map((u) => { const a = collected.accounts.find((x) => x.uid === u); return a ? a.nickname : ''; }),
+    errors: collected.errors,
+  };
+}
+
+/** 同步后需要时给面板/日志一句话（安静版：只在真有变化时返回字符串）。 */
+function gatewaySyncAccountsQuiet(reason) {
+  try {
+    const r = gatewaySyncAccounts();
+    if (!r.ok) return null;
+    if (!r.added && !r.updated && !r.removed) return null;
+    const msg = '账号池已同步（' + reason + '）：新增 ' + r.added + ' · 更新 ' + r.updated + ' · 移除 ' + r.removed + ' · 合计 ' + r.total;
+    log('[gateway] ' + msg);
+    return msg;
+  } catch (e) {
+    log('[gateway] 账号池同步失败（' + reason + '）: ' + String((e && e.message) || e));
+    return null;
+  }
+}
+
 /** 探活（/healthz 免鉴权）。null = 不可达。 */
 async function gatewayProbeHealth(port, timeoutMs) {
   const ms = Number(timeoutMs) > 0 ? Number(timeoutMs) : 2000;
@@ -12347,11 +12848,150 @@ async function gatewayProbeHealth(port, timeoutMs) {
   }
 }
 
+/**
+ * 拉取网关 `/v1/models`（带 api_key 鉴权 + 15s 超时）。
+ * 抽出来是因为「列出可选模型」和「注册」必须用同一份语义（尤其 baseUrl 的归一化）。
+ */
+async function gatewayFetchModels() {
+  const paths = apiGateway.gatewayPaths(DATA_DIR);
+  const state = apiGateway.readGatewayState(paths.stateFile);
+  if (!state.installed) throw new Error('尚未安装网关');
+  const port = Number(state.port) || apiGateway.DEFAULT_PORT;
+  let apiKey = '';
+  try { apiKey = fs.readFileSync(paths.apiKeyFile, 'utf8').trim(); } catch (_) {}
+  if (!apiKey) throw new Error('缺少网关 api_key，请先安装');
+  const baseUrl = 'http://127.0.0.1:' + port;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const res = await fetch(baseUrl + '/v1/models', { headers: { Authorization: 'Bearer ' + apiKey }, signal: ctrl.signal });
+    if (!res.ok) throw new Error('网关 /v1/models HTTP ' + res.status);
+    const payload = await res.json();
+    return { baseUrl: baseUrl, apiKey: apiKey, list: Array.isArray(payload && payload.data) ? payload.data : [] };
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error('网关响应超时（它可能没在运行）');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 读 models.json 的模型数组。
+ * ⚠️ 结构不认识时**抛错**（调用方据此拒绝写入，绝不猜结构后覆盖用户配置）。
+ */
+/**
+ * 两个 url 是否指向同一后端（**必须剥代理包裹层再比** —— 接线 bili 后外层是 8790）。
+ * ⚠️ api-gateway.js 没导出 gatewaySameOrigin，这里用它的 unwrapProxyUrl 自己比 origin。
+ */
+function sameGatewayOrigin(url, baseUrl) {
+  try {
+    const a = new URL(apiGateway.unwrapProxyUrl(String(url || ''))).origin;
+    const b = new URL(apiGateway.unwrapProxyUrl(String(baseUrl || ''))).origin;
+    return a === b;
+  } catch (_) { return false; }
+}
+
+/**
+ * 在 models.json 里找到「某个网关模型对应的条目」。
+ * 判据与 gatewayModelState 完全一致（前缀 → 名单里的裸 id → 同源同名），
+ * 顺序也一致，保证「面板显示已注册」和「这里改得到」说的是同一个条目。
+ */
+function findGatewayModelEntry(list, rawId, baseUrl, registeredIds) {
+  const raw = String(rawId || '');
+  const rows = Array.isArray(list) ? list : [];
+  if (!raw) return null;
+  const prefixed = rows.filter((m) => m && m.id === 'gateway:' + raw)[0];
+  if (prefixed) return prefixed;
+  // 名单里记着 = 本插件认领过的；名单里没有但同源 = 用户手工配的。两种都归这里管，
+  // 判据与 gatewayModelState 的越界声明不同，但**选出来的条目必须是同一个**。
+  const bare = rows.filter((m) => m && m.id === raw && (!baseUrl || sameGatewayOrigin(m.url, baseUrl)))[0];
+  return bare || null;
+}
+
+function readWorkbuddyModels(modelsFile) {
+  const parsed = JSON.parse(fs.readFileSync(modelsFile, 'utf8'));
+  const isArray = Array.isArray(parsed);
+  const list = isArray ? parsed : (parsed && Array.isArray(parsed.models) ? parsed.models : null);
+  if (!list) throw new Error('models.json 结构不认识（既不是数组也没有 models 数组）');
+  return { parsed: parsed, list: list, isArray: isArray };
+}
+
+/**
+ * 「注册模型」面板的总览：网关有哪些模型 + 每个在 models.json 里的注册状态。
+ * ⚠️ 只回**元数据**（名称 / 倍率 / 能力 / 档位 / 上下文），**绝不回 api_key**。
+ *   registration: 'registered' 本插件写的 | 'external' 已存在同名条目（指向同一网关）| 'absent' 还没有
+ */
+async function gatewayModelsOverview() {
+  const modelsFile = path.join(PROFILE.dataRoot, 'models.json');
+  let existing = [];
+  try { existing = readWorkbuddyModels(modelsFile).list; } catch (_) { existing = []; }
+  const fetched = await gatewayFetchModels();
+  // 本插件管理过的条目名单（含被认领的手工条目）—— 判定「已注册」用它，比前缀更准
+  let registeredIds = [];
+  try { registeredIds = apiGateway.readGatewayState(apiGateway.gatewayPaths(DATA_DIR).stateFile).registeredModelIds || []; } catch (_) { registeredIds = []; }
+  const items = fetched.list.map((m) => {
+    const src = m && typeof m === 'object' ? m : {};
+    const rawId = String(src.id || '');
+    return {
+      id: rawId,
+      name: String(src.name || rawId),
+      credits: String(src.credits || ''),
+      description: String(src.description || ''),
+      context: Number(src.context_length) || 0,
+      maxOutput: Number(src.max_output_tokens) || 0,
+      supportsToolCall: src.supports_tool_call === true,
+      supportsImages: src.supports_images === true,
+      supportsReasoning: src.supports_reasoning === true,
+      onlyReasoning: src.only_reasoning === true,
+      efforts: Array.isArray(src.reasoning_supported_efforts) ? src.reasoning_supported_efforts.map(String) : [],
+      defaultEffort: String(src.reasoning_default_effort || ''),
+      registration: apiGateway.gatewayModelState(existing, rawId, { baseUrl: fetched.baseUrl, registeredIds: registeredIds }),
+      // ⭐ 面板「上下文」列要显示**条目现在的实际值**，不是网关声明的值。
+      // ⚠️⚠️ 客户端真正吃的预算是 contextWindow.defaultLength（优先级高于 maxInputTokens），
+      //   所以这里必须优先报 defaultLength —— 否则面板显示 200K、客户端按 300K 跑。
+      currentMaxInput: (function () {
+        const hit = findGatewayModelEntry(existing, rawId, fetched.baseUrl, registeredIds);
+        if (!hit) return 0;
+        const cw = Number(hit.contextWindow && hit.contextWindow.defaultLength);
+        const n = Number(hit.maxInputTokens);
+        if (Number.isFinite(cw) && cw > 0) return Math.floor(cw);
+        return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+      })(),
+    };
+  });
+  const by = (tag) => items.filter((x) => x.registration === tag).length;
+  return {
+    ok: true,
+    baseUrl: fetched.baseUrl,
+    models: items,
+    counts: { total: items.length, registered: by('registered'), external: by('external'), absent: by('absent') },
+  };
+}
+
 /** 下载 → SHA-256 校验 → 解压 → 凭证桥 → 生成 config。任一环节失败都不留半成品可用状态。 */
 async function gatewayInstall() {
   if (gatewayInstallInFlight) return gatewayInstallInFlight;
   const task = (async () => {
     const paths = apiGateway.gatewayPaths(DATA_DIR);
+    // ⭐ 升级前必须先停：Windows 下正在运行的 exe 不允许被覆盖写（EBUSY/EPERM）。
+    // ⚠️ daemon 重启会丢网关子进程句柄，而网关仍在监听 ⇒ 只认 gatewayChild 会漏掉
+    //    那个外部实例，接着覆盖 exe 就 EBUSY 失败。这里按端口兜底判定「到底有没有在跑」。
+    const installPort = Number(apiGateway.readGatewayState(paths.stateFile).port) || apiGateway.DEFAULT_PORT;
+    const ownRunning = !!(gatewayChild && gatewayChild.pid && gatewayChild.exitCode === null);
+    const externalPid = ownRunning ? 0 : gatewayFindPidByPort(installPort);
+    const wasRunning = ownRunning || !!externalPid;
+    if (wasRunning) {
+      gatewayStop();
+      for (let i = 0; i < 20; i += 1) {
+        const stillUp = ownRunning
+          ? !!(gatewayChild && gatewayChild.exitCode === null)
+          : !!gatewayFindPidByPort(installPort);
+        if (!stillUp) break;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      log('[gateway] 升级前已停止旧进程（own=' + ownRunning + ' external=' + externalPid + '）');
+    }
     fs.mkdirSync(paths.root, { recursive: true });
     fs.mkdirSync(paths.authDir, { recursive: true });
     fs.mkdirSync(paths.stateDir, { recursive: true });
@@ -12376,13 +13016,23 @@ async function gatewayInstall() {
     const collected = gatewayCollectAccounts();
     const docs = collected.accounts.map(apiGateway.buildAuthDocument).filter(Boolean);
     if (!docs.length) throw new Error('没有可用账号可桥接：' + (collected.errors[0] || '账号目录为空'));
-    const authWritten = apiGateway.writeAuthDocuments(paths.authDir, docs, {});
+    // ⭐ 用增量同步（而不是全量重写）：装/升级时顺带把「本仓已不存在」的旧 auth 文件清掉
+    const synced = apiGateway.syncAuthDocuments(paths.authDir, docs, {});
+    const authWritten = docs.map((doc) => ({ uid: doc.account.uid, nickname: doc.account.nickname }));
+    if (synced.removed.length) log('[gateway] 安装时清理了 ' + synced.removed.length + ' 个失效账号文件');
 
     // 生成 config（三条安全默认在 buildGatewayConfig 内强制）
-    const apiKey = apiGateway.generateApiKey();
+    // ⭐ 复用既有密钥：换密钥会让 models.json 里已注册的条目**全部 401**。
+    let apiKey = '';
+    try { apiKey = fs.readFileSync(paths.apiKeyFile, 'utf8').trim(); } catch (_) { apiKey = ''; }
+    if (!apiKey) apiKey = apiGateway.generateApiKey();
     const template = JSON.parse(fs.readFileSync(paths.configExample, 'utf8'));
+    // ⭐ 升级不丢配置：把上一版 config.json 里用户改过的值搬回来（新模板没有的键会被丢弃）。
+    let previous = null;
+    try { previous = JSON.parse(fs.readFileSync(paths.config, 'utf8')); } catch (_) { previous = null; }
     const cfg = apiGateway.buildGatewayConfig({
       template: template,
+      preserve: previous,
       port: apiGateway.DEFAULT_PORT,
       apiKey: apiKey,
       authDir: paths.authDir,
@@ -12403,7 +13053,10 @@ async function gatewayInstall() {
       accounts: authWritten.map((a) => ({ uid: a.uid, nickname: a.nickname })),
     });
     log('[gateway] 安装完成 ' + JSON.stringify({ sha256: actual.slice(0, 12), accounts: authWritten.length, port: state.port }));
-    return { state: state, accountErrors: collected.errors, installed: written };
+    // 装完把探活缓存作废，并按需把进程拉回来
+    gatewayHealthCache = { at: 0, info: null };
+    if (wasRunning) { try { gatewayStart(); } catch (e) { log('[gateway] 重拉失败: ' + String((e && e.message) || e)); } }
+    return { state: state, accountErrors: collected.errors, installed: written, restarted: wasRunning };
   })();
   gatewayInstallInFlight = task;
   try { return await task; } finally { gatewayInstallInFlight = null; }
@@ -12433,6 +13086,15 @@ function gatewaySetEnabled(enabled) {
 function gatewayStart() {
   const paths = apiGateway.gatewayPaths(DATA_DIR);
   if (gatewayChild && gatewayChild.exitCode === null) return { started: false, reason: 'already-running', pid: gatewayChild.pid };
+  // ⭐ 外部实例兜底（daemon 重启后失联、但网关仍在监听）：重复拉起会端口冲突、并留下
+  //    一个起不来的僵尸子进程。已有实例时直接认作「已在运行」。
+  const startState = apiGateway.readGatewayState(paths.stateFile);
+  const extPid = gatewayFindPidByPort(Number(startState.port) || apiGateway.DEFAULT_PORT);
+  if (extPid) {
+    gatewayHealthCache = { at: 0, info: null };
+    log('[gateway] 检测到外部实例已在运行 pid=' + extPid + '，跳过启动');
+    return { started: false, reason: 'already-running-external', pid: extPid };
+  }
   if (!fs.existsSync(paths.exe) || !fs.existsSync(paths.config)) throw new Error('尚未安装：请先执行安装');
   const out = fs.openSync(paths.logFile, 'a');
   const child = spawn(paths.exe, ['-config', paths.config], {
@@ -12450,27 +13112,184 @@ function gatewayStart() {
     if (gatewayChild === child) gatewayChild = null;
   });
   child.on('error', (e) => { log('[gateway] 启动失败: ' + String((e && e.message) || e)); });
+  gatewayHealthCache = { at: 0, info: null };
   log('[gateway] 已启动 pid=' + child.pid + ' port=' + apiGateway.DEFAULT_PORT);
   return { started: true, pid: child.pid };
 }
 
 function gatewayStop() {
   const child = gatewayChild;
-  if (!child || child.exitCode !== null) return { stopped: false, reason: 'not-running' };
-  try { child.kill(); log('[gateway] 已请求停止 pid=' + child.pid); return { stopped: true, pid: child.pid }; }
-  catch (e) { return { stopped: false, reason: String((e && e.message) || e) }; }
+  if (child && child.exitCode === null) {
+    try { child.kill(); log('[gateway] 已请求停止 pid=' + child.pid); return { stopped: true, pid: child.pid, mode: 'child' }; }
+    catch (e) { return { stopped: false, reason: String((e && e.message) || e) }; }
+  }
+  // 外部实例（daemon 重启后失联的那种）：按端口反查 pid 再结束。
+  const paths = apiGateway.gatewayPaths(DATA_DIR);
+  const state = apiGateway.readGatewayState(paths.stateFile);
+  const pid = gatewayFindPidByPort(Number(state.port) || apiGateway.DEFAULT_PORT);
+  if (!pid) return { stopped: false, reason: 'not-running' };
+  try {
+    if (IS_WIN) spawnSync('taskkill', ['/PID', String(pid), '/F'], { timeout: 8000, windowsHide: true });
+    else process.kill(pid, 'SIGTERM');
+    gatewayHealthCache = { at: 0, info: null };
+    log('[gateway] 已停止外部实例 pid=' + pid);
+    return { stopped: true, pid: pid, mode: 'external' };
+  } catch (e) { return { stopped: false, reason: String((e && e.message) || e) }; }
 }
 
-/** 启动时：用户启用过就自动拉起（与 autoContinue 的「启动补写」同模式；未安装则静默跳过）。 */
-function refreshGatewayIfEnabled() {
-  try {
-    if (!gatewayReadEnabled()) return;
-    const paths = apiGateway.gatewayPaths(DATA_DIR);
-    if (!fs.existsSync(paths.exe) || !fs.existsSync(paths.config)) return;
-    gatewayStart();
-  } catch (error) {
-    log('[gateway] 启动自动拉起失败: ' + String((error && error.message) || error));
+/**
+ * 网关探活快照（15s 缓存）。
+ * ⚠️ 沿用 `--probe-client-running` 的教训：**不在请求线程里做同步探测** —— 面板刷新很频繁，
+ *    每次打上游既慢又吵。缓存过期才真探，`force` 用于「安装/启停」后立即刷新。
+ * ⚠️ 官方 `/healthz` 的 `healthy` 是**可用账号数**（不是布尔），别直接当 true/false 用。
+ */
+let gatewayHealthCache = { at: 0, info: null };
+function gatewayHealthSnapshot(port, force) {
+  const now = Date.now();
+  if (!force && gatewayHealthCache.at && (now - gatewayHealthCache.at) < 15000) {
+    return Promise.resolve(gatewayHealthCache.info);
   }
+  return gatewayProbeHealth(port, 2500)
+    .then((info) => { gatewayHealthCache = { at: Date.now(), info: info }; return info; })
+    .catch(() => { gatewayHealthCache = { at: Date.now(), info: null }; return null; });
+}
+
+/** 把 /healthz 原始结果规范成面板要用的形状。 */
+function normalizeGatewayHealth(info) {
+  if (!info || typeof info !== 'object') return { reachable: false, healthyAccounts: 0, total: 0, realmServable: null, service: '' };
+  return {
+    reachable: true,
+    healthyAccounts: Number(info.healthy) || 0,
+    total: Number(info.total) || 0,
+    realmServable: (info.realm_servable && typeof info.realm_servable === 'object') ? info.realm_servable : null,
+    service: String(info.service || ''),
+  };
+}
+
+/**
+ * 账号池快照（**白名单**过滤）。
+ * ⚠️ 网关 `/status` 的原始返回绝不整份透给前端 —— 只挑面板要显示的字段，
+ *    既避免把上游返回的未知字段（含潜在的 token 类字段）带到 renderer，也让前端契约稳定。
+ */
+function gatewayPoolSnapshot(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {};
+  const accounts = (Array.isArray(src.accounts) ? src.accounts : []).map((a) => {
+    const item = a && typeof a === 'object' ? a : {};
+    const tu = (item.token_usage && typeof item.token_usage === 'object') ? item.token_usage : {};
+    return {
+      uid: String(item.uid || ''),
+      nickname: String(item.nickname || ''),
+      realm: String(item.realm || ''),
+      credits: Number(item.credits) || 0,
+      creditsTotal: Number(item.credits_total) || 0,
+      creditsExpiring: Number(item.credits_expiring) || 0,
+      creditsEarliestExpiry: String(item.credits_earliest_expiry || ''),
+      disabled: item.disabled === true,
+      cooling: item.cooling === true,
+      coolingUntil: String(item.until || ''),
+      inFlight: Number(item.in_flight) || 0,
+      successCount: Number(item.success_count) || 0,
+      consecutiveFails: Number(item.consecutive_fails) || 0,
+      requests: Number(tu.request_count) || 0,
+      lastModel: String(tu.last_model || ''),
+      lastLatencyMs: Number(tu.last_latency_ms) || 0,
+      lastTokensPerSecond: Number(tu.last_tokens_per_second) || 0,
+      lastUsedAt: String(tu.last_used_at || ''),
+    };
+  });
+  const realmTotals = (src.realm_totals && typeof src.realm_totals === 'object') ? src.realm_totals : null;
+  return {
+    accounts: accounts,
+    total: Number(src.total) || accounts.length,
+    healthy: Number(src.healthy) || 0,
+    disabled: Number(src.disabled) || 0,
+    cooling: Number(src.cooling) || 0,
+    inFlightFull: Number(src.in_flight_full) || 0,
+    stickySessions: Number(src.sticky_sessions) || 0,
+    realmTotals: realmTotals,
+  };
+}
+
+/** 带鉴权地打网关自己的 HTTP 接口（本仓持有 api_key，前端不必知道它）。 */
+async function gatewayFetchJson(pathname, timeoutMs) {
+  const paths = apiGateway.gatewayPaths(DATA_DIR);
+  const state = apiGateway.readGatewayState(paths.stateFile);
+  if (!state.installed) throw new Error('尚未安装网关');
+  let apiKey = '';
+  try { apiKey = fs.readFileSync(paths.apiKeyFile, 'utf8').trim(); } catch (_) { apiKey = ''; }
+  if (!apiKey) throw new Error('缺少网关 api_key（请先安装）');
+  const port = Number(state.port) || apiGateway.DEFAULT_PORT;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), Number(timeoutMs) > 0 ? Number(timeoutMs) : 8000);
+  try {
+    const r = await fetch('http://127.0.0.1:' + port + pathname, {
+      headers: { Authorization: 'Bearer ' + apiKey },
+      signal: ctrl.signal,
+    });
+    if (!r.ok) throw new Error('网关 ' + pathname + ' 返回 HTTP ' + r.status);
+    return await r.json();
+  } finally { clearTimeout(timer); }
+}
+
+/**
+ * 按端口找监听进程 pid（外部实例用）。
+ * ⚠️ 场景：daemon 重启**不会**带走网关进程（它是独立服务）⇒ 新 daemon 手里没有 child handle，
+ *    此时要停它 / 覆盖它的 exe，只能靠端口反查 pid。找不到返回 0。
+ */
+function gatewayFindPidByPort(port) {
+  const p = Number(port) || apiGateway.DEFAULT_PORT;
+  try {
+    if (IS_WIN) {
+      const r = spawnSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8', timeout: 6000, windowsHide: true });
+      const text = String((r && r.stdout) || '');
+      const m = new RegExp(':' + p + '\\s+\\S+\\s+LISTENING\\s+(\\d+)', 'i').exec(text);
+      return m ? Number(m[1]) : 0;
+    }
+    const r = spawnSync('lsof', ['-ti', 'tcp:' + p, '-sTCP:LISTEN'], { encoding: 'utf8', timeout: 6000 });
+    const pid = parseInt(String((r && r.stdout) || '').trim(), 10);
+    return Number.isFinite(pid) ? pid : 0;
+  } catch (_) { return 0; }
+}
+/** 读网关日志尾部（面板排障用；只读最后 N 行，不整份加载）。 */
+function gatewayLogTail(lines) {
+  const paths = apiGateway.gatewayPaths(DATA_DIR);
+  const want = Math.min(Math.max(Number(lines) || 40, 1), 400);
+  let text = '';
+  try {
+    const st = fs.statSync(paths.logFile);
+    const start = Math.max(0, st.size - 256 * 1024);
+    const fd = fs.openSync(paths.logFile, 'r');
+    try {
+      const buf = Buffer.alloc(st.size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      text = buf.toString('utf8');
+    } finally { fs.closeSync(fd); }
+  } catch (_) { return { lines: [], size: 0 }; }
+  const all = text.split(/\r?\n/).filter((x) => x.trim());
+  return { lines: all.slice(-want), size: (() => { try { return fs.statSync(paths.logFile).size; } catch (_) { return 0; } })() };
+}
+/**
+ * 启动时：用户启用过就自动拉起（与 autoContinue 的「启动补写」同模式；未安装则静默跳过）。
+ * ⭐ 先探活再决定：网关是独立服务，上一个 daemon 留下的实例通常还活着 ——
+ *   此时重复 spawn 会因端口占用而失败。
+ */
+function refreshGatewayIfEnabled() {
+  const paths = apiGateway.gatewayPaths(DATA_DIR);
+  if (!fs.existsSync(paths.exe) || !fs.existsSync(paths.config)) return Promise.resolve();
+  const state = apiGateway.readGatewayState(paths.stateFile);
+  const port = Number(state.port) || apiGateway.DEFAULT_PORT;
+  return gatewayProbeHealth(port, 1500).then((alive) => {
+    if (alive) {
+      // 探活有响应 ⇒ 记录进缓存（status 的 running 靠它兜底），但不重复拉起。
+      gatewayHealthCache = { at: Date.now(), info: alive };
+      log('[gateway] 检测到已在运行的实例，跳过拉起');
+      return;
+    }
+    if (!gatewayReadEnabled()) return;
+    gatewayStart();
+  }).catch((error) => {
+    log('[gateway] 启动自动拉起失败: ' + String((error && error.message) || error));
+  });
 }
 
 /* ================= 暂存提示词（stash）辅助 ================= */
@@ -14007,6 +14826,31 @@ function composerDraftExpr() {
   })()`;
 }
 
+/**
+ * CodeBuddy 的提交动作：直接对官方发送控件派发一次 click，不走 CDP 鼠标。
+ *
+ * 为什么不点坐标（与上游 1.2.x 的结论一致）：
+ *   1) 官方 onClick 自己就 prepareBeforeSubmit() + flushPendingContentChange()，并且**不检查
+ *      isTrusted** ⇒ 脚本派发等同真人点击；
+ *   2) 短语弹层关掉之后 CDP 的 mouse ACK 会卡住（本仓库其它 70 余处点击都在 230ms 内，这个
+ *      位置实测能卡 5 秒），而坐标是在卡顿**之前**量的 ⇒ 按下去可能已经错位。
+ * 派发前重新认一次按钮并核它此刻可用 —— 不复用探针阶段量到的坐标。
+ */
+function codeBuddySubmitExpr() {
+  return `(function(){/* codebuddy-submit-once */
+    var compat = window.__wbsWorkBuddyCompat;
+    var button = compat && compat.findCodeBuddySendButton(document);
+    if (!button) return { ok: false, error: '未找到 CodeBuddy 发送按钮' };
+    var rect = button.getBoundingClientRect(), style = getComputedStyle(button);
+    if (button.disabled || button.getAttribute('aria-disabled') === 'true' ||
+        (' ' + button.className + ' ').indexOf(' _disabled_') >= 0 || style.pointerEvents === 'none' ||
+        style.display === 'none' || style.visibility === 'hidden' || !rect.width || !rect.height) {
+      return { ok: false, error: 'CodeBuddy 发送按钮不可用，未发送' };
+    }
+    button.click();
+    return { ok: true };
+  })()`;
+}
 /** 发送点击的最大尝试次数。每一次都必须「确认草稿被吃掉」才算成功。 */
 const SEND_CLICK_ATTEMPTS = 3;
 
@@ -14370,6 +15214,27 @@ async function sendStashToComposer(record) {
   if (blockText) text = text ? text + '\n' + blockText : blockText;
   blocksFailed = blockItems.length;
 
+  // CodeBuddy 的输入框是 [class*="_inputBox_"]、发送按钮是没有 aria-label 的方形 IconButton，
+  // 不满足 WorkBuddy 的 .cr-input-box / cr-send-button 契约。整段按 profile 在**构建期**决定是否
+  // 拼进 sendExpr —— WorkBuddy 下拼的是空串，表达式与原来行为一致（只多一行空白）。
+  // 这里不再像上游那样额外判 #codebuddy-agents-container：本分支只在 codebuddy profile 下存在，
+  // 而 IDE 工作台里没有那个容器，加了反而会让 IDE 窗口落到通用路径上去。
+  const codeBuddySendBranch = PROFILE.kind === 'codebuddy' ? `
+      // 只能按「官方提交回调的契约」认按钮：它的 onClick 源码里同时出现 prepareBeforeSubmit
+      // 与 flushPendingContentChange。绝不按位置或形状猜 —— 我们自己的按钮也长在那条工具栏上。
+      var compat = window.__wbsWorkBuddyCompat;
+      var nativeSend = compat && compat.findCodeBuddySendButton(document);
+      if (!nativeSend || !visible(nativeSend)) return { ok: false, retryable: true, error: '未找到 CodeBuddy 发送按钮' };
+      var nativeStyle = getComputedStyle(nativeSend);
+      if (nativeSend.disabled || nativeSend.getAttribute('aria-disabled') === 'true' ||
+          (' ' + nativeSend.className + ' ').indexOf(' _disabled_') >= 0 || nativeStyle.pointerEvents === 'none') {
+        return { ok: false, retryable: true, error: '发送按钮禁用（输入内容未被识别）' };
+      }
+      nativeSend.scrollIntoView({ block: 'center', inline: 'center' });
+      var nativeRect = nativeSend.getBoundingClientRect();
+      return { ok: true, x: nativeRect.x + nativeRect.width / 2, y: nativeRect.y + nativeRect.height / 2, selector: 'codebuddy-official-send-button' };
+` : '';
+
   const sendExpr = `(function(){
     try {
       // WorkBuddy 新版输入框有稳定的官方发送按钮；优先使用它，避免把增强/语音
@@ -14379,6 +15244,7 @@ async function sendStashToComposer(record) {
         var r = button.getBoundingClientRect(), s = getComputedStyle(button);
         return r.width >= 16 && r.height >= 16 && r.bottom > 0 && s.display !== 'none' && s.visibility !== 'hidden';
       }
+      ${codeBuddySendBranch}
       var active = document.activeElement;
       var inputBox = active && active.closest ? active.closest('.cr-input-box') : null;
       if (!inputBox) {
@@ -14537,9 +15403,23 @@ async function sendStashToComposer(record) {
       // 而坐标恰恰是在卡顿**之前**测的 —— 卡完再按下就可能落在已经失效的位置上。
       // 第 2 次起换回带悬停的路径，并在按下之前重新测量一次坐标（remeasure）：
       // 两条路径都试过才认失败，避免「skipMove 在这个按钮上不成立」反而把成功变成失败。
-      await cdpMouseClick('automation:sendPhrase', sv.x, sv.y, { textLen: text.length, button: sv }, attempt === 1
-        ? { skipMove: true }
-        : { remeasure: async () => { const f = await probeSendButton(); return { x: f.x, y: f.y }; } });
+      if (sv.selector === 'codebuddy-official-send-button') {
+        // 官方 onClick 自己 prepare + flush，且不检查 isTrusted ⇒ 直接派发一次 click；
+        // 这个位置 CDP 鼠标会卡 ACK，坐标也可能已经错位。
+        const dispatched = await guardedSend('Runtime.evaluate', {
+          expression: codeBuddySubmitExpr(), returnByValue: true,
+        }).catch((e) => ({ __transportError: String((e && e.message) || e) }));
+        const dv = dispatched && dispatched.result && dispatched.result.value;
+        // 派发失败不在这里抛：交给下面「草稿还在 ⇒ 视为被吞 ⇒ 重试」的判据统一裁决，
+        // 免得把「按钮还没就绪」误报成「确定没发出去」。
+        log('[quick-phrase-diagnostics] composer:codebuddy-dispatch ' + JSON.stringify({
+          attempt, ok: !!(dv && dv.ok === true), error: (dv && dv.error) || '',
+        }));
+      } else {
+        await cdpMouseClick('automation:sendPhrase', sv.x, sv.y, { textLen: text.length, button: sv }, attempt === 1
+          ? { skipMove: true }
+          : { remeasure: async () => { const f = await probeSendButton(); return { x: f.x, y: f.y }; } });
+      }
 
       // 点击后立刻回看草稿：被受理 → executeSend 已经 clear-draft；被静默吞掉 → 原样留着。
       const after = await awaitDraftConsumed(2000);
@@ -15646,64 +16526,6 @@ function handleApiRoute(req, res) {
     });
   }
 
-  if (req.method === 'GET' && p === '/api/agent-hint') {
-    // 额外回「可委派模型数」—— 面板据此解释"为什么开关打不开"
-    const delegatable = agentCatalog.delegatable(agentCatalog.readCatalog(DATA_DIR));
-    return json(res, 200, { ok: true, ...getAgentHintState(), delegatableCount: delegatable.length, delegatable });
-  }
-
-  if (req.method === 'POST' && p === '/api/agent-hint-set') {
-    return readBody(req).then((body) => {
-      try {
-        const state = setAgentHint(!!body.enabled);
-        log(`[agent-hint] 子 Agent 提示开关已${state.enabled ? '开启' : '关闭'}`
-          + `（${state.enabled ? '已写入全局自定义指令' : '已从全局自定义指令移除'}）`);
-        return json(res, 200, { ok: true, ...state });
-      } catch (e) {
-        // ⚠️「没有可委派的模型」是**用户可修正**的状态 ⇒ 400，不是 500
-        const code = (e && e.code) || '';
-        return json(res, code === 'NO_DELEGATABLE_MODEL' ? 400 : 500, { ok: false, error: e.message, code });
-      }
-    });
-  }
-
-  // 子 Agent「模型目录」（**声明制**，与具体 AI 解耦）：用户在模型页声明每个模型的性质、
-  // 是否计入记录、是否写进「可委派」提醒。存插件自己的目录，**不碰官方 models.json**。
-  if (req.method === 'GET' && p === '/api/agent-catalog') {
-    const catalog = agentCatalog.readCatalog(DATA_DIR);
-    return json(res, 200, { ok: true, defaults: catalog.defaults, entries: catalog.entries });
-  }
-  if (req.method === 'POST' && p === '/api/agent-catalog') {
-    return readBody(req).then((body) => {
-      try {
-        const id = String((body && body.id) || '').trim();
-        const saved = agentCatalog.setEntry(DATA_DIR, id, {
-          kind: body && body.kind,
-          record: body && body.record,
-          delegate: body && body.delegate,
-          label: body && body.label,
-        });
-        log(`[agent-catalog] ${id} → kind=${saved.kind} record=${saved.record} delegate=${saved.delegate}`);
-        // ⚠️⚠️ 必须**清掉使用记录的缓存** —— 统计是按目录做「读时过滤」的，而它带 5 分钟缓存；
-        //    不清的话用户改完声明**看不到任何变化**，会以为功能坏了（实测第一次就踩到）。
-        agentUsageCache = { at: 0, data: null };
-        // ⚠️ 提醒块是**按目录动态生成**的 ⇒ 改了 delegate 必须**立即重算已注入的那一份**。
-        //    [2026-10-01] 抽成 refreshAgentHintAfterCatalogChange()：与 daemon 启动时的
-        //    refreshAgentHintIfEnabled() 行为一致（含「名单空了就摘块」的分支）。
-        refreshAgentHintAfterCatalogChange();
-        return json(res, 200, { ok: true, entry: saved });
-      } catch (e) {
-        return json(res, 400, { ok: false, error: e.message });
-      }
-    });
-  }
-
-  // 子 Agent 的使用记录与专长分析（扫会话 jsonl，**只读**，带 5 分钟缓存）
-  if (req.method === 'GET' && p === '/api/agent-usage') {
-    try { return json(res, 200, collectAgentUsage()); }
-    catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
   if (req.method === 'GET' && p === '/api/zh-reasoning') {
     return json(res, 200, { ok: true, ...getZhReasoningState() });
   }
@@ -15720,13 +16542,71 @@ function handleApiRoute(req, res) {
     });
   }
 
+  // 反代网关：GET /api/gateway/pool —— 账号池健康度（代理网关 /status，白名单过滤后返回）
+  if (req.method === 'GET' && p === '/api/gateway/pool') {
+    return gatewayFetchJson('/status', 8000)
+      .then((payload) => json(res, 200, { ok: true, pool: gatewayPoolSnapshot(payload) }))
+      .catch((e) => json(res, 502, { ok: false, error: String((e && e.message) || e) }));
+  }
+
+  // 反代网关：POST /api/gateway/sync-accounts —— 把本仓已登录账号同步进网关账号池
+  //   幂等；只增/改/删本插件写得出的 auths/workbuddy-<uid>.json。
+  if (req.method === 'POST' && p === '/api/gateway/sync-accounts') {
+    try {
+      const r = gatewaySyncAccounts();
+      if (!r.ok) return json(res, 409, Object.assign({ ok: false }, r));
+      log('[gateway] 账号池同步 ' + JSON.stringify({ added: r.added, updated: r.updated, removed: r.removed, total: r.total }));
+      return json(res, 200, Object.assign({ ok: true }, r, { gateway: gatewayStatus() }));
+    } catch (e) {
+      return json(res, 400, { ok: false, error: String((e && e.message) || e) });
+    }
+  }
+
+  // 反代网关：GET /api/gateway/log?lines=N —— 日志尾部（排障）
+  if (req.method === 'GET' && p === '/api/gateway/log') {
+    try {
+      const n = Number((new URL(req.url, 'http://127.0.0.1')).searchParams.get('lines'));
+      return json(res, 200, Object.assign({ ok: true }, gatewayLogTail(n)));
+    } catch (e) {
+      return json(res, 400, { ok: false, error: String((e && e.message) || e) });
+    }
+  }
+
+  // 反代网关：POST /api/gateway/set-enabled —— 显式开关（=「下次 WorkDaddy 启动时是否自动拉起」）
+  //   与 start/stop 的区别：这个**只改意图不强制启停**，用于「想保持启用但不希望现在占用资源」。
+  if (req.method === 'POST' && p === '/api/gateway/set-enabled') {
+    return readBody(req).then((body) => {
+      try {
+        const enabled = !(body && body.enabled === false);
+        gatewaySetEnabled(enabled);
+        log('[gateway] 自动拉起已' + (enabled ? '开启' : '关闭'));
+        return json(res, 200, { ok: true, enabled: enabled, gateway: gatewayStatus() });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: String((e && e.message) || e) });
+      }
+    });
+  }
+
+  // 反代网关：POST /api/gateway/probe —— 强制刷新探活（前端点「检查」时用）
+  if (req.method === 'POST' && p === '/api/gateway/probe') {
+    const snapshot = gatewayStatus();
+    return gatewayHealthSnapshot(snapshot.port, true)
+      .then((info) => json(res, 200, { ok: true, health: normalizeGatewayHealth(info), gateway: gatewayStatus() }))
+      .catch(() => json(res, 200, { ok: true, health: normalizeGatewayHealth(null), gateway: gatewayStatus() }));
+  }
   // 反代网关（sidecar）：GET /api/gateway —— 状态 + /healthz 探活
   if (req.method === 'GET' && p === '/api/gateway') {
     const snapshot = gatewayStatus();
-    return gatewayProbeHealth(snapshot.port).then((health) => json(res, 200, {
-      ok: true,
-      gateway: Object.assign({}, snapshot, { health: health, healthy: !!(health && Number(health.healthy) > 0) }),
-    })).catch(() => json(res, 200, { ok: true, gateway: Object.assign({}, snapshot, { health: null, healthy: false }) }));
+    // 15s 缓存：面板刷新频繁，不每次都打上游；healthy 语义统一成「有没有可用账号」。
+    return gatewayHealthSnapshot(snapshot.port, false)
+      .then((info) => {
+        const health = normalizeGatewayHealth(info);
+        return json(res, 200, {
+          ok: true,
+          gateway: Object.assign({}, snapshot, { health: health, healthy: health.healthyAccounts > 0, reachable: health.reachable }),
+        });
+      })
+      .catch(() => json(res, 200, { ok: true, gateway: Object.assign({}, snapshot, { health: normalizeGatewayHealth(null), healthy: false, reachable: false }) }));
   }
 
   // 反代网关：GET /api/gateway/api-key —— **按需**取密钥明文（给面板的「复制密钥」按钮用）。
@@ -15772,63 +16652,176 @@ function handleApiRoute(req, res) {
     });
   }
 
-  // 反代网关：POST /api/gateway/register-models —— 把网关模型注册进 ~/.workbuddy/models.json
-  //   body { remove: true } ⇒ 撤销（按上次登记的 id 名单摘掉）。
+  // 反代网关：GET /api/gateway/models-available —— 「注册模型」面板的可选清单 + 各自的注册状态
+  if (req.method === 'GET' && p === '/api/gateway/models-available') {
+    return gatewayModelsOverview()
+      .then((r) => json(res, 200, r))
+      .catch((e) => json(res, 502, { ok: false, error: String((e && e.message) || e) }));
+  }
+
+  // 反代网关：POST /api/gateway/register-models —— 把**用户选中的**网关模型写进 ~/.workbuddy/models.json
+  //   body { selected: ['cn:hy3-x', ...] }        ⇒ 声明式：以这份名单为最终状态（未列出的网关条目会被摘掉，
+  //                                                  含「指向本网关的手工条目」；其它模型一律不动）
+  //   body { remove: true }                        ⇒ 等价于 selected: []
+  //   body {}                                      ⇒ 缺省 = 全部（向后兼容旧的一键按钮）
   //   ⚠️ models.json 是**用户核心配置**：写前必先备份；只增删本插件写入的那批；结构原样保持。
   if (req.method === 'POST' && p === '/api/gateway/register-models') {
     return readBody(req).then(async (body) => {
       try {
         const paths = apiGateway.gatewayPaths(DATA_DIR);
-        const state = apiGateway.readGatewayState(paths.stateFile);
-        if (!state.installed) return json(res, 400, { ok: false, error: '尚未安装网关' });
-        const port = Number(state.port) || apiGateway.DEFAULT_PORT;
         const modelsFile = path.join(PROFILE.dataRoot, 'models.json');
-        let raw = '[]';
-        try { raw = fs.readFileSync(modelsFile, 'utf8'); } catch (_) { return json(res, 400, { ok: false, error: '读不到 ' + modelsFile }); }
-        let parsed;
-        try { parsed = JSON.parse(raw); } catch (_) { return json(res, 400, { ok: false, error: 'models.json 不是合法 JSON，已中止（不动它）' }); }
-        const isArray = Array.isArray(parsed);
-        const list = isArray ? parsed : (parsed && Array.isArray(parsed.models) ? parsed.models : null);
-        if (!list) return json(res, 400, { ok: false, error: 'models.json 结构不认识（既不是数组也没有 models 数组），已中止' });
+        let doc;
+        try { doc = readWorkbuddyModels(modelsFile); }
+        catch (e) { return json(res, 400, { ok: false, error: '读 models.json 失败：' + String((e && e.message) || e) }); }
+
+        const fetched = await gatewayFetchModels();
+        if (!fetched.list.length) return json(res, 400, { ok: false, error: '网关没有返回可用模型（先启动它）' });
+
+        const removeAll = !!(body && body.remove === true);
+        // 缺省（没给 selected）⇒ 全部，保持旧按钮语义；显式给了数组就按数组来（空数组 = 全部取消）。
+        const hasSelection = !!(body && Array.isArray(body.selected));
+        const selected = hasSelection ? new Set(body.selected.map(String)) : null;
+        let wanted = fetched.list;
+        if (removeAll) wanted = [];
+        else if (selected) wanted = fetched.list.filter((m) => selected.has(String((m && m.id) || '')));
+
+        const entries = wanted
+          .map((m) => apiGateway.toWorkbuddyModelEntry(m, { baseUrl: fetched.baseUrl, apiKey: fetched.apiKey }))
+          .filter(Boolean);
+
+        // ⭐ 「应用」不该动用户手动设的上下文档位：
+        //   toWorkbuddyModelEntry 总是把 maxInputTokens 写成网关声明的 context_length，
+        //   而面板里的「上下文」下拉是用户刻意调小的（为了逼客户端早点压缩）。
+        //   不搬回来的话，点一次「应用」就把调好的值冲回网关默认（实测踩到过）。
+        //   ⚠️ 只搬这一个字段；能力字段仍以网关最新为准。
+        const keepCtx = new Map();
+        (doc.list || []).forEach((m) => {
+          if (!m || typeof m.id !== 'string') return;
+          const n = Number(m.maxInputTokens);
+          const cw = (m.contextWindow && typeof m.contextWindow === 'object') ? m.contextWindow : null;
+          if ((Number.isFinite(n) && n > 0) || cw) {
+            keepCtx.set(m.id, { n: (Number.isFinite(n) && n > 0) ? Math.floor(n) : 0, cw: cw });
+          }
+        });
+        entries.forEach((e) => {
+          if (!e || !e.id) return;
+          const raw = String(e.id).replace(/^gateway:/, '');
+          const kept = keepCtx.get(e.id) || keepCtx.get(raw);
+          if (!kept) return;
+          if (kept.n > 0) e.maxInputTokens = kept.n;
+          if (kept.cw) e.contextWindow = kept.cw;
+        });
+
 
         const backup = modelsFile + '.bak-gateway-' + new Date().toISOString().replace(/[:.]/g, '-');
         fs.copyFileSync(modelsFile, backup);
 
-        let result;
-        let registeredIds = [];
-        if (body && body.remove === true) {
-          result = apiGateway.unmergeGatewayModels(list, state.registeredModelIds || []);
-        } else {
-          let apiKey = '';
-          try { apiKey = fs.readFileSync(paths.apiKeyFile, 'utf8').trim(); } catch (_) {}
-          if (!apiKey) return json(res, 400, { ok: false, error: '缺少网关 api_key，请先安装' });
-          const ctrl = new AbortController();
-          const timer = setTimeout(() => ctrl.abort(), 15000);
-          let payload;
-          try {
-            const r = await fetch('http://127.0.0.1:' + port + '/v1/models', { headers: { Authorization: 'Bearer ' + apiKey }, signal: ctrl.signal });
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            payload = await r.json();
-          } finally { clearTimeout(timer); }
-          const entries = (Array.isArray(payload && payload.data) ? payload.data : [])
-            .map((m) => apiGateway.toWorkbuddyModelEntry(m, {
-              baseUrl: 'http://127.0.0.1:' + port,
-              apiKey: apiKey,
-            }))
-            .filter(Boolean);
-          if (!entries.length) return json(res, 400, { ok: false, error: '网关没有返回可用模型（先启动它）' });
-          result = apiGateway.mergeGatewayModels(list, entries, {});
-          registeredIds = result.ids;
-        }
-
-        const next = isArray ? result.models : Object.assign({}, parsed, { models: result.models });
+        const result = apiGateway.mergeGatewayModels(doc.list, entries, { baseUrl: fetched.baseUrl });
+        // ⚠️ 不能沿用 `doc.isArray ? 数组 : 对象`：CodeBuddy 侧必须始终写成对象
+        //   { models: [...] }，否则客户端读不到（详见 lib.js buildModelsFileDoc 注释）。
+        const next = buildModelsFileDoc(modelsFile, doc.isArray ? null : doc.parsed, result.models);
         replaceFileWithRetry(modelsFile, JSON.stringify(next, null, 2) + '\n');
-        apiGateway.writeGatewayState(paths.stateFile, Object.assign({}, state, {
-          registeredModelIds: body && body.remove === true ? [] : registeredIds,
+
+        // ids = 本次之后**本插件管理的全部条目 id**（含被认领的手工条目），卸载 / 清空按它删。
+        const prevState = apiGateway.readGatewayState(paths.stateFile);
+        apiGateway.writeGatewayState(paths.stateFile, Object.assign({}, prevState, {
+          registeredModelIds: result.ids,
           modelsBackup: backup,
         }));
-        log('[gateway] 模型' + (body && body.remove === true ? '撤销' : '注册') + ' 完成 ' + JSON.stringify({ added: result.added, removed: result.removed }));
-        return json(res, 200, { ok: true, added: result.added, removed: result.removed, total: result.models.length, backup: backup });
+        log('[gateway] 模型注册完成 ' + JSON.stringify({ added: result.added, removed: result.removed, rewritten: result.rewritten, skipped: result.skipped.length }));
+        return json(res, 200, {
+          ok: true,
+          added: result.added,
+          removed: result.removed,
+          rewritten: result.rewritten,
+          skipped: result.skipped,
+          total: result.models.length,
+          registered: result.ids.length,
+          backup: backup,
+        });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: String((e && e.message) || e) });
+      }
+    });
+  }
+  // 反代网关：POST /api/gateway/set-model-context —— 调「客户端认知的上下文窗口」
+  //   body { modelId: 'cn:glm-5.3', maxInputTokens: 200000 }
+  //   maxInputTokens = 0 / null / '' ⇒ 删掉该字段（回落到客户端默认）
+  //   ⚠️ 只改这一个字段；写前备份；不碰其它条目。
+  if (req.method === 'POST' && p === '/api/gateway/set-model-context') {
+    return readBody(req).then(async (body) => {
+      try {
+        const modelsFile = path.join(PROFILE.dataRoot, 'models.json');
+        const rawId = String((body && body.modelId) || '').trim();
+        if (!rawId) return json(res, 400, { ok: false, error: '缺少 modelId' });
+        const rawValue = body ? body.maxInputTokens : '';
+        const wanted = rawValue === null || rawValue === '' || rawValue === undefined ? 0 : Number(rawValue);
+        if (!Number.isFinite(wanted) || wanted < 0) return json(res, 400, { ok: false, error: 'maxInputTokens 必须是非负数字' });
+        const next = wanted > 0 ? Math.floor(wanted) : 0;
+        if (next > 0 && next < 4096) return json(res, 400, { ok: false, error: 'maxInputTokens 太小（至少 4096）' });
+
+        let doc;
+        try { doc = readWorkbuddyModels(modelsFile); }
+        catch (e) { return json(res, 400, { ok: false, error: '读 models.json 失败：' + String((e && e.message) || e) }); }
+
+        let registeredIds = [];
+        try { registeredIds = apiGateway.readGatewayState(apiGateway.gatewayPaths(DATA_DIR).stateFile).registeredModelIds || []; } catch (_) { registeredIds = []; }
+        const fetched = await gatewayFetchModels();
+        const entry = findGatewayModelEntry(doc.list, rawId, fetched.baseUrl, registeredIds);
+        if (!entry) return json(res, 404, { ok: false, error: '这个模型还没有注册进 models.json（先勾选并「应用」）' });
+
+        const backup = modelsFile + '.bak-context-' + new Date().toISOString().replace(/[:.]/g, '-');
+        fs.copyFileSync(modelsFile, backup);
+
+        // ⭐⭐ 只写 maxInputTokens 不够：
+        //   客户端 resolveEffectiveContextBudget() 的优先级是
+        //     overrideContextWindow > contextWindow.defaultLength > supportedLengths[0] > maxInputTokens
+        //   而官方目录给 deepseek-v4.1-flash / glm-5.3 这类模型带了
+        //     contextWindow:{defaultLength:300000, supportedLengths:[300000,600000,1000000]}
+        //   ⇒ maxInputTokens 永远排不上号，面板设 200K 也会被 300K 盖住
+        //     （实测：sessions.context_window 恒为 300000）。
+        //   ⇒ 必须把 contextWindow 一起写进条目，才能真的把预算压下来。
+        //   ⚠️ supportedLengths 必须 ≥2 个且含目标值（isBudget 的前提），
+        //     否则会回落到 supportedLengths[0]。
+        // 梯子与面板档位保持一致（100K / 200K / 300K / 600K / 1M，外加 64K 下限档）。
+        // ⚠️ 目标值会被 concat 进去并去重，所以自定义值（如 350000）也在里面，
+        //    supportedLengths ≥2 且包含默认值 —— 这是 isBudget 成立的前提。
+        const CTX_LADDER = [64000, 100000, 200000, 300000, 600000, 1000000];
+        // ⚠️⚠️ 客户端官方「上下文档位」控件有硬约束（2026-10-20 实测，踩过）：
+        //   resolveContextUsageWindowTiers() 先把 supportedLengths 按 maxInputTokens 过滤，
+        //   然后**只认 length === 2 或 length === 3**，其它一律 return undefined
+        //   ⇒ 右下角上下文按钮里的档位选择整块不渲染（表象像"功能没了"）。
+        //   ⇒ 写盘时保证「≤ maxInputTokens 的档位数」恰好 2~3 个：
+        //      取梯子里严格小于目标的最近 1~2 档 + 目标值本身；不足 2 档补一半值。
+        //   面板自己的 6 档预设不受影响（那是我们自己的下拉，不读这个数组）。
+        const buildContextTiers = (target) => {
+          const below = CTX_LADDER.filter((v) => v < target).slice(-2);
+          const tiers = below.concat([target]);
+          while (tiers.length < 2 && tiers[0] > 4096) {
+            tiers.unshift(Math.max(4096, Math.round(tiers[0] / 2)));
+          }
+          return Array.from(new Set(tiers)).sort((a, b) => a - b);
+        };
+        if (next > 0) {
+          entry.maxInputTokens = next;
+          const ladder = buildContextTiers(next);
+          entry.contextWindow = { defaultLength: next, supportedLengths: ladder };
+        } else {
+          // 清空 ⇒ 两个字段一起删，回落到模型自带默认（catalog 里 deepseek 是 300K）
+          delete entry.maxInputTokens;
+          delete entry.contextWindow;
+        }
+
+        const out = buildModelsFileDoc(modelsFile, doc.isArray ? null : doc.parsed, doc.list);
+        replaceFileWithRetry(modelsFile, JSON.stringify(out, null, 2) + '\n');
+        log('[gateway] 上下文调节 ' + JSON.stringify({ id: entry.id, maxInputTokens: next || 'cleared', contextWindow: next ? entry.contextWindow : 'cleared', backup: backup }));
+        return json(res, 200, {
+          ok: true,
+          modelId: entry.id,
+          maxInputTokens: next,
+          contextWindow: (next > 0 && entry.contextWindow) ? entry.contextWindow : null,
+          backup: backup,
+        });
       } catch (e) {
         return json(res, 400, { ok: false, error: String((e && e.message) || e) });
       }
@@ -16171,6 +17164,80 @@ function handleApiRoute(req, res) {
     }).catch((e) => json(res, 500, { ok: false, error: e && e.message ? e.message : String(e) }));
   }
 
+  // ── MCP servers（外部工具）开关 ──────────────────────────────────────────
+  // ⚠️ 安全：mcp.json 里可能存着第三方密钥（env）⇒ 回传**只给 name/disabled/kind**，
+  //    绝不透出 command / args / env 的任何值。
+  if (req.method === 'GET' && p === '/api/mcp-servers') {
+    try {
+      const file = path.join(os.homedir(), '.workbuddy', 'mcp.json');
+      let cfg = {};
+      try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { cfg = {}; }
+      const servers = Object.keys(cfg.mcpServers || {}).map((name) => {
+        const s = cfg.mcpServers[name] || {};
+        return {
+          name,
+          disabled: s.disabled === true,
+          kind: (s.type === 'streamableHttp' || s.url) ? 'http' : 'stdio',
+        };
+      });
+      return json(res, 200, { ok: true, file, servers });
+    } catch (error) { return json(res, 400, { ok: false, error: error.message }); }
+  }
+
+  if (req.method === 'POST' && p === '/api/mcp-servers') {
+    return readBody(req).then((body) => {
+      try {
+        const name = String((body && body.name) || '').trim();
+        const disabled = !!(body && body.disabled);
+        if (!name) return json(res, 400, { ok: false, error: '缺少 name' });
+        const file = path.join(os.homedir(), '.workbuddy', 'mcp.json');
+        const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (!cfg.mcpServers || !cfg.mcpServers[name]) {
+          return json(res, 404, { ok: false, error: '未找到该 MCP server：' + name });
+        }
+        // 只改这一个字段，其余（command/args/env/type/url…）原样保留。
+        cfg.mcpServers[name].disabled = disabled;
+        replaceFileWithRetry(file, JSON.stringify(cfg, null, 2) + '\n');
+        log(`[mcp] ${name} 已${disabled ? '停用' : '启用'}（需重启 WorkBuddy 生效）`);
+        return json(res, 200, { ok: true, name, disabled, restartRequired: true });
+      } catch (error) { return json(res, 400, { ok: false, error: error.message }); }
+    });
+  }
+
+  // ── dsh-ops 集成（下载 / 注册 / 启停 / 卸载）──────────────────────────────
+  // ⚠️ 只有 status 是只读；install/uninstall 会写 mcp.json 与磁盘，前端须二次确认。
+  if (req.method === 'GET' && p === '/api/dsh-ops/status') {
+    try { return json(res, 200, Object.assign({ ok: true }, dshOpsStatus())); }
+    catch (error) { return json(res, 500, { ok: false, error: error.message }); }
+  }
+
+  if (req.method === 'POST' && p === '/api/dsh-ops/install') {
+    return readBody(req).then((body) => {
+      const force = !!(body && body.force);
+      return dshOpsInstall({ force })
+        .then((info) => json(res, 200, Object.assign({ ok: true, restartRequired: true }, info)))
+        .catch((e) => json(res, 500, { ok: false, error: (e && e.message) || String(e) }));
+    });
+  }
+
+  if (req.method === 'POST' && p === '/api/dsh-ops/toggle') {
+    return readBody(req).then((body) => {
+      try {
+        const enabled = !(body && body.enabled === false);
+        return json(res, 200, Object.assign({ ok: true }, dshOpsToggle(enabled)));
+      } catch (error) { return json(res, 400, { ok: false, error: error.message }); }
+    });
+  }
+
+  if (req.method === 'POST' && p === '/api/dsh-ops/uninstall') {
+    return readBody(req).then((body) => {
+      try {
+        const purge = !!(body && body.purge);
+        return json(res, 200, Object.assign({ ok: true, restartRequired: true }, dshOpsUninstall({ purge })));
+      } catch (error) { return json(res, 400, { ok: false, error: error.message }); }
+    });
+  }
+
   if (req.method === 'GET' && p === '/api/status') {
     const authenticated = hasApiToken(req);
     const status = {
@@ -16509,8 +17576,14 @@ function handleApiRoute(req, res) {
   }
 
   if (req.method === 'GET' && p === '/api/token-stats') {
-    if (PROFILE.kind !== 'workbuddy') return json(res, 400, { ok: false, error: '当前客户端不支持 Token 统计' });
-    if (url.searchParams.get('cacheStatus') === '1') return json(res, 200, { ok: true, cacheReady: tokenStatsCacheReady(PROFILE.dataRoot) });
+    if (PROFILE.kind !== 'workbuddy' && PROFILE.kind !== 'codebuddy') return json(res, 400, { ok: false, error: '当前客户端不支持 Token 统计' });
+    // CodeBuddy 的用量在历史树的 index.json 里（一行一整棵会话，requests[] 才是记录），
+    // 文件清单由历史树枚举给出，缓存也落 WorkDaddy 自己的目录，不污染客户端数据目录。
+    const cbTokenOptions = PROFILE.kind === 'codebuddy'
+      ? { ...codeBuddyFiles.tokenOptions({ excludeOwners: codeBuddyForeignOwnerIds() }),
+          cacheFile: path.join(DATA_DIR, 'token-stats-codebuddy-cache.json') }
+      : {};
+    if (url.searchParams.get('cacheStatus') === '1') return json(res, 200, { ok: true, cacheReady: tokenStatsCacheReady(PROFILE.dataRoot, cbTokenOptions) });
     const days = Math.max(1, Math.min(90, Number(url.searchParams.get('days') || 7)));
     const accounts = listAccounts(DATA_DIR);
     // 会话可能已被清理（deleted_at 非空），但会话文件与其中已产生的用量依然存在，
@@ -16524,6 +17597,7 @@ function handleApiRoute(req, res) {
           account: url.searchParams.get('account') || '',
           model: url.searchParams.get('model') || '',
           accountOptions: accounts,
+          ...cbTokenOptions,
           sessionAccounts,
         });
         return json(res, 200, { ok: true, stats, accounts: accounts.map((a) => ({ uid: a.uid, nickname: a.nickname || '', phone: a.phone || '' })) });
@@ -17570,14 +18644,6 @@ function handleApiRoute(req, res) {
     } catch (e) {
       officialError = e.message;
     }
-    // ⭐ 顺带把「子 Agent 目录」一起回（含 defaults 兜底后的**生效值**）——
-    //    模型页要在每行直接渲染 kind/record/delegate，前端不该为此再发一次请求。
-    const catalog = agentCatalog.readCatalog(DATA_DIR);
-    const agentEntries = {};
-    for (const m of official) {
-      const id = String((m && m.id) || '').trim();
-      if (id) agentEntries[id] = agentCatalog.resolveEntry(catalog, id);
-    }
     return json(res, 200, {
       ok: true,
       file: workbuddyModelsFile(),
@@ -17585,7 +18651,6 @@ function handleApiRoute(req, res) {
       officialError,
       backups: listModelBackups(DATA_DIR),
       imports: listInstalledModelSources(PROFILE.id),
-      agentCatalog: { defaults: catalog.defaults, entries: agentEntries },
     });
   }
   if (req.method === 'POST' && p === '/api/models/import') {
@@ -19554,15 +20619,25 @@ process.on('unhandledRejection', (reason) => {
   captureException(reason, { stage: 'daemon-unhandled-rejection' }).catch(() => {});
 });
 
-// 一次性子进程模式必须等到 safeClientRunning() 所需的所有依赖完成初始化后再执行。
+// 一次性子进程模式必须等到探测所需的所有依赖完成初始化后再执行（lightClientRunning 也依赖
+// PROFILE_BINARY_NAMES / linuxWorkBuddyPids 等，位置要求与 safeClientRunning 相同）。
 // 放在 daemon 锁、HTTP 服务和后台任务启动前，探测进程不会抢占正常 daemon 实例。
+// ⭐ 上游 1.2.40：这里改用 lightClientRunning()（Windows 走 tasklist，不经 WMI）—— 这是本轮
+//    CPU 修复的正身；safeClientRunning() 的完整 CIM 验证只留给切号等安全路径。
 if (PROBE_CLIENT_RUNNING) {
-  process.stdout.write(JSON.stringify({ running: safeClientRunning() }));
+  process.stdout.write(JSON.stringify({ running: lightClientRunning() }));
   process.exit(0);
 }
 
 ensureDirs(DATA_DIR, log);
 if (!acquireDaemonLock()) process.exit(0);
+// CodeBuddy 侧的历史文件是裸数组（客户端读不到任何自定义模型）：启动时搬一次，幂等。
+try {
+  const formatFix = normalizeModelsFileFormat(workbuddyModelsFile());
+  if (formatFix.migrated) log(`[models] models.json 已迁移为对象结构（${formatFix.count} 条，备份 ${formatFix.backup || "无"}）`);
+} catch (error) {
+  log('[models] models.json 形态迁移失败: ' + error.message);
+}
 startClientRunningMonitor();
 const sessionBackupCleanup = sessionSync.pruneSyncBackups(path.join(DATA_DIR, 'session-sync-backups'));
 if (sessionBackupCleanup.removed || sessionBackupCleanup.retainedRecovery) {
@@ -19581,49 +20656,11 @@ initBuiltinAssets();
 refreshAskModeIfEnabled();
 // 启动时刷新中文思考规则到最新版本（已启用时替换旧规则段）
 refreshZhReasoningIfEnabled();
-// 本地子 Agent 提示：如已开启，启动时把规则刷新为最新版本（用标记精确识别）
-// ⚠️ 顺序有讲究：**先把官方模型列进目录 → 再从旧规则迁移声明 → 最后才刷新提醒块**。
-//    因为新版提醒块是**按目录动态生成**的，目录为空 ⇒ 块为空 ⇒ 会被判成"无可委派"而摘除。
-try {
-  const officialIds = listOfficialModels().map((m) => String((m && m.id) || '').trim()).filter(Boolean);
-  if (officialIds.length) agentCatalog.ensureEntries(DATA_DIR, officialIds);
-} catch (e) {
-  log('[agent-catalog] 初始化目录失败: ' + e.message);
-}
-/**
- * 迁移：旧版把模型名**硬编码**在提醒规则文案里（`model="xxx"`）。
- * 升级到「声明制」后要把它**从实际配置里读出来**补进目录 ——
- * 否则用户原有的提醒行为会**无声失效**（那是最糟的升级体验）。
- * ⚠️ 这里**不写死任何模型名**：名字是从用户自己的 customPrompt 里解析的。
- * ⚠️ 幂等：已经声明过 `delegate` 的模型**不覆盖**（尊重用户的决定）。
- */
-function migrateAgentHintModel() {
-  try {
-    const settings = readWorkbuddySettings();
-    const cp = (settings.personalization && settings.personalization.customPrompt) || '';
-    if (cp.indexOf(AGENT_HINT_TAG_START) < 0) return;      // 从没开过提醒 ⇒ 无需迁移
-    const m = /model="([^"]+)"/.exec(cp);
-    if (!m) return;
-    const id = String(m[1]).trim();
-    if (!id) return;
-    const catalog = agentCatalog.readCatalog(DATA_DIR);
-    const entry = agentCatalog.resolveEntry(catalog, id);
-    if (entry.declared && entry.delegate) return;          // 已声明过 ⇒ 不覆盖
-    agentCatalog.setEntry(DATA_DIR, id, {
-      kind: entry.declared ? entry.kind : 'unknown',       // 不替用户判断性质
-      record: true,
-      delegate: true,
-    });
-    log('[agent-catalog] 已从旧提醒规则迁移模型声明: ' + id);
-  } catch (e) {
-    log('[agent-catalog] 迁移失败: ' + e.message);
-  }
-}
-migrateAgentHintModel();
-refreshAgentHintIfEnabled();
 // 启动时补偿持续会话指令块（开关开启但 app-config 块缺失/被改写时补写）
 refreshAutoContinueIfEnabled();
 refreshGatewayIfEnabled();
+// ⭐ 账号池对齐（2026-10-16）：老装机从旧版升上来时 auths/ 里可能缺后来登录的账号
+gatewaySyncAccountsQuiet('daemon 启动');
 repairMissingSessionWorkspaces().catch((error) => log('[sessions-cwd-repair] 启动修复失败: ' + error.message));
 // 从磁盘上已有的空间扫描结果派生一份复制排队清单。这样升级到本版本之后不必为了
 // 让新排序生效而重扫一次空间页；若那份扫描结果是旧版（没有产物拆分），清单会如实
@@ -19633,12 +20670,35 @@ const sessionCwdRepairTimer = setInterval(() => {
   repairMissingSessionWorkspaces().catch((error) => log('[sessions-cwd-repair] 定时修复失败: ' + error.message));
 }, 5000);
 sessionCwdRepairTimer.unref && sessionCwdRepairTimer.unref();
+// client-tmp 清理：TEMP 隔离（上游 1.2.16）把所有客户端临时文件收进 <dataDir>/client-tmp，
+// 上游没有回收机制 ⇒ 这里启动跑一次 + 每 24h 一次，只删超过 7 天的条目。
+function cleanupClientTmpOnce(reason) {
+  try {
+    const result = runClientTmpCleanup({ root: clientTmpRoot(DATA_DIR) });
+    if (result.removed || result.failed) {
+      log(`[client-tmp] ${reason}清理 ${result.removed} 项，释放 ${Math.round(result.bytes / 1048576)} MB`
+        + (result.failed ? `，${result.failed} 项被占用跳过` : ''));
+    }
+  } catch (error) {
+    log(`[client-tmp] ${reason}清理失败: ` + String((error && error.message) || error).slice(0, 160));
+  }
+}
+cleanupClientTmpOnce('启动');
+const clientTmpCleanupTimer = setInterval(() => cleanupClientTmpOnce('定时'), 24 * 60 * 60 * 1000);
+clientTmpCleanupTimer.unref && clientTmpCleanupTimer.unref();
 log('WorkBuddy 多账号切换器启动 (CDP 模式)');
 log(`登录信息文件: ${currentAuthFile() || '(未唯一确认)'}`);
 log(`备份目录: ${DATA_DIR}`);
 updateDebug('daemon-start', { authFile: currentAuthFile(), dataDir: DATA_DIR, appPath: IS_WIN ? WORKDADDY_DIR_WIN : macWorkDaddyAppPath(), apiPort: UI_PORT_BASE });
 
-for (const preset of ['close-buddy-popups.json', ...(PROFILE.capabilities.accounts ? ['keep-accounts-active.json'] : []), ...(PROFILE.id === 'workbuddy-cn' ? ['buddy-travel.json', 'daily-account-checkin.json'] : [])]) {
+// lite profile（CodeBuddy 轻量版）：这些内置任务全部是为 WorkBuddy 聊天窗写的
+// （关弹窗、保活、旅行、签到、限流切号），在 IDE 形态下要么点不到元素、要么每分钟
+// 刷一条「WorkBuddy 未连接，无法读取页面状态」的失败日志，故整体不安装。
+for (const preset of (PROFILE.capabilities.lite ? [] : [
+  'close-buddy-popups.json',
+  ...(PROFILE.capabilities.accounts ? ['keep-accounts-active.json'] : []),
+  ...(PROFILE.id === 'workbuddy-cn' ? ['buddy-travel.json', 'daily-account-checkin.json'] : []),
+])) {
   try {
     const result = installBuiltinTask(DATA_DIR, path.join(__dirname, 'builtin/automations', preset));
     if (result && result.status === 'upgraded') log(`[automation] 内置任务已升级: ${preset} (revision ${result.revision})`);
@@ -19647,7 +20707,7 @@ for (const preset of ['close-buddy-popups.json', ...(PROFILE.capabilities.accoun
 }
 // 限流自动切号续跑：先「认领」用户机器上已存在的同名任务（只在内容一致时），
 // 再走正常的内置安装/升级路径 —— 这样它才有「内置」角标、才能跟随内置定义升级。
-if (PROFILE.capabilities.accounts) {
+if (PROFILE.capabilities.accounts && !PROFILE.capabilities.lite) {
   try {
     const presetFile = path.join(__dirname, 'builtin/automations/rate-limit-auto-switch.json');
     const adopted = adoptBuiltinTask(DATA_DIR, presetFile);
@@ -19664,6 +20724,9 @@ cdpLoop();
 // All automatic check-in entry points are owned by the visible automation task.
 const tickAutomationSchedules = createScheduleTicker(DATA_DIR, { onSlot: noteScheduleSlot });
 function runAutomationSchedules() {
+  // lite profile：不调度任何用户任务。已经写进 automations.json 的历史任务原样留在磁盘上
+  // （不删数据），只是不在 CodeBuddy 侧执行——否则离开 WorkBuddy 窗口后全部必然失败。
+  if (PROFILE.capabilities.lite) return;
   // 1 秒一拍：读失败不能让异常冒到 timer 回调外（外层没有 try，会走 uncaughtException → 5.5 秒后退出 daemon）。
   const tasks = readAutomationsTolerant('定时调度');
   if (!tasks) return;

@@ -8,6 +8,8 @@ const ALLOWED_WORKBUDDY_PROCESS_NAMES = new Set([
   'workbuddy.exe',
   'workbuddyai.exe',
   'codebuddy.exe',
+  // CodeBuddy CN 实机主程序名带空格（安装在 D 盘 CodeBuddy CN 目录）
+  'codebuddy cn.exe',
 ]);
 
 function detectWindowsPrivilege(run = spawnSync) {
@@ -46,9 +48,20 @@ function detectNativeWindowsPrivilege(appDir, profile, run = spawnSync) {
   try { context = JSON.parse(result.stdout); } catch (_) {
     throw new Error('Windows 启动权限检测返回无效数据');
   }
-  if (!context || context.profile !== profile ||
-      !['standard', 'elevated'].includes(context.privilege)) {
+  if (!context || !['standard', 'elevated'].includes(context.privilege)) {
     throw new Error('Windows 启动权限或客户端身份不匹配');
+  }
+  if (context.profile !== profile) {
+    // ⚠️ 2026-10-20（CodeBuddy profile）：原生 launcher 往往只认有限几个 profile
+    //   （本机 WorkDaddyLauncher.exe 只认 workbuddy-cn），它回报的 profile 是
+    //   「我自己是谁」而不是「请求的是谁」—— 对它**不认识**的 profile 直接判身份冲突，
+    //   会让 codebuddy-cn 永远起不来（launcher exit 5，实测已复现）。
+    //   privilege=standard 可以采信（纯本地权限判定，与 profile 无关）；
+    //   elevated 的授权记录是按 profile 存的，跨 profile 不可采信 ⇒ 仍拒绝。
+    if (context.privilege !== 'standard') {
+      throw new Error('Windows 启动权限或客户端身份不匹配');
+    }
+    return 'standard';
   }
   return context.privilege;
 }
@@ -304,12 +317,24 @@ function filterVerifiedNodeProcesses(expectedNode, expectedScript, processes, re
     } catch (_) {}
     if (!commandNodeMatches) continue;
     if (args[entryIndex] === '--experimental-sqlite') entryIndex++;
+    // ⭐ 2026-10-20（多 profile 并存）：daemon/watchdog 的命令行带 `--profile=<id>`，
+    //   用来在进程枚举里区分实例（环境变量枚举不到，脚本名又是各 profile 共用的）。
+    //   它必须排在脚本路径**之前** —— 下面 `args.length === entryIndex + 1`
+    //   要求脚本名后不能再有参数，否则进程身份验证会永远失败。
+    // 兼容历史写法（排在脚本前）；新写法排在脚本后，下面 trailingOk 一起认。
+    if (typeof args[entryIndex] === 'string' && args[entryIndex].startsWith('--profile=')) entryIndex++;
     const entry = args[entryIndex];
     let scriptMatch = false;
     if (entry && path.win32.isAbsolute(entry)) {
       try { scriptMatch = sameWindowsFilePath(resolveWindowsCommandToken(entry, realpath), script); } catch (_) {}
     }
-    if (scriptMatch && args.length === entryIndex + 1) {
+    // ⚠️ 2026-10-20 放宽：`--profile=<id>` 现在排在脚本路径**之后**（排在前面会被 Node
+    //   当成自己的选项 ⇒ bad option ⇒ exit 9）。尾部只允许 `--profile=` 形式的参数，
+    //   其余仍然严格拒绝，进程身份校验强度不变。
+    const trailing = args.slice(entryIndex + 1);
+    const trailingOk = trailing.length === 0 ||
+      trailing.every((arg) => typeof arg === 'string' && /^--profile=[A-Za-z0-9._-]+$/.test(arg));
+    if (scriptMatch && trailingOk) {
       verified.push({ ...process, ExecutablePath: executable });
     }
   }

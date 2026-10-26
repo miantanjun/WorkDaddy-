@@ -52,6 +52,7 @@ const { getProfile, profileDataDir } = require('./profiles.js');
 const { isTargetForProfile } = require('./cdp-targets.js');
 const { replaceFileWithRetry } = require('./atomic-file-write.js');
 const { parseUiPortState, profileUiPortCandidates } = require('./ui-port.js');
+const { getWorkBuddyLaunchEnv } = require('./workbuddy-launch-env.js');
 
 const SCRIPTS_DIR = __dirname;
 const WORKDADDY_APP_DIR = path.resolve(SCRIPTS_DIR, '..');
@@ -90,14 +91,30 @@ const CDP_PORT_FILE = path.join(DATA_DIR, 'cdp-port.json');
 const CDP_STARTUP_TIMEOUT_MS = 60000;
 // Electron/ShellExecute 冷启动可能超过 5 秒；过早换端口会让首个实例与重试实例发生单实例冲突。
 const CDP_PORT_RETRY_GRACE_MS = 15000;
-const INJECT_REQUEST_TIMEOUT_MS = 5000;
+// 2026-10-23：daemon 侧 manual 注入会先主动等主连接就绪（MANUAL_INJECT_CDP_WAIT_MS=8s）
+// 再注入，5 秒的旧预算必然先超时；给到 12 秒留 4 秒余量，正常情况下第一次请求就能拿到结果。
+const INJECT_REQUEST_TIMEOUT_MS = 12000;
 // daemon 的 /api/status 可能等待后台客户端进程枚举（Windows 上旧实现曾达数秒）。
 // 启动器的 UI 端口发现与 daemon 状态读取必须容忍这种慢响应：预算过短会把仍在
 // 监听的 daemon 误判为不存在，进而误选备用端口并以「daemon 未绑定当前 UI 端口」
 // 失败退出。与 daemon 侧 spawnSync 的 10s 进程查询预算保持同量级并留出余量。
 const HTTP_GET_TIMEOUT_MS = 8000;
-const INJECT_MAX_ATTEMPTS = 6;
+// CodeBuddy 是 VS Code fork：主程序带 GUI + 扩展宿主两段冷启动，实测从 spawn 到 CDP 可用
+// 约 10 秒（2026-10-22 launcher.log：09:19:56 派发 → 09:20:06 [cdp] 已连接）。
+// 原来统一给 6 次 × 1 秒，CodeBuddy 必然在前 6 秒里全部打「CDP 未连接」，然后 launcher
+// 打印「放弃等待」——用户看到的就是一串吓人的注入报错，实际再等 4 秒就成功了。
+// WorkBuddy 冷启动快，维持 6 次不变，避免无谓地拖长启动失败判定。
+const INJECT_MAX_ATTEMPTS = PROFILE.kind === 'codebuddy' ? 24 : 6;
 const INJECT_RETRY_DELAY_MS = 1000;
+
+// CodeBuddy（VS Code fork）从派发到「主 target 可用」实测 10~60 秒：扩展宿主先起，
+// AI 面板窗口还是懒创建的（用户不点开侧栏就没有 agentManager.html）。线性 1 秒重试
+// 会在客户端还没就绪时就把次数烧光；改成前 6 次密集探、之后退到 3 秒，
+// 24 次合计覆盖约 60 秒。WorkBuddy 维持原样。
+function injectRetryDelay(attempt) {
+  if (PROFILE.kind !== 'codebuddy') return INJECT_RETRY_DELAY_MS;
+  return attempt <= 6 ? 1000 : 3000;
+}
 // 每个 profile 只查询自己的主程序镜像；其他 CodeBuddy/WorkBuddy profile 不参与退出判定。
 const PROFILE_BINARY_NAME_LIST = PROFILE.binaryNames || (PROFILE.id === 'workbuddy-ai' ? ['workbuddyai.exe'] :
   PROFILE.id === 'workbuddy-cn' ? ['workbuddy.exe'] : ['codebuddy.exe']);
@@ -428,7 +445,7 @@ function getWorkBuddyProcesses() {
   const names = [...PROFILE_PROCESS_NAMES].map((name) => `\"${name}\"`).join(',');
   const command = buildNativeProcessQuery(
     path.join(SCRIPTS_DIR, 'windows-process-boundary.ps1'),
-    `$names=@(${names}); Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $names -contains $_.Name }`
+    `$names=@(${names}); Get-CimInstance Win32_Process -Filter (($names | ForEach-Object { "Name='$_'" }) -join ' OR ') -ErrorAction Stop | Where-Object { $names -contains $_.Name }`
   );
   const result = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
     encoding: 'utf8', timeout: 10000, windowsHide: true,
@@ -581,7 +598,7 @@ function findNode() {
   }
   for (const candidate of candidates) {
     try {
-      if (uniqueNodeProcess(candidate, DAEMON_SCRIPT) || uniqueNodeProcess(candidate, WATCHDOG_SCRIPT)) {
+      if (hasAnyNodeProcess(candidate, DAEMON_SCRIPT) || hasAnyNodeProcess(candidate, WATCHDOG_SCRIPT)) {
         return candidate;
       }
     } catch (_) {}
@@ -702,6 +719,10 @@ function findWorkBuddy() {
 const WATCHDOG_PID_FILE = path.join(DATA_DIR, 'watchdog.pid');
 const WATCHDOG_SCRIPT = path.join(SCRIPTS_DIR, 'watchdog.js');
 const DAEMON_SCRIPT = path.join(SCRIPTS_DIR, 'daemon.js');
+// ⭐ 2026-10-20（多 profile 并存）：进程归属靠命令行里的 --profile=<id> 区分。
+//   没有它，枚举会把兄弟 profile 的 daemon/watchdog 也认进来（多进程直接抛
+//   「目标 Node 入口存在多个进程」，单进程则误判成自己的）。
+const PROFILE_CMD_HINT = '--profile=' + PROFILE.id;
 
 function listenerPids(port) {
   const result = spawnSync('netstat', ['-ano', '-p', 'tcp'], {
@@ -746,14 +767,24 @@ function queryNodeProcesses(nodeBin, pids = null, commandLineHint = '') {
   });
 }
 
-function uniqueNodeProcess(nodeBin, expectedScript) {
+function uniqueNodeProcess(nodeBin, expectedScript, commandLineHint = '') {
   const matches = filterVerifiedNodeProcesses(
     nodeBin,
     expectedScript,
-    queryNodeProcesses(nodeBin, null, path.basename(expectedScript))
+    queryNodeProcesses(nodeBin, null, commandLineHint || path.basename(expectedScript))
   );
   if (matches.length > 1) throw new Error(`目标 Node 入口存在多个进程: ${expectedScript}`);
   return matches[0] || null;
+}
+
+// 「这个 node 候选路径下是否已有我们的进程在跑」——多 profile 并存时同一 node 会跑
+// 多个 daemon，所以这里只要**存在任一**即可，不能用 uniqueNodeProcess（它要求唯一）。
+function hasAnyNodeProcess(nodeBin, expectedScript) {
+  return filterVerifiedNodeProcesses(
+    nodeBin,
+    expectedScript,
+    queryNodeProcesses(nodeBin, null, path.basename(expectedScript))
+  ).length > 0;
 }
 
 function readWatchdogPid() {
@@ -770,7 +801,7 @@ function readWatchdogPid() {
 
 async function watchdogState(nodeBin) {
   let pid = readWatchdogPid();
-  let exact = uniqueNodeProcess(nodeBin, WATCHDOG_SCRIPT);
+  let exact = uniqueNodeProcess(nodeBin, WATCHDOG_SCRIPT, PROFILE_CMD_HINT);
   if (!pid) {
     // A detached watchdog can be visible to CIM a moment before its atomic
     // PID-file write becomes visible. Give that startup race a short window;
@@ -780,7 +811,7 @@ async function watchdogState(nodeBin) {
       if (attempt > 0) await sleep(250);
       pid = readWatchdogPid();
       if (pid) break;
-      exact = uniqueNodeProcess(nodeBin, WATCHDOG_SCRIPT);
+      exact = uniqueNodeProcess(nodeBin, WATCHDOG_SCRIPT, PROFILE_CMD_HINT);
     }
   }
   if (!pid && exact) {
@@ -939,7 +970,7 @@ async function stopDaemonByPort(nodeBin, allowLowerPrivilege = false) {
   }
   const listeners = listenerPids(UI_PORT);
   if (listeners.length > 1) throw new Error('daemon 监听 PID 不唯一');
-  const daemon = uniqueNodeProcess(nodeBin, DAEMON_SCRIPT);
+  const daemon = uniqueNodeProcess(nodeBin, DAEMON_SCRIPT, PROFILE_CMD_HINT);
   let authorizedDaemon = null;
   if (daemon || listeners.length) {
     const status = await readStatus();
@@ -962,12 +993,12 @@ async function stopDaemonByPort(nodeBin, allowLowerPrivilege = false) {
   if (authorizedDaemon) killVerifiedNodeProcess(authorizedDaemon, nodeBin, DAEMON_SCRIPT);
   await sleep(300);
   // 终止窗口内出现的 daemon 没有独立的端口与 status 绑定证据，绝不自动结束。
-  const remainingDaemon = uniqueNodeProcess(nodeBin, DAEMON_SCRIPT);
+  const remainingDaemon = uniqueNodeProcess(nodeBin, DAEMON_SCRIPT, PROFILE_CMD_HINT);
   if (remainingDaemon) {
     throw new Error('发现未绑定当前 profile 状态的新 daemon 进程，拒绝结束');
   }
   await sleep(300);
-  if (uniqueNodeProcess(nodeBin, DAEMON_SCRIPT) || listenerPids(UI_PORT).length || await portOpen(UI_PORT)) {
+  if (uniqueNodeProcess(nodeBin, DAEMON_SCRIPT, PROFILE_CMD_HINT) || listenerPids(UI_PORT).length || await portOpen(UI_PORT)) {
     throw new Error('daemon 停止失败，端口仍被占用');
   }
 }
@@ -1026,12 +1057,12 @@ async function ensureDaemon(nodeBin) {
     log('已清理确认不存在的旧 watchdog.pid，继续启动');
     watchdog = { kind: 'absent', pid: null };
   }
-  const orphanDaemon = uniqueNodeProcess(nodeBin, DAEMON_SCRIPT);
+  const orphanDaemon = uniqueNodeProcess(nodeBin, DAEMON_SCRIPT, PROFILE_CMD_HINT);
   if (orphanDaemon) {
     throw new Error('发现未绑定当前 UI 端口与当前 profile 状态的 daemon 进程，拒绝结束或启动重复实例');
   }
   log('启动 watchdog: ' + nodeBin);
-  const child = spawn(nodeBin, [WATCHDOG_SCRIPT], { detached: true, stdio: 'ignore', windowsHide: true });
+  const child = spawn(nodeBin, [WATCHDOG_SCRIPT, PROFILE_CMD_HINT], { detached: true, stdio: 'ignore', windowsHide: true });
   child.unref();
   if (await waitForExactDaemon(nodeBin, 30)) {
     log('daemon 已通过完整身份校验');
@@ -1156,9 +1187,11 @@ async function quitWorkBuddy(binary) {
 function launchWorkBuddy(wb) {
   const environmentMode = !!(PROFILE.cdp && PROFILE.cdp.mode === 'environment');
   const args = environmentMode ? [] : ['--remote-debugging-port=' + CDP_PORT];
-  const env = environmentMode
-    ? { ...process.env, WORKBUDDY_REMOTE_DEBUGGING_PORT: String(CDP_PORT) }
-    : process.env;
+  // 上游 1.2.16：TEMP/TMP 隔离到 <dataDir>/client-tmp/<profileId>，并钉住更新域。
+  // 官方 Windows updater 会在检查 feed 之前恢复缓存的 Setup.exe（#424），
+  // 只钉 URL 拦不住 —— 隔离 TEMP 才能让它看不见旧安装包。
+  const env = getWorkBuddyLaunchEnv(PROFILE, DATA_DIR, process.platform, process.env);
+  if (environmentMode) env.WORKBUDDY_REMOTE_DEBUGGING_PORT = String(CDP_PORT);
   const child = spawn(wb, args, {
     // WorkBuddy 是 GUI 程序：windowsHide:true 会把 STARTUPINFO 的 wShowWindow 置为 SW_HIDE，
     // 新版 Electron 主窗口显示走 ShowWindow(SW_SHOWDEFAULT) 会继承该值，导致主窗口隐藏启动、
@@ -1258,6 +1291,7 @@ async function findNextAvailableCdpPort(exclude) {
 async function injectNow() {
   // daemon 的 /api/inject 可能需要等待 renderer 完成首屏；客户端断开不代表 daemon 停止注入。
   let lastError = '注入请求无响应';
+  const injectStartedAt = Date.now();
   for (let attempt = 1; attempt <= INJECT_MAX_ATTEMPTS; attempt += 1) {
     const response = await httpPost(UI_PORT, '/api/inject', INJECT_REQUEST_TIMEOUT_MS, localApiHeaders());
     if (!response) {
@@ -1277,8 +1311,14 @@ async function injectNow() {
         : `注入响应未完成 (HTTP ${response.status})`;
     }
     if (attempt < INJECT_MAX_ATTEMPTS) {
-      log(`[inject] 第 ${attempt}/${INJECT_MAX_ATTEMPTS} 次未完成：${lastError}；${INJECT_RETRY_DELAY_MS}ms 后重试`);
-      await sleep(INJECT_RETRY_DELAY_MS);
+      // 只在关键节点报进度。原来的写法每次失败都打一行，CodeBuddy 冷启动那 60 秒会刷出
+      // 几十行「未完成：CDP 未连接」，用户看到的就是一整屏红字，误以为启动失败。
+      // 真正的失败交给最后那句「放弃等待」交代，中途只给 5 的倍数报一次。
+      if (attempt === 1 || attempt % 5 === 0) {
+        const waited = Math.round((Date.now() - injectStartedAt) / 1000);
+        log(`[inject] 等待客户端就绪（第 ${attempt}/${INJECT_MAX_ATTEMPTS} 次，已等待 ${waited}s）：${lastError}`);
+      }
+      await sleep(injectRetryDelay(attempt));
     }
   }
   return { pending: true, error: lastError };
@@ -1655,7 +1695,7 @@ async function ensureDaemonNative(nodeBin) {
     log('通过内置 Node 启动无 CIM watchdog: ' + nodeBin);
     const attempt = { attempt: nativeWatchdogAttempts.length + 1, pid: null, errorCode: null, exitCode: null, signal: null };
     nativeWatchdogAttempts.push(attempt);
-    const child = spawn(nodeBin, [WATCHDOG_SCRIPT], { detached: true, stdio: 'ignore', windowsHide: true, env: process.env });
+    const child = spawn(nodeBin, [WATCHDOG_SCRIPT, PROFILE_CMD_HINT], { detached: true, stdio: 'ignore', windowsHide: true, env: process.env });
     attempt.pid = Number.isSafeInteger(child.pid) ? child.pid : null;
     child.once('error', (error) => { attempt.errorCode = String(error && error.code || 'spawn-error').slice(0, 80); });
     child.once('exit', (code, signal) => {

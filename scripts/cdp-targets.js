@@ -143,7 +143,16 @@ function isTargetForProfile(target, profile) {
  * window shares the same app URL and must not become the CDP session target.
  */
 function selectPageTarget(targets, profile) {
-  const candidates = (Array.isArray(targets) ? targets : []).filter((target) => isTargetForProfile(target, profile));
+  const candidates = (Array.isArray(targets) ? targets : []).filter((target) => {
+    if (!isTargetForProfile(target, profile)) return false;
+    // CodeBuddy 的 Agent 窗口（agentManager.html）与 IDE 主窗口（workbench.html）是两个
+    // 独立页面。主连接是**单 target 且不重选**的：谁先出现就绑谁，绑上就不再换。
+    // 若让 workbench 走主连接，先开的 IDE 会占住主连接，后打开的 Agent 窗口永远等不到
+    // 完整面板注入（实测回归）。所以主连接只认 agentManager，workbench 交给
+    // selectIdeTargets + daemon 的 IDE 页面管理器逐窗并行注入。
+    if (profile.kind !== 'codebuddy') return true;
+    return /\/agentManager\.html(?:[?#]|$)/i.test(String(target.url || ''));
+  });
   const score = (target) => {
     const url = String(target && target.url || '');
     if (/windowAppId=settings|windowKind=settings|windowPreset=utility/i.test(url)) return 20;
@@ -153,4 +162,17 @@ function selectPageTarget(targets, profile) {
   return candidates.sort((a, b) => score(a) - score(b))[0] || null;
 }
 
-module.exports = { normalizeTargetUrl, classifyTarget, looksLikeWbFamilyTarget, isTargetForProfile, selectPageTarget };
+/**
+ * 选出需要注入完整面板的 IDE 工作台页面。
+ * codebuddy profile 专属：每个 IDE 窗口一条独立 CDP 连接（由 daemon 的 IDE 页面管理器
+ * 维护，各自带一份 renderer bridge 实例）；非 codebuddy profile 返回空数组。
+ * inject.js 运行时按 location.href 与 CAPS 自判外观，target 侧不需要附加标记。
+ */
+function selectIdeTargets(targets, profile) {
+  if (!profile || profile.kind !== 'codebuddy') return [];
+  return (Array.isArray(targets) ? targets : []).filter((target) =>
+    isTargetForProfile(target, profile)
+    && /\/workbench\.html(?:[?#]|$)/i.test(String(target.url || '')));
+}
+
+module.exports = { normalizeTargetUrl, classifyTarget, looksLikeWbFamilyTarget, isTargetForProfile, selectPageTarget, selectIdeTargets };

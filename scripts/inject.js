@@ -99,9 +99,45 @@ function createBrandClickAction(options) {
   };
 }
 
+// CodeBuddy 加载后会替换 bootstrap body 的内容。只观察直接子节点：
+// 会话区的变更不应触发整篇文档扫描。
+function preserveNativePanelMount(doc, root, Observer) {
+  var stopped = false;
+  var body = null;
+  var mounts = [root];
+  var bodyObserver = new Observer(restore);
+  var documentObserver = new Observer(restore);
+  function restore() {
+    if (stopped) return;
+    if (body !== doc.body) {
+      bodyObserver.disconnect();
+      body = doc.body;
+      if (body) bodyObserver.observe(body, { childList: true });
+    }
+    if (body) mounts.forEach(function (node) { if (!node.isConnected) body.appendChild(node); });
+  }
+  documentObserver.observe(doc.documentElement, { childList: true });
+  restore();
+  function dispose() {
+    stopped = true;
+    bodyObserver.disconnect();
+    documentObserver.disconnect();
+    mounts = [];
+  }
+  // 浮层（popover/tooltip）是被 portal 到 body 的，同样要一起保活，否则官方重渲染后它们会消失。
+  dispose.keep = function (node) {
+    if (stopped) return;
+    if (mounts.indexOf(node) < 0) mounts.push(node);
+    restore();
+  };
+  return dispose;
+}
+
 function createFabAppearance(options) {
-  var styles = ['theme', 'white', 'black', 'glass'];
-  var current = 'theme';
+  var styles = options.allowedStyles || ['theme', 'white', 'black', 'glass'];
+  var current = options.defaultStyle || 'theme';
+  // 存档里的样式可能已被当前客户端禁用（如 CodeBuddy 不提供主题色/毛玻璃）⇒ 回落到首个可用档。
+  if (styles.indexOf(current) < 0) current = styles[0] || 'black';
   try {
     var saved = options.storage.getItem(options.key);
     if (styles.indexOf(saved) >= 0) current = saved;
@@ -934,6 +970,19 @@ if (typeof module !== 'undefined' && module.exports) {
 }
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 (function () {
+  // ⭐ 重注入不丢面板开合态（2026-10-16）：下面这段清理会把 .wbs-root 整棵删掉重建，
+  //    面板的 .show / state.open 会跟着一起丢 —— 用户看到的就是「刚点开面板，1~2 秒后它自己关掉了」。
+  //    触发场景：daemon 的注入节流补种（injectWidget 被节流跳过时 1.5s 后再注入一次）或页面事件密集时
+  //    的反复自动注入（登录新账号后尤其明显）。这里先把开合态捞出来，界面建好后再恢复。
+  //    ⚠️ 只认 window.__wbsPanelOpen（由 setOpen 维护）：页面 reload 后它自然不存在 ⇒ 默认仍是关闭，
+  //    这正是「换页/换账号后不该自动弹面板」的预期行为。
+  var WBS_PREV_PANEL_OPEN = (function () {
+    try {
+      if (typeof window.__wbsPanelOpen === 'boolean') return window.__wbsPanelOpen;
+      var p = document.querySelector('.wbs-root .wbs-panel');
+      return !!(p && p.classList.contains('show'));
+    } catch (_) { return false; }
+  })();
   // 兜底清理：移除任何历史版本注入的残留节点，并清除旧守卫。
   // 关键：必须在守卫判断之前执行，否则旧注册的 window.__wbsWidget 会拦截新代码，
   // 导致“改了文件、重启守护、Command+R 仍跑旧逻辑 / 旧按钮残留”。
@@ -965,6 +1014,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // 队列 adapter 缓存必须一并清除：旧 shim（包装方法齐全但指向失效/错误对象）若不删，
     // findWbsAdapter 的缓存校验会直接复用旧 shim，导致「修好代码重注入后仍跑旧逻辑」。
     try { delete window.__wbsAdapter; } catch (e) { window.__wbsAdapter = null; }
+    // 侧栏运营位清理器的 setInterval 也要停：旧副本不清会在重注入后继续跑一份。
+    try { if (window.__wbsAdGuard && typeof window.__wbsAdGuard.stop === 'function') window.__wbsAdGuard.stop(); } catch (e) {}
+    try { delete window.__wbsAdGuard; } catch (e) { window.__wbsAdGuard = null; }
   })();
   // 本副本的代标记。写在清理之后、守卫之前 —— 旧副本的 window.__wbsGeneration 会被这里覆盖，
   // 于是旧副本里带代际守卫的监听器（见 mdqvInstall）下次事件就自动让位，不再抢事件。
@@ -987,7 +1039,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   var AC_SUPPORTED = true;
   // 客户端身份只控制真实的 profile 差异；DOM 与队列能力由 WBS_COMPAT 独立判断。
   var WBS_PROFILE_IS_AI = PROFILE_ID === 'workbuddy-ai';
-  var WBS_BRAND = WBS_PROFILE_IS_AI ? 'WorkBuddy 助手 AI' : 'WorkBuddy 助手';
+  // ⚠️ 只在 CodeBuddy（cdp 传输）下取 CAPS.appName：本地 WorkBuddy 两个 profile 也带 appName，
+  // 直接用它会把国际版品牌从「WorkBuddy 助手 AI」降级成「WorkBuddy 助手」。
+  var WBS_BRAND = (CAPS.apiTransport === 'cdp' && CAPS.appName) ? CAPS.appName : (WBS_PROFILE_IS_AI ? 'WorkBuddy 助手 AI' : 'WorkBuddy 助手');
+  // CodeBuddy 的 agents 窗口与 IDE 窗口共用同一个面板，标题统一用产品名，免得同一插件两处叫不同名字。
+  var WBS_PANEL_TITLE = CAPS.apiTransport === 'cdp' ? 'WorkDaddy' : WBS_BRAND;
 
   // User-facing strings are translated at the injected root so dynamically-built
   // panes and toasts follow the same language without touching WorkBuddy's DOM.
@@ -1331,41 +1387,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '与本插件任务同一分钟触发，注意别重复': 'Fires in the same minute as a WorkDaddy task — avoid duplicates',
     '当前客户端没有官方定时任务功能': 'This client has no official scheduled-task feature',
     '读取官方任务失败': 'Could not read official tasks',
-    // 2026-10-01：本地子 Agent 提醒开关 + 使用记录（用户需求）
-    '本地子 Agent': 'Local sub-agent',
-    '在每个会话里提醒 AI 可用（关闭后既不提醒也不注入）': 'Remind the AI in every session (when off, no reminder and nothing is injected)',
-    '派活次数': 'Delegations',
-    '成功率': 'Success rate',
-    '本地承担': 'Handled locally',
-    '漏到云端': 'Leaked to cloud',
-    '按任务类别': 'By task category',
-    '读不到使用记录': 'Could not read usage history',
-    '暂无派活记录': 'No delegations recorded yet',
-    // 2026-10-01 补：成功率的**口径**必须显示出来 —— 官方 status 恒为 completed，
-    // 成功率只能看输出正文（见 agent-usage.js 文件头），分母是「已有结果的派活」。
-    ' 次 · 成功 ': ' runs · OK ',
-    '，失败 ': ', failed ',
-    '被中断': 'Interrupted',
-    '成功率的分母是「已有结果的派活」': 'Success rate is measured over delegations that returned a result',
-    // 2026-10-01 补：模型页整合「子 Agent 能力」（与具体 AI 解耦；**不含任何模型名**）
-    '子 Agent': 'Sub-agent',
-    '类型': 'Type',
-    '本地': 'Local',
-    '云端': 'Cloud',
-    '未定': 'Undecided',
-    '可委派': 'Delegatable',
-    '记录': 'Record',
-    '计入记录': 'Tracked',
-    '派活': 'Delegations',
-    '未指定': 'Unspecified',
-    '统计不可用': 'Stats unavailable',
-    '统计加载中…': 'Loading stats…',
-    '从未派活': 'Never delegated to',
     '保存失败': 'Save failed',
-    '子 Agent 配置已保存': 'Sub-agent settings saved',
-    '请先填写模型 ID，才能配置子 Agent 属性': 'Fill in the model ID first to configure sub-agent settings',
-    '勾选后写进「提醒 AI 可用」的规则': 'When checked, written into the "sub-agent available" reminder',
-    '取消勾选则不计入使用台账': 'When unchecked, excluded from the usage ledger',
     '留空则按命令首行自动命名': 'Leave blank to name it after the first line of the command',
     '保存并排定': 'Save and schedule', '保持当前模型': 'Keep current model',
     '（无可用账号）': '(No account available)',
@@ -1427,7 +1449,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '安全传输': 'Secure transfer', '选择内容': 'Select content', '选择账号': 'Select accounts', '选择目标账号': 'Select target account', '选择目标账号…': 'Select a target account…', '密码': 'Password', '请输入密码': 'Enter password', '密码不能为空': 'Password cannot be empty', '请至少选择一项': 'Select at least one item', '处理中…': 'Processing…', '新版文件请输入密码': 'Enter the password for the new file', '新版文件必须输入密码；旧版导出文件可留空。': 'New files require a password; older exports may be left blank.', '新版文件请输入密码；已有的相同短语会自动跳过。': 'Enter the password for the new file; duplicate phrases are skipped.',
     '电脑休眠': 'Computer sleep', '允许电脑休眠': 'Allow computer sleep', '持续禁止休眠': 'Keep awake', '所有会话结束允许休眠': 'Allow sleep when all sessions end', '系统默认，空闲后正常休眠': 'System default; sleep normally when idle', '保持唤醒，防黑屏锁屏': 'Stay awake to prevent screen lock', '任一会话运行中都保持唤醒': 'Stay awake while any session is running', '允许显示器休眠': 'Allow display sleep', '禁止休眠时，是否允许显示器单独黑屏': 'When sleep is blocked, allow the display to turn off',
     '发送错误诊断': 'Send error diagnostics', '推荐开启': 'Recommended', '由环境变量控制': 'Controlled by environment variable', '默认开启 · 设置读取失败': 'Enabled by default · failed to read setting', '保存中…': 'Saving…', '此开关控制脱敏错误诊断。匿名安装数和日活独立统计（随机安装标识、系统、架构、版本、客户端类型及出口国家），不受此开关影响。不包含账号、会话内容、Token 或 API Key。': 'This switch controls redacted error diagnostics. Anonymous installation and daily active counts are collected independently (random installation ID, system, architecture, version, client type, and network country). No accounts, session content, tokens, or API keys.', '查看错误诊断说明': 'View diagnostics details', '问题反馈': 'Report an issue', '会话监听日志': 'Session monitor log', '仅保存在当前页面内存': 'Stored only in this page memory',
-    '权限免打扰': 'Permission quiet mode', '异常中断会话': 'Continue interrupted sessions', '决策弹窗': 'Decision prompts', '用弹窗提问': 'Ask with a dialog', '确认弹窗自动允许': 'Auto-allow confirmation dialogs', '自动同步所有会话': 'Auto-sync all sessions', '会话消息索引': 'Message index', 'token 速度读数': 'Token speed readout', 'md 快速查看': 'Quick md viewer', 'md 快速查看（插件内置）': 'Quick md viewer (built into plugin)', '默认开启。点对话里的 md 产物卡、或产物面板里的 md 条目，都不再等官方文档查看器冷启动（首开约 30 秒），改由插件内置渲染器在右侧面板秒开；关掉则完全走官方': 'On by default. Clicking an md artifact — either the card in the conversation or the entry in the artifacts panel — renders instantly in a right-side panel with the built-in viewer, instead of waiting for the official docs viewer to cold-start (~30 s). Turn off to always use the official one.', '用官方查看器打开': 'Open with official viewer', '复制正文': 'Copy source', '导出 HTML': 'Export HTML', '已复制 md 正文': 'md source copied', '复制失败，请手动选中': 'Copy failed — select manually', '正在读取…': 'Reading…', '文件太大，未渲染': 'File too large to render', '读不到文件': 'Cannot read file', '读取失败': 'Read failed', '导出失败': 'Export failed', '已导出 HTML': 'HTML exported', '此段数学公式请用官方查看器打开': 'Math in this block needs the official viewer', '此段 mermaid 图请用官方查看器打开': 'This mermaid block needs the official viewer', '行': 'lines', '渲染耗时': 'Rendered in', '已关闭 md 快速查看': 'Quick md viewer disabled', '已开启 md 快速查看': 'Quick md viewer enabled', 'md 快速查看器': 'md quick viewer', '拖动调整宽度': 'Drag to resize', '双击恢复默认宽度': 'Double-click to reset width', '复制': 'Copy', '已复制': 'Copied', '复制失败': 'Copy failed', '代码': 'CODE', '接管自动打开的 md': 'Adopt auto-opened md', '默认开启。任务跑完后官方自动打开 md 时，插件会立刻换成自己的面板（官方冷启动约 30 秒）。关掉则只拦手动点击': 'On by default. When WorkBuddy auto-opens an md after a task, the plugin swaps in its own panel right away (the official viewer cold-starts in ~30 s). Turn off to only intercept manual clicks.',
+    '权限免打扰': 'Permission quiet mode', '异常中断会话': 'Continue interrupted sessions', '决策弹窗': 'Decision prompts', '用弹窗提问': 'Ask with a dialog', '确认弹窗自动允许': 'Auto-allow confirmation dialogs', '自动同步所有会话': 'Auto-sync all sessions', '会话消息索引': 'Message index', 'md 快速查看': 'Quick md viewer', 'md 快速查看（插件内置）': 'Quick md viewer (built into plugin)', '默认开启。点对话里的 md 产物卡、或产物面板里的 md 条目，都不再等官方文档查看器冷启动（首开约 30 秒），改由插件内置渲染器在右侧面板秒开；关掉则完全走官方': 'On by default. Clicking an md artifact — either the card in the conversation or the entry in the artifacts panel — renders instantly in a right-side panel with the built-in viewer, instead of waiting for the official docs viewer to cold-start (~30 s). Turn off to always use the official one.', '用官方查看器打开': 'Open with official viewer', '复制正文': 'Copy source', '导出 HTML': 'Export HTML', '已复制 md 正文': 'md source copied', '复制失败，请手动选中': 'Copy failed — select manually', '正在读取…': 'Reading…', '文件太大，未渲染': 'File too large to render', '读不到文件': 'Cannot read file', '读取失败': 'Read failed', '导出失败': 'Export failed', '已导出 HTML': 'HTML exported', '此段数学公式请用官方查看器打开': 'Math in this block needs the official viewer', '此段 mermaid 图请用官方查看器打开': 'This mermaid block needs the official viewer', '行': 'lines', '渲染耗时': 'Rendered in', '已关闭 md 快速查看': 'Quick md viewer disabled', '已开启 md 快速查看': 'Quick md viewer enabled', 'md 快速查看器': 'md quick viewer', '拖动调整宽度': 'Drag to resize', '双击恢复默认宽度': 'Double-click to reset width', '复制': 'Copy', '已复制': 'Copied', '复制失败': 'Copy failed', '代码': 'CODE', '接管自动打开的 md': 'Adopt auto-opened md', '默认开启。任务跑完后官方自动打开 md 时，插件会立刻换成自己的面板（官方冷启动约 30 秒）。关掉则只拦手动点击': 'On by default. When WorkBuddy auto-opens an md after a task, the plugin swaps in its own panel right away (the official viewer cold-starts in ~30 s). Turn off to only intercept manual clicks.',
  '输入框下方实时显示 ≈ N tok/s，可拖动、双击复位': 'Live ≈ N tok/s under the input box; draggable, double-click to reset', '引用消息文本': 'Quote message text', '选择登录方式': 'Choose a login method', '假退出': 'Soft logout', '无感登录': 'Seamless login',
     '未设置': 'Not set', '当前使用中': 'Currently active', '停止生成': 'Stop generating', '正常重启': 'Restart normally', '清空日志': 'Clear log', '开发者工具': 'Developer tools', '隐藏功能': 'Hidden feature', '卡死': 'Stuck', '任务': 'Task', '空间': 'Workspace', '全部': 'All', '今天': 'Today', '近 7 天': 'Last 7 days', '近 30 天': 'Last 30 days', '企业配额': 'Enterprise quota', '积分到期分布': 'Credit expiry distribution',
     '连接新服务…': 'Connecting to service…', '等待中': 'Waiting', '运行中': 'Running', '空闲': 'Idle', '已中断': 'Interrupted', '已停止': 'Stopped', '未确认': 'Unconfirmed', '等待确认': 'Waiting for confirmation', '等待新回复': 'Waiting for a new reply', '等待会话': 'Waiting for session', '等待允许': 'Waiting for approval', '整理中': 'Organizing', '恢复中': 'Restoring', '即将完成…': 'Finishing…', '已继续': 'Continued', '检测到会话异常中断，即将自动发送「': 'An interrupted session was detected. Sending “', '自动发送失败，请手动点击发送': 'Automatic send failed. Please click Send manually', '底层发送失败，请手动发送': 'Underlying send failed. Please send manually',
@@ -2048,6 +2070,36 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   // 但很多是经 promise/microtask 抛出的可拦异常——这里统一兜住并留痕。
   if (!window.__wbsErrHook) {
     window.__wbsErrHook = true;
+    // 2026-10-22：同类错误节流。CodeBuddy（VS Code fork）的 AutomationBridge 出现网络
+    //    失败时会以毫秒级节奏无限重试，实测 13 秒内抛出 2870 条 "TypeError: Failed to fetch"
+    //    的 unhandledrejection（约 250 条/秒），把 daemon.log 从几百 KB 冲到 3.7MB，
+    //    主线程同步 console.error 本身也在拖慢渲染进程。
+    //    策略：同一签名（kind + 消息前 160 字）每 60 秒最多记 3 条，其余只累计；
+    //    窗口翻转时补一条「上周期已抑制 N 次」的汇总，保证既有事实可追溯、又不淹日志。
+    //    关键：被抑制的条目**连诊断上报一起跳过**——CodeBuddy 的 CSP 会拦裸 fetch，
+    //    每条错误都发一次 /api/breadcrumb 只会再制造一批 Failed to fetch。
+    var WBS_ERR_THROTTLE_MS = 60000;
+    var WBS_ERR_THROTTLE_MAX = 3;
+    var wbsErrSeen = Object.create(null);
+    function wbsErrGate(kind, msg) {
+      var sig = kind + '|' + String(msg || '').slice(0, 160);
+      var now = Date.now();
+      var rec = wbsErrSeen[sig];
+      if (!rec) {
+        wbsErrSeen[sig] = { t: now, n: 1, muted: 0 };
+        return { log: true, mutedPrev: 0 };
+      }
+      if (now - rec.t >= WBS_ERR_THROTTLE_MS) {
+        var prev = rec.muted;
+        rec.t = now; rec.n = 1; rec.muted = 0;
+        return { log: true, mutedPrev: prev };
+      }
+      rec.n++;
+      if (rec.n <= WBS_ERR_THROTTLE_MAX) return { log: true, mutedPrev: 0 };
+      rec.muted++;
+      return { log: false, mutedPrev: 0 };
+    }
+
     function wbsReportErr(kind, ev) {
       var msg = '', stack = '';
       try {
@@ -2069,9 +2121,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         }
         else { msg = String(e); }
       } catch (_) {}
-      var line = '[wbscrash] ' + kind + ': ' + msg + (stack ? '\n' + stack : '');
+      var gate;
+      try { gate = wbsErrGate(kind, msg); } catch (_) { gate = { log: true, mutedPrev: 0 }; }
+      if (!gate.log) return;
+      var line = (gate.mutedPrev ? '[wbscrash] 上周期同类错误已抑制 ' + gate.mutedPrev + ' 次\n' : '')
+        + '[wbscrash] ' + kind + ': ' + msg + (stack ? '\n' + stack : '');
       try { console.error(line); } catch (_) {}
-      if (WBS_DIAGNOSTICS_ENABLED) {
+      if (WBS_DIAGNOSTICS_ENABLED && CAPS.apiTransport !== 'cdp') {
         try {
           fetch(API + '/api/breadcrumb', { method: 'POST', headers: { 'content-type': 'application/json', 'X-WorkDaddy-Token': WBS_API_TOKEN }, body: JSON.stringify({ msg: 'crash:' + kind + ':' + msg, extra: { stack: (stack || '').slice(0, 1500) } }) }).catch(function () {});
         } catch (_) {}
@@ -2202,6 +2258,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   var EXPLORE_SVG =
     '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">' +
     '<path fill="currentColor" d="M19 3a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H7.333L4 21.5c-.824.618-2 .03-2-1V6a3 3 0 0 1 3-3h14Zm-8 9H8a1 1 0 1 0 0 2h3a1 1 0 1 0 0-2Zm5-4H8a1 1 0 0 0-.117 1.993L8 10h8a1 1 0 0 0 .117-1.993L16 8Z"/></svg>';
+  // CodeBuddy 的工具栏是细线图标 + 24px 方形按钮。沿用上面的实心图标会显得比其他按钮重，
+  // 所以单独备一套 stroke 风格图标，只在 CAPS.nativeComposer 下使用。
+  var NATIVE_STASH_SVG =
+    '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M3 4a1 1 0 0 1 1-1h7l10 10a1.4 1.4 0 0 1 0 2l-6 6a1.4 1.4 0 0 1-2 0L3 11Z"/><circle cx="7.5" cy="7.5" r="1.5"/></svg>';
+  var NATIVE_EXPLORE_SVG =
+    '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M5 3h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H8l-5 3V5a2 2 0 0 1 2-2Z"/><path d="M7 8h10M7 13h6"/></svg>';
   var EXPLORE_PREMIUM_SVG =
     '<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>';
   var EXPLORE_CHECK_SVG =
@@ -2321,7 +2385,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   }
 
   function checkinHtml(a) {
-    if (WBS_PROFILE_IS_AI) return '';
+    // CodeBuddy 国际版没有签到接口（CAPS.checkin === false）⇒ 整块不渲染，免得显示永远「未签到」。
+    if (WBS_PROFILE_IS_AI || CAPS.checkin === false) return '';
     var c = a && a.checkin;
     var checked = !!(c && c.ok && !c.inactive);
     return '<span class="wbs-ck wbs-checkin-tag ' + (checked ? 'ok' : 'pending') + '" title="' + (checked ? '今日已签到' : '今日未签到') + '">' + (checked ? '今日已签到' : '今日未签到') + '</span>';
@@ -2401,7 +2466,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     headers['X-WorkDaddy-Token'] = WBS_API_TOKEN;
     request.headers = headers;
     delete request.responseType;
-    return fetch(API + path, request).then(function (r) {
+    // CodeBuddy 渲染进程受 CSP 限制，直连 fetch 打不到本地 daemon ⇒ 走 CDP binding 桥（形状与 Response 兼容）。
+    var response = CAPS.apiTransport === 'cdp' ? window.__wbsApiFetch(path, request, WBS_API_TOKEN) : fetch(API + path, request);
+    return response.then(function (r) {
       if (r.ok && opts.responseType === 'blob') return r.blob().then(function (blob) {
         return { content: blob, mimeType: 'application/octet-stream', count: Number(r.headers.get('X-WorkDaddy-Count') || 0) };
       });
@@ -2602,6 +2669,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   function build() {
     var lifecycle = createBuildLifecycle();
     var registerDisposer = lifecycle.registerDisposer;
+    // CodeBuddy 会重写 body ⇒ 面板和浮层都得能被"抢回来"。
+    // 非 codebuddy 客户端 nativePanelMount 恒为 null，这里退化成普通 appendChild。
+    var nativePanelMount = null;
+    function mountPersistentOverlay(node) {
+      node.setAttribute('data-wbs-panel-overlay', '');
+      if (CAPS.panelAppearance === 'light') node.setAttribute('data-wbs-appearance', 'light');
+      document.body.appendChild(node);
+      if (nativePanelMount) nativePanelMount.keep(node);
+    }
     var usageActivity = createUsageActivity({ document: document, window: window,
       now: Date.now,
       send: function () { return api('/api/usage', { method: 'POST' }); } });
@@ -3201,6 +3277,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     });
 
     var root = el('div', 'wbs-root');
+    // CodeBuddy IDE 是浅色底，面板沿用官方 --wb-* 变量会拿到深色残留 ⇒ 显式切浅色变量组。
+    if (CAPS.panelAppearance === 'light') root.classList.add('wbs-panel-light');
     root.setAttribute('data-wbs-profile', PROFILE_ID);
     if (!CAPS.theme) root.classList.add('wbs-no-theme');
     if (!CAPS.stashPrompt) root.classList.add('wbs-no-stash');
@@ -3224,7 +3302,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       '<div class="wbs-head-left">',
       '<div class="wbs-title-wrap"><div class="wbs-title-row">',
       '<button class="wbs-brand" id="wbs-title" type="button" title="点击打开官网">',
-      '<span class="wbs-brand-copy"><span class="wbs-title">' + WBS_BRAND + '</span><span class="wbs-version-line" id="wbs-version-line"></span></span>',
+      '<span class="wbs-brand-copy"><span class="wbs-title">' + WBS_PANEL_TITLE + '</span><span class="wbs-version-line" id="wbs-version-line"></span></span>',
       '</button>',
       '<button class="wbs-pick-btn" id="wbs-pick-btn" type="button" style="display:none" title="元素检查">🔍</button>',
       '<span class="wbs-health-status" id="wbs-health-status" aria-live="polite"></span>',
@@ -3254,7 +3332,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       '<div class="wbs-pane" data-pane="pc"></div>',
       '<div class="wbs-pane" data-pane="about"></div>',
       '</div>',
-      // 「运维」弹出层：账号策略与运维三张卡（账号自动切换 / 限流换号并续跑 / 上下文体检）。
+      // 「运维」弹出层：只放「上下文体检」。「账号自动切换 / 限流换号并续跑」已于 2026-10-15 移到账号页常驻。
       // 挂在 .wbs-panel 上而不是账号 pane 里 —— .wbs-body{overflow:hidden} 会把下拉层裁掉。
       '<div class="wbs-ops-popover" id="wbs-ops-popover" hidden role="dialog" aria-label="账号策略与运维">',
       '<div class="wbs-ops-head">',
@@ -3262,38 +3340,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       '<button class="wbs-ops-close" type="button" id="wbs-ops-close" title="关闭" aria-label="关闭">✕</button>',
       '</div>',
       '<div class="wbs-ops-body">' +
-        '<div class="wbs-pcard wbs-idle-card" id="wbs-idle-card">' +
-        // 折叠头：收起时也要能一眼看出「主账号是谁、多久切回、现在闲置多久」，否则收起来等于藏了功能
-        '<button class="wbs-idle-head" type="button" id="wbs-idle-toggle" aria-expanded="false" title="展开 / 折叠">' +
-        '<span class="wbs-idle-chevron" aria-hidden="true"></span>' +
-        '<span class="wbs-idle-title">账号自动切换</span>' +
-        '<span class="wbs-idle-summary" id="wbs-idle-summary"></span>' +
-        '</button>' +
-        '<div class="wbs-idle-body" id="wbs-idle-body">' +
-        '<div class="wbs-idle-row"><span class="wbs-idle-label">主账号</span>' +
-        '<select class="wbs-idle-select" id="wbs-idle-primary" aria-label="主账号"></select></div>' +
-        '<div class="wbs-idle-row"><span class="wbs-idle-label">闲置后自动切回主账号</span>' +
-        '<label class="wbs-switch wbs-idle-enabled" title="开启后：不在主账号上、且连续闲置超过阈值时自动切回主账号"><input type="checkbox" id="wbs-idle-enabled" aria-label="闲置后自动切回主账号"><span class="wbs-switch-slider"></span></label></div>' +
-        '<div class="wbs-idle-row"><span class="wbs-idle-label">闲置多久算不用了</span>' +
-        '<input class="wbs-idle-input" id="wbs-idle-minutes" type="number" min="5" max="1440" step="5" aria-label="闲置阈值（分钟）">' +
-        '<span class="wbs-idle-unit">分钟</span></div>' +
-        '<div class="wbs-idle-note" id="wbs-idle-note"></div>' +
-        '</div>' +
-        '</div>' +
-        '<div class="wbs-pcard wbs-failover-card collapsed" id="wbs-failover-card">' +
-        '<button class="wbs-fold-head" type="button" id="wbs-failover-toggle" aria-expanded="false" title="展开 / 折叠">' +
-        '<span class="wbs-fold-chevron" aria-hidden="true"></span>' +
-        '<span class="wbs-fold-title">限流时换号并续跑</span>' +
-        '<span class="wbs-fold-summary" id="wbs-failover-summary"></span>' +
-        '</button>' +
-        '<div class="wbs-fold-body">' +
-        '<div class="wbs-failover-note" id="wbs-failover-note"></div>' +
-        '<div class="wbs-failover-bar">' +
-        '<span class="wbs-failover-status" id="wbs-failover-status"></span>' +
-        '<button class="wbs-failover-go" type="button" id="wbs-failover-go">换号并续跑</button>' +
-        '</div>' +
-        '</div>' +
-        '</div>' +
         '<div class="wbs-pcard wbs-ca-card collapsed" id="wbs-ca-card">' +
         '<button class="wbs-fold-head" type="button" id="wbs-ca-toggle" aria-expanded="false" title="展开 / 折叠">' +
         '<span class="wbs-fold-chevron" aria-hidden="true"></span>' +
@@ -3315,11 +3361,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       '</div>',
     ].join('');
     document.body.appendChild(root);
+    if (CAPS.apiTransport === 'cdp') {
+      nativePanelMount = preserveNativePanelMount(document, root, MutationObserver);
+      registerDisposer(nativePanelMount);
+    }
     var versionLine = root.querySelector('#wbs-version-line');
     if (versionLine) {
       var wbVersion = wbsClientVersion(navigator.userAgent);
       var pluginVersion = WBS_VERSION && WBS_VERSION.indexOf('__WBS_') !== 0 ? WBS_VERSION : '';
-      versionLine.textContent = wbVersion ? wbVersion + (pluginVersion ? ' (' + pluginVersion + ')' : '') : (pluginVersion ? '(' + pluginVersion + ')' : '');
+      // CodeBuddy 没有"客户端版本"这个概念（面板不寄生在官方聊天页里），只报插件版本 + 品牌名。
+      versionLine.textContent = CAPS.apiTransport === 'cdp'
+        ? '(v' + pluginVersion + ' for ' + WBS_BRAND + ')'
+        : wbVersion ? wbVersion + (pluginVersion ? ' (' + pluginVersion + ')' : '') : (pluginVersion ? '(' + pluginVersion + ')' : '');
     }
     listen(window, 'workdaddy:automation-toast', function (event) {
       var detail = event && event.detail && typeof event.detail === 'object' ? event.detail : {};
@@ -3373,13 +3426,34 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // 显隐策略：直接监听 WorkBuddy 自己的「发送按钮」禁用态——输入框为空时发送按钮被禁用，
     // 此时隐藏暂存按钮；有内容（文字/图片/附件）时发送按钮可用，暂存按钮出现。
     // 这样无需自己去扫描 Slate 编辑器，和官方发送按钮行为完全一致。
+    if (CAPS.enhance === false) {
+      // 增强页整页不可用（CodeBuddy）⇒ 标签与面板都摘掉，别留一个点进去全空的壳。
+      var enhanceTab = root.querySelector('[data-tab="enhance"]');
+      var enhancePane = root.querySelector('[data-pane="enhance"]');
+      if (enhanceTab) enhanceTab.remove();
+      if (enhancePane) enhancePane.remove();
+    }
+    // ===== 轻量版（lite profile）：只摘页签按钮，**pane 容器一律保留在 DOM 里**。
+    // 原因：6203 之后的初始化会 querySelector 这些 pane 并直接操作（themePane 等），
+    // 提前 remove 会让后续拿到 null 而中断整段初始化。页签摘掉后用户再也切不过去，
+    // 非 active 的 pane 本来就是 display:none，等于功能关闭但零回归风险。
+    if (CAPS.lite) {
+      var liteTabs = ['theme', 'automations', 'pc'];
+      for (var lt = 0; lt < liteTabs.length; lt++) {
+        var liteBtn = root.querySelector('.wbs-tab[data-tab="' + liteTabs[lt] + '"]');
+        if (liteBtn) liteBtn.remove();
+      }
+    }
+
     var stashBtn = document.createElement('div');
-    stashBtn.className = 'wbs-stash-inline';
+    stashBtn.className = 'wbs-stash-inline' + (CAPS.nativeComposer ? ' wbs-composer-native' : '');
     stashBtn.style.display = 'none';
     stashBtn.setAttribute('role', 'button');
     stashBtn.setAttribute('tabindex', '0');
     stashBtn.title = '暂存提示词';
-    stashBtn.innerHTML = '<span class="wbs-stash-ico">' + STASH_SVG + '</span><span class="wbs-stash-txt">暂存提示词</span>';
+    stashBtn.innerHTML = '<span class="wbs-stash-ico">' + (CAPS.nativeComposer ? NATIVE_STASH_SVG : STASH_SVG) + '</span><span class="wbs-stash-txt">暂存提示词</span>';
+    // 原生按钮宽度写死会截断「暂存提示词」四字，展开前先量一次真实文本宽度。
+    listen(stashBtn, 'mouseenter', syncNativeStashLabelWidth);
     applyI18n(stashBtn);
     // 防输入框失焦：点击按钮时不把焦点从输入框抢走（退格/打字持续有效）
     stashBtn.addEventListener('mousedown', function (e) { e.preventDefault(); });
@@ -3387,12 +3461,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
     // 探索菜单按钮：复用暂存提示词按钮的样式类（同款圆钮），hover 不变宽；悬浮弹出菜单
     var exploreBtn = document.createElement('div');
-    exploreBtn.className = 'wbs-stash-inline wbs-explore-inline';
+    exploreBtn.className = 'wbs-stash-inline wbs-explore-inline' + (CAPS.nativeComposer ? ' wbs-composer-native' : '');
     exploreBtn.setAttribute('role', 'button');
     exploreBtn.setAttribute('tabindex', '0');
     exploreBtn.addEventListener('mousedown', function (e) { e.preventDefault(); }); // 防输入框失焦
     exploreBtn.innerHTML =
-      '<span class="wbs-explore-ico">' + EXPLORE_SVG + '</span>' +
+      '<span class="wbs-explore-ico">' + (CAPS.nativeComposer ? NATIVE_EXPLORE_SVG : EXPLORE_SVG) + '</span>' +
       '<div class="wbs-explore-pop" role="tooltip">' +
       '<div class="wbs-explore-card">' +
       '<div class="wbs-explore-list" id="wbs-explore-list"></div>' +
@@ -3456,7 +3530,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // Only the popup leaves the official toolbar. Its body-level stacking context
     // keeps it above the usage summary even when the composer creates its own layer.
     function mountExplorePopover(button, popup) {
-      document.body.appendChild(popup);
+      // 增强整体关闭（CodeBuddy）：弹层不挂载，但保持返回契约，调用方不必到处判空。
+      if (CAPS.enhance === false) return { close: function () {}, open: function () {}, destroy: function () {} };
+      mountPersistentOverlay(popup);
       var timer = null;
       var listeners = [];
       function listen(target, name, handler, options) {
@@ -3536,7 +3612,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       selectionQuote: readSelectionQuoteEnabled(),
       fork: readForkEnabled(),
       phrase: true,
-      themeTakeover: true,
+      themeTakeover: CAPS.themeTakeover !== false,
       phrases: [],
       qpBatch: false,
       qpSel: {},
@@ -3547,7 +3623,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (!d || !d.ok) return;
       sessState.stash = !!d.stashEnabled;
       sessState.phrase = !!d.phraseEnabled;
-      sessState.themeTakeover = d.themeTakeoverEnabled !== false;
+      sessState.themeTakeover = CAPS.themeTakeover !== false && d.themeTakeoverEnabled !== false;
       sessState.phrases = Array.isArray(d.phrases) ? d.phrases : [];
       // 同步 UI：会话开关 + 快捷短语列表区显隐
       var pane0 = enhancePane;
@@ -4054,11 +4130,21 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       exploreBtn.style.top = stashBtn.style.top || '0px';
     }
     // 使用实时主题变量，颜色变化由 CSS 继承处理，无需监听深浅色属性。
+    // CodeBuddy 原生按钮宽 24px、文字放大后会溢出：把量到的宽度写进自定义属性，CSS 用它做展开宽度。
+    function syncNativeStashLabelWidth() {
+      if (!CAPS.nativeComposer) return;
+      var label = stashBtn.querySelector('.wbs-stash-txt');
+      var width = label && Math.ceil(label.scrollWidth);
+      if (width > 0 && stashBtn.style.getPropertyValue('--wbs-stash-text-width') !== width + 'px') {
+        stashBtn.style.setProperty('--wbs-stash-text-width', width + 'px');
+      }
+    }
     function applyThemeButtonColors() {
-      stashBtn.style.background = 'var(--wb-button-primary-bg)';
-      stashBtn.style.color = 'var(--wb-button-primary-fg)';
-      exploreBtn.style.background = 'var(--wb-button-primary-bg)';
-      exploreBtn.style.color = 'var(--wb-button-primary-fg)';
+      // CodeBuddy 的 --wb-* 全不存在 ⇒ 走它自己的主按钮色变量，否则按钮会变透明。
+      var bg = CAPS.nativeComposer ? 'var(--cb-button-primary)' : 'var(--wb-button-primary-bg)';
+      var fg = CAPS.nativeComposer ? 'var(--cb-button-primary-foreground)' : 'var(--wb-button-primary-fg)';
+      stashBtn.style.background = exploreBtn.style.background = bg;
+      stashBtn.style.color = exploreBtn.style.color = fg;
     }
     function positionStash() {
       // 新版布局没有 voice-mic-wrap：操作栏按钮行位于输入框正下方（与输入框同祖先容器）。
@@ -4149,6 +4235,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var stashSyncThrottle;
     function syncStash() {
       if (!alive) return;
+      if (CAPS.enhance === false) {
+        // 增强能力整体关闭（CodeBuddy）：按钮不参与定位，直接摘掉，免得停在旧坐标上。
+        stashBtn.remove();
+        exploreBtn.remove();
+        exploreMenu.close();
+        return;
+      }
       clearTimeout(stashSyncThrottle);
       // 节流 30ms：比 120ms 响应更快（接近原生 React 按钮的体感），仍能合并快速连续触发
       stashSyncThrottle = setBuildTimeout(function () {
@@ -4176,7 +4269,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // 监听发送按钮自身的属性变化（class/disabled/aria-disabled 任一改变都重算显隐）
     var sendObserver = null, watchedSend = null;
     function watchSend() {
-      if (!alive) return;
+      if (!alive || CAPS.enhance === false) return;
       var send = findSendButton();
       if (send === watchedSend) return;
       if (sendObserver) { sendObserver.disconnect(); sendObserver = null; }
@@ -4190,7 +4283,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // 操作栏出现 / 子元素被替换时，重新定位发送按钮并绑定监听
     var rowObserver = null, watchedRow = null, bodyObserver = null;
     function watchRow() {
-      if (!alive) return;
+      if (!alive || CAPS.enhance === false) return;
       var row = findActionRow();
       if (!row || typeof MutationObserver === 'undefined') {
         if (rowObserver) { rowObserver.disconnect(); rowObserver = null; }
@@ -4730,7 +4823,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     forkTooltip.setAttribute('role', 'tooltip');
     forkTooltip.appendChild(el('span', 'wbs-fork-tooltip-title', '分支到新会话'));
     forkTooltip.appendChild(el('span', 'wbs-fork-tooltip-description', '复制到这条回复为止的聊天内容，在当前工作区继续聊；原会话不变。'));
-    document.body.appendChild(forkTooltip);
+    mountPersistentOverlay(forkTooltip);
     applyI18n(forkTooltip);
     function hideForkTooltip() { forkTooltip.classList.remove('is-visible'); }
     function showForkTooltip(button) {
@@ -4870,7 +4963,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
     // 详情面板 / 文档预览 / 成品卡（present_files 卡片）这些区域与注入功能无关。
     // 大文档渲染会灌进来上万条 mutation，整批都不相关时直接丢弃，别进 onDomChange。
-    var WBS_IRRELEVANT_SEL = ".detail-panel-container,.detail-layout,.detail-main,.detail-sidebar,.cb-overview-panel,[class*=\"preview-slot\"],[class*=\"docs-viewer\"],[class*=\"artifact-view\"],[class*=\"wbs-token-rate-shield\"]";
+    var WBS_IRRELEVANT_SEL = ".detail-panel-container,.detail-layout,.detail-main,.detail-sidebar,.cb-overview-panel,[class*=\"preview-slot\"],[class*=\"docs-viewer\"],[class*=\"artifact-view\"]";
     function wbsMutationsRelevant(records) {
       if (!records || !records.length) return false;
       for (var i = 0; i < records.length; i++) {
@@ -4928,13 +5021,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     syncThemeAuditRoot();
     if (themeAudit) setBuildInterval(syncThemeAuditRoot, 1200);
     // 暂存项暂停守护：600ms 周期轮询，保证暂存提示词绝不被自动发送（见 guardStashedPause 注释）
-    setBuildInterval(guardStashedPause, 600);
+    if (CAPS.enhance !== false) setBuildInterval(guardStashedPause, 600);
     watchRow();
     watchSend();
     // 输入框输入/粘贴/中文合成结束也直接触发，覆盖 React 仅改内部状态、不动属性的情况
-    listen(document, 'input', onInputSync);
-    listen(document, 'compositionend', onInputSync);
-    listen(document, 'keyup', onInputSync);
+    if (CAPS.enhance !== false) {
+      // 暂存按钮的显隐依赖输入内容变化；增强关闭时没有这个按钮，监听纯属浪费。
+      listen(document, 'input', onInputSync);
+      listen(document, 'compositionend', onInputSync);
+      listen(document, 'keyup', onInputSync);
+    }
     listen(window, 'scroll', onInputSync, true);
     listen(window, 'resize', onInputSync);
     // 暂存项禁拖：捕获阶段拦截 dragstart（只 preventDefault/stopPropagation，不改 React 管理的 draggable 属性，
@@ -5319,7 +5415,19 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         if (!WBS_COMPAT.isModernQueueAdapter(adapter)) return;
         var sessionId = adapter && adapter.currentActiveSessionId;
         if (!sessionId || typeof adapter.getConversationMessageQueue !== 'function') return;
-        Promise.resolve(adapter.getConversationMessageQueue(sessionId)).catch(function () {});
+        if (CAPS.enhance === false) return;
+        // 官方队列块里带着我们写的 _meta.workdaddyStash 标记 ⇒ 内存注册表被重建后靠它把暂存项认回来。
+        Promise.resolve(adapter.getConversationMessageQueue(sessionId)).then(function (snapshot) {
+          var items = snapshot && Array.isArray(snapshot.items) ? snapshot.items : [];
+          var ids = stashIds(sessionId);
+          items.forEach(function (item) {
+            var blocks = item && (item.contentBlocks || item.blocks || item.content);
+            if (item && item.id != null && Array.isArray(blocks) && blocks.some(function (b) {
+              return b && b._meta && b._meta.workdaddyStash === true;
+            }) && ids.indexOf(String(item.id)) < 0) ids.push(String(item.id));
+          });
+          if (ids.length) { syncQueueDomIds(sessionId, snapshot); syncQueueTags(); }
+        }).catch(function () {});
       } catch (e) {}
     }
 
@@ -5354,7 +5462,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
     // 后台预热只做只读查找，不触碰用户操作；点击路径随后直接复用缓存。
     function warmModernQueueAdapter() {
-      if (!alive || window.__wbsAdapter) return;
+      if (!alive || CAPS.enhance === false || window.__wbsAdapter) return;
       try { findWbsAdapter(); } catch (e) {}
     }
     setBuildTimeout(warmModernQueueAdapter, 0);
@@ -5536,7 +5644,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       return !isStashQueueItem(pendings[0], ids, arr);
     }
     function guardStashedPause() {
-      if (!alive) return;
+      if (!alive || CAPS.enhance === false) return;
       var adapter = window.__wbsAdapter;
       if (!adapter || typeof adapter.getConversationMessageQueue !== 'function' ||
           typeof adapter.pauseConversationMessageQueue !== 'function' ||
@@ -5742,6 +5850,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           var cur = node[fk], seen = 0;
           while (cur && seen < 120) {
             var p = cur.memoizedProps;
+            // CodeBuddy：ChatInput 的 ref 上是活的 Slate 句柄，clear() 会连模型一起清；
+            // 用 execCommand 删只会清 DOM，Slate 里还留着内容 ⇒ 下次输入会"复活"。
+            var nativeRef = cur.ref && cur.ref.current;
+            if (CAPS.nativeComposer && nativeRef && typeof nativeRef.clear === 'function' &&
+                typeof nativeRef.prepareBeforeSubmit === 'function') {
+              try { nativeRef.clear(); } catch (_) { return false; }
+              return true;
+            }
             var store = p && p.store;
             if (WBS_COMPAT.isComposerStore(store, sessionId)) {
               try { store.api.clear(); } catch (_) { return false; }
@@ -5886,6 +6002,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       try {
         var blocks = contentToBlocks(content);
         if (!blocks.length) return Promise.reject(new Error('输入框内容为空'));
+        // 在官方 block 的 _meta 里留一个不可见标记：重注入 / 会话重建后靠它认回暂存项，
+        // 不用去匹配用户文本，也不会把普通队列项误判成暂存项。
+        blocks = blocks.map(function (block) {
+          var copy = Object.assign({}, block);
+          copy._meta = Object.assign({}, (block && block._meta) || {}, { workdaddyStash: true });
+          return copy;
+        });
         var cachedAdapter = window.__wbsAdapter || findWbsAdapter();
         var modernQueue = WBS_COMPAT.isModernQueueAdapter(cachedAdapter) || WBS_COMPAT.hasModernQueueSurface(document);
         var ready = modernQueue
@@ -6021,7 +6144,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     });
 
     var fab = root.querySelector('.wbs-fab');
-    var fabAppearance = createFabAppearance({ fab: fab, storage: localStorage, key: 'wbs-fab-style-' + PROFILE_ID });
+    var fabAppearance = createFabAppearance({
+      fab: fab, storage: localStorage, key: 'wbs-fab-style-' + PROFILE_ID,
+      // CodeBuddy 用原生细线图标，--wb-* 不存在 ⇒ 只保留黑白两档，默认黑。
+      defaultStyle: CAPS.nativeComposer ? 'black' : CAPS.robotStyle,
+      allowedStyles: CAPS.nativeComposer ? ['white', 'black'] : undefined,
+    });
     var panel = root.querySelector('.wbs-panel');
     /* ---- 面板可拖拽缩放（2026-09-22）----
        面板尺寸是硬约束（默认 720×650）。账号多、或体检结果长时，怎么排都挤 —— 给用户一个
@@ -6125,7 +6253,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       statusPopover.className = 'wbs-status-popover wbs-daily-popover';
       statusPopover.setAttribute('role', 'tooltip');
       statusPopover.hidden = true;
-      document.body.appendChild(statusPopover);
+      mountPersistentOverlay(statusPopover);
       return statusPopover;
     }
 
@@ -6232,9 +6360,42 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="export" title="选择账号并输入密码后导出备份" aria-label="导出账号">' + EXPORT_ICON + '</button>' +
         '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="import" title="从加密导出文件导入账号备份" aria-label="导入账号">' + IMPORT_ICON + '</button>' +
         '<button class="wbs-acct-io wbs-acct-icon" type="button" data-act="account-more" title="账号设置" aria-label="账号设置"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.75a2 2 0 0 1 2 1.4l.4 1.1 1.15.47 1.06-.48a2 2 0 0 1 2.4.45l.8.8a2 2 0 0 1 .45 2.4l-.48 1.06.47 1.15 1.1.4a2 2 0 0 1 0 3.8l-1.1.4-.47 1.15.48 1.06a2 2 0 0 1-.45 2.4l-.8.8a2 2 0 0 1-2.4.45l-1.06-.48-1.15.47-.4 1.1a2 2 0 0 1-3.8 0l-.4-1.1-1.15-.47-1.06.48a2 2 0 0 1-2.4-.45l-.8-.8a2 2 0 0 1-.45-2.4l.48-1.06-.47-1.15-1.1-.4a2 2 0 0 1 0-3.8l1.1-.4.47-1.15-.48-1.06a2 2 0 0 1 .45-2.4l.8-.8a2 2 0 0 1 2.4-.45l1.06.48 1.15-.47.4-1.1A2 2 0 0 1 12 2.75Z"/><circle cx="12" cy="12.5" r="3"/></svg></button>' +
-        // 「运维」：账号策略与运维三卡（自动切换 / 限流换号续跑 / 上下文体检）的入口。
-        // 三卡不再常驻 —— 常驻会把账号列表压到只剩几行（原占 ~135px、展开 ~245px）。
+        // 「运维」：入口现在只剩「上下文体检」（切号相关的两张卡已移到账号列表上方常驻）。
         '<button class="wbs-acct-io wbs-acct-icon wbs-acct-ops" type="button" data-act="ops" title="账号策略与运维" aria-label="账号策略与运维" aria-expanded="false">' + '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h6M14 7h6M4 17h10M18 17h2"/><circle cx="12" cy="7" r="2"/><circle cx="16" cy="17" r="2"/></svg>' + '<span class="wbs-ops-dot" id="wbs-ops-dot" hidden></span></button>' +
+        '</div>' +
+        '</div>' +
+        '<div class="wbs-pcard wbs-idle-card" id="wbs-idle-card">' +
+        // 折叠头：收起时也要能一眼看出「主账号是谁、多久切回、现在闲置多久」，否则收起来等于藏了功能
+        '<button class="wbs-idle-head" type="button" id="wbs-idle-toggle" aria-expanded="false" title="展开 / 折叠">' +
+        '<span class="wbs-idle-chevron" aria-hidden="true"></span>' +
+        '<span class="wbs-idle-title">账号自动切换</span>' +
+        '<span class="wbs-idle-summary" id="wbs-idle-summary"></span>' +
+        '</button>' +
+        '<div class="wbs-idle-body" id="wbs-idle-body">' +
+        '<div class="wbs-idle-row"><span class="wbs-idle-label">主账号</span>' +
+        '<select class="wbs-idle-select" id="wbs-idle-primary" aria-label="主账号"></select></div>' +
+        '<div class="wbs-idle-row"><span class="wbs-idle-label">闲置后自动切回主账号</span>' +
+        '<label class="wbs-switch wbs-idle-enabled" title="开启后：不在主账号上、且连续闲置超过阈值时自动切回主账号"><input type="checkbox" id="wbs-idle-enabled" aria-label="闲置后自动切回主账号"><span class="wbs-switch-slider"></span></label></div>' +
+        '<div class="wbs-idle-row"><span class="wbs-idle-label">闲置多久算不用了</span>' +
+        '<input class="wbs-idle-input" id="wbs-idle-minutes" type="number" min="5" max="1440" step="5" aria-label="闲置阈值（分钟）">' +
+        '<span class="wbs-idle-unit">分钟</span></div>' +
+        '<div class="wbs-idle-note" id="wbs-idle-note"></div>' +
+        '</div>' +
+        '</div>' +
+        '<div class="wbs-pcard wbs-failover-card collapsed" id="wbs-failover-card">' +
+        '<button class="wbs-fold-head" type="button" id="wbs-failover-toggle" aria-expanded="false" title="展开 / 折叠">' +
+        '<span class="wbs-fold-chevron" aria-hidden="true"></span>' +
+        '<span class="wbs-fold-title">限流时换号并续跑</span>' +
+        '<span class="wbs-fold-summary" id="wbs-failover-summary"></span>' +
+        '</button>' +
+        '<div class="wbs-fold-body">' +
+        '<div class="wbs-idle-row"><span class="wbs-idle-label">被限流时自动切号续跑</span>' +
+        '<label class="wbs-switch" title="开启后：检测到限流横幅自动换号并接着做。对应自动化任务「模型限流自动切号续跑」（任务本体仍在自动化页，可看日志）"><input type="checkbox" id="wbs-failover-auto"><span class="wbs-switch-slider"></span></label></div>' +
+        '<div class="wbs-failover-note" id="wbs-failover-note"></div>' +
+        '<div class="wbs-failover-bar">' +
+        '<span class="wbs-failover-status" id="wbs-failover-status"></span>' +
+        '<button class="wbs-failover-go" type="button" id="wbs-failover-go">换号并续跑</button>' +
+        '</div>' +
         '</div>' +
         '</div>' +
         '<div class="wbs-acct-list"></div>' +
@@ -6599,6 +6760,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         }
       }
       if (statusNode) statusNode.textContent = statusText;
+      var autoSw = failoverCard.querySelector('#wbs-failover-auto');
+      if (autoSw) autoSw.checked = autoOn;
       if (goBtn) {
         goBtn.disabled = running;
         goBtn.setAttribute('aria-busy', running ? 'true' : 'false');
@@ -6626,6 +6789,19 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     if (failoverCard) {
       // 先翻一次：说明行要等 /api/limit-failover/status 回来才有内容，但标题与按钮是静态的。
       applyI18n(failoverCard);
+      var failoverAutoSw = failoverCard.querySelector('#wbs-failover-auto');
+      if (failoverAutoSw) failoverAutoSw.addEventListener('change', function () {
+        var sw = this, next = !!sw.checked;
+        sw.disabled = true;
+        api('/api/automations/bulk', { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ids: ['mu0mg334-rate-limit-auto-switch'], action: next ? 'enable' : 'disable' }) })
+          .then(function () {
+            toast(next ? '已开启：被限流时自动切号续跑' : '已关闭：被限流时自动切号续跑', false, root);
+            return refreshFailoverCard();
+          })
+          .catch(function (e) { sw.checked = !next; toast((e && e.message) || '设置失败', true, root); })
+          .finally(function () { sw.disabled = false; });
+      });
       var failoverGoBtn = failoverCard.querySelector('#wbs-failover-go');
       if (failoverGoBtn) failoverGoBtn.addEventListener('click', function () {
         failoverGoBtn.disabled = true;
@@ -7013,7 +7189,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       popup.setAttribute('role', 'region'); popup.setAttribute('aria-label', '按剩余天数汇总积分');
       popup.hidden = true;
       button.setAttribute('aria-controls', popup.id);
-      document.body.appendChild(popup);
+      mountPersistentOverlay(popup);
       var hideTimer;
       function hide() { clearTimeout(hideTimer); popup.hidden = true; button.setAttribute('aria-expanded', 'false'); }
       function deferHide() { clearTimeout(hideTimer); hideTimer = setBuildTimeout(hide, 160); }
@@ -7078,7 +7254,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       popup.innerHTML = '<div class="wbs-account-note-head"><label for="wbs-account-note-input">账号备注</label><button type="button" class="wbs-icon-btn" data-note-close title="关闭" aria-label="关闭"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4 4 8 8m0-8-8 8"/></svg></button></div>' +
         '<textarea id="wbs-account-note-input" maxlength="2000" placeholder="暂无备注，点击添加…" rows="4"></textarea>' +
         '<div class="wbs-account-note-footer"><span role="status" aria-live="polite"></span><button type="button" class="wbs-modal-btn" data-note-cancel>取消</button><button type="button" class="wbs-modal-btn primary" data-note-save>保存</button></div>';
-      document.body.appendChild(popup);
+      mountPersistentOverlay(popup);
       var input = popup.querySelector('textarea');
       var save = popup.querySelector('[data-note-save]');
       var cancel = popup.querySelector('[data-note-cancel]');
@@ -9545,7 +9721,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var box = 'padding:8px 10px;border-radius:8px;background:var(--wb-bg-tertiary,#f5f5f5);'
           + 'font-size:11px;line-height:1.75;margin:8px 0';
         // ⚠️ 2026-10-07 改**折叠卡**（默认收起）——
-        //    原先平铺展开时，本卡 + 本地子 Agent 卡会把上面的「自动化」列表挤到只剩一点：
+        //    原先平铺展开时，本卡会把上面的「自动化」列表挤到只剩一点：
         //    `.wbs-auto-card{flex:1}` 抢不过「按内容撑开」的卡片（min-height:auto 压缩不动）。
         //    折叠后两卡各占一行，自动化列表拿回主要空间。
         //    交互语言与账号页三卡（限流换号 / 上下文体检）完全一致，折叠状态按卡片 id 持久化。
@@ -9608,109 +9784,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         }
       }
 
-      /* ⭐ 2026-10-01（用户需求）：把「你有一个可用的本地子 Agent」做成**可开关的提醒**，
-         并把每次派活记下来，便于分析它擅长什么。
-         · 提醒写进官方全局自定义指令（settings.personalization.customPrompt）
-           ⇒ **每个会话开局都会看到**（解决"上下文一多就忘了它存在"）
-         · 关闭时**既不提醒也不注入**：规则整段从 customPrompt 摘掉，用户自己的指令原样保留
-         · 使用记录来自会话 jsonl（**只读**），不依赖任何外部服务 */
-      function wbsAgentCardHTML() {
-        var note = 'padding:8px 10px;border-radius:8px;background:var(--wb-bg-tertiary,#f5f5f5);'
-          + 'font-size:11px;line-height:1.75;margin:8px 0';
-        // ⚠️ 2026-10-07 同官方卡：改折叠卡（默认收起），把空间让给上面的自动化列表。
-        //    摘要行显示开关状态（#wbs-agent-sub，由 wbsLoadAgent 填充）。
-        return '<div class="wbs-pcard collapsed" id="wbs-agent-card">'
-          + '<button class="wbs-fold-head" type="button" aria-expanded="false" title="展开 / 折叠">'
-          + '<span class="wbs-fold-chevron" aria-hidden="true"></span>'
-          + '<span class="wbs-fold-title">本地子 Agent</span>'
-          + '<span class="wbs-fold-summary" id="wbs-agent-sub"></span>'
-          + '</button>'
-          + '<div class="wbs-fold-body">'
-          + '<label style="display:flex;align-items:flex-start;gap:8px;margin:8px 0;font-size:12px;cursor:pointer">'
-          + '<input type="checkbox" id="wbs-agent-toggle" style="margin-top:3px">'
-          + '<span>在每个会话里提醒 AI 可用（关闭后既不提醒也不注入）</span></label>'
-          // [2026-10-01 注入时机缺口] 实测：开关写入的是官方 customPrompt，而它由官方在
-          // 「**每轮用户消息**」时读取 ⇒ 已经进行中的会话**不会立刻**看到新内容
-          // （本会话实证：10:20 开启 → 10:42 才进上下文）。
-          // 插件无法强制刷新，所以**必须把这件事告诉用户**，否则会以为「开了没用」。
-          + '<div style="' + note + ';background:var(--wbs-warn-bg,#fff8ec);color:#8a5a00">'
-          + '<b>生效时机</b>：写进的是官方「全局自定义指令」，由官方在<b>每轮用户消息</b>时读取。'
-          + '所以<b>当前正在进行的会话不会立刻看到</b> —— 发下一条消息时才生效。'
-          + '</div>'
-          + '<div style="' + note + '" data-wbs-i18n-skip id="wbs-agent-usage"></div>'
-          + '</div>'
-          + '</div>';
-      }
-
-      function wbsLoadAgent() {
-        var usageHost = automationPane.querySelector('#wbs-agent-usage');
-        var toggle = automationPane.querySelector('#wbs-agent-toggle');
-        var subEl = automationPane.querySelector('#wbs-agent-sub');
-        if (!usageHost || !toggle) return;
-
-        fetch(API + '/api/agent-hint', { headers: { 'X-WorkDaddy-Token': WBS_API_TOKEN } })
-          .then(function (r) { return r.json(); })
-          .then(function (state) {
-            toggle.checked = !!(state && state.enabled);
-            if (subEl) subEl.textContent = (state && state.enabled) ? '提醒已开' : '提醒已关';
-          })
-          .catch(function () {});
-
-        toggle.addEventListener('change', function () {
-          var want = !!toggle.checked;
-          fetch(API + '/api/agent-hint-set', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', 'X-WorkDaddy-Token': WBS_API_TOKEN },
-            body: JSON.stringify({ enabled: want }),
-          }).then(function (r) { return r.json(); }).then(function (state) {
-            toggle.checked = !!(state && state.enabled);
-            if (subEl) subEl.textContent = state && state.enabled ? '提醒已开' : '提醒已关';
-            toast(state && state.enabled
-              ? '已开启：下一条消息起生效（官方在每轮用户消息时读取）'
-              : '已关闭：下一条消息起不再提醒、也不再注入', false, root);
-          }).catch(function () {
-            toggle.checked = !want;   // 失败回滚勾选状态，别让界面骗人
-            toast('设置失败', true, root);
-          });
-        });
-
-        fetch(API + '/api/agent-usage', { headers: { 'X-WorkDaddy-Token': WBS_API_TOKEN } })
-          .then(function (r) { return r.json(); })
-          .then(function (result) {
-            var s = (result && result.summary) || {};
-            if (!s.total) { usageHost.innerHTML = '暂无派活记录'; return; }
-            var groups = Object.keys(s.byGroup || {}).sort(function (a, b) {
-              return s.byGroup[b].count - s.byGroup[a].count;
-            });
-            var rows = groups.map(function (name) {
-              var g = s.byGroup[name];
-              return '<div style="display:flex;gap:8px;justify-content:space-between">'
-                + '<span>' + wbsOfficialEsc(name) + '</span>'
-                + '<span style="opacity:.75">' + g.count + ' 次 · 成功 ' + (g.succeeded || 0)
-                + (g.failed ? '，失败 ' + g.failed : '') + '</span></div>';
-            }).join('');
-            usageHost.innerHTML =
-              '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px">'
-              + '<span>派活次数 <b>' + s.total + '</b></span>'
-              + '<span>成功率 <b>' + s.successRate + '%</b></span>'
-              + '<span>本地承担 <b>' + s.localCount + '</b></span>'
-              + '<span>漏到云端 <b>' + s.fallbackCount + '</b></span>'
-              + (s.unknownCount ? '<span>被中断 <b>' + s.unknownCount + '</b></span>' : '')
-              + '</div>'
-              + '<div style="opacity:.6;font-size:11px;margin-bottom:6px">成功率的分母是「已有结果的派活」</div>'
-              + (s.sampleWarning ? '<div style="opacity:.6;font-size:11px;margin-bottom:4px">' + wbsOfficialEsc(s.sampleWarning) + '</div>' : '')
-              + '<div style="opacity:.75;margin-bottom:4px">按任务类别</div>' + rows;
-          })
-          .catch(function () { usageHost.innerHTML = '读不到使用记录'; });
-      }
-
-      automationPane.insertAdjacentHTML('beforeend', wbsAgentCardHTML());
-      wbsLoadAgent();
       automationPane.insertAdjacentHTML('beforeend', wbsOfficialCardHTML());
       wbsLoadOfficial();
-      // [2026-10-07] 两张卡接上折叠交互（复用账号页的 setupFoldCard —— 同一 build() 作用域）。
+      // [2026-10-07] 单卡接上折叠交互（复用账号页的 setupFoldCard —— 同一 build() 作用域）。
       // 不调这两行的话卡片会**永远处于 collapsed**（默认类在 HTML 里），用户点不开。
-      setupFoldCard(automationPane.querySelector('#wbs-agent-card'));
       setupFoldCard(automationPane.querySelector('#wbs-official-card'));
       automationPane.querySelector('#wbs-auto-import').addEventListener('click', function () { automationPane.querySelector('#wbs-auto-import-file').click(); });
       automationPane.querySelector('#wbs-auto-import-file').addEventListener('change', readAutomationImport);
@@ -10349,38 +10426,70 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       return text;
     }
 
-    function loadSessions() {
+    // 上游 1.2.18：后台刷新（自动复制收尾 / 延迟重载）不能把用户正在勾选的列表冲掉 ——
+    // 有勾选、在批量模式、有弹窗打开、或页面不可见时，一律不做静默刷新。
+    function canRefreshSessions() {
+      return alive && sessionsPane && sessionsPane.classList.contains('active') && !document.hidden &&
+        !sessionsState.batchMode &&
+        !Object.keys(sessionsState.selected || {}).some(function (id) { return sessionsState.selected[id]; }) &&
+        !(sessionsState.autoCopyJob && /^(queued|running)$/.test(sessionsState.autoCopyJob.status)) &&
+        !Array.from(sessionsPane.querySelectorAll('.wbs-modal-mask, .wbs-panel-modal-mask')).some(function (mask) {
+          return !mask.hidden && mask.getClientRects().length > 0;
+        });
+    }
+    function refreshSessionsSilently() {
+      if (!canRefreshSessions()) return;
+      return loadSessions({ silent: true });
+    }
+    function loadSessions(options) {
       if (!sessionsPane) return;
       var listEl = sessionsPane.querySelector('#wbs-sess-list');
       if (!listEl) return;
+      var silent = !!(options && options.silent);
+      if (silent && !canRefreshSessions()) return;
       // 【BUG5 修复】已有列表时不再整块替换成「加载中…」——那会让所有分组先视觉收起、数据回来再展开，
       //   自动刷新（切号后同步收尾）时就表现为连续多次「收起又展开」。只有首次（列表为空）才给占位。
       if (!listEl.children.length) listEl.innerHTML = '<div class="wbs-empty">加载中…</div>';
+      // 竞态防护：自动刷新与用户操作可能并发，旧响应不许覆盖新数据。
+      var serial = sessionsState.readSerial = (sessionsState.readSerial || 0) + 1;
+      // 静默刷新前记快照：数据没变就跳过重渲染，避免面板无意义地闪一下。
+      var snapshot = silent ? JSON.stringify([sessionsState.all, sessionsState.totalBytes, sessionsState.autoCopy, sessionsState.autoCopyAll]) : null;
+      var listScroll = silent ? listEl.scrollTop : 0;
       // uid: undefined=当前账号(不传)，''=全部账号，具体值=指定账号
       var url = '/api/sessions?range=' + (sessionsState.range || '7d');
       if (sessionsState.uid !== undefined) url += '&uid=' + encodeURIComponent(sessionsState.uid);
       api(url).then(function (d) {
+        if (!alive || serial !== sessionsState.readSerial) return;
         // 任务会话（is_playground=1）保留在列表中，由渲染层归入「任务」分组展示与操作。
         // A10：all 保留全量结果（体积筛选从它派生），totalBytes 是全量账号总量。
-        sessionsState.all = ((d && d.sessions) || []);
-        sessionsState.totalBytes = (d && typeof d.totalBytes === 'number') ? d.totalBytes : null;
+        var nextAll = ((d && d.sessions) || []);
+        var nextTotal = (d && typeof d.totalBytes === 'number') ? d.totalBytes : null;
+        var nextAutoCopy = (d && d.autoCopy) || null;
+        var nextAutoCopyAll = !!(d && d.autoCopyAll);
+        if (silent && snapshot === JSON.stringify([nextAll, nextTotal, nextAutoCopy, nextAutoCopyAll])) return;
+        sessionsState.all = nextAll;
+        sessionsState.totalBytes = nextTotal;
         sessionsState.list = sessSizeFiltered();
-        sessionsState.autoCopy = (d && d.autoCopy) || null;
-        sessionsState.autoCopyAll = !!(d && d.autoCopyAll);
-        sessionsState.selected = {};
+        sessionsState.autoCopy = nextAutoCopy;
+        sessionsState.autoCopyAll = nextAutoCopyAll;
+        // 静默刷新保留勾选：自动收尾重载不该把用户选中的会话清掉。
+        if (!silent) sessionsState.selected = {};
         // 【BUG5 修复】不再清空 wsExpanded。切号后台同步收尾时 watchAutoCopyProgress 会自动调
         //   loadSessions()，而旧实现每次都把「任务 / 空间」分组的展开条数重置回默认 2 条 ⇒ 用户看到
         //   「一直收起又展开、连续多次」。wsExpanded 的 key 是 workspace 路径 / __TASKS__，与账号无关，
         //   保留它对任何一次刷新都更符合预期。
         renderSessions();
+        if (silent) listEl.scrollTop = listScroll;
         // 筛选变化后退出批量模式（勾选框隐藏 + 恢复工具栏右侧按钮）
-        if (sessionsState.batchMode) {
+        if (!silent && sessionsState.batchMode) {
           sessionsState.batchMode = false;
           setSessBatchBar(false);
         }
         updateSessCount();
       }).catch(function (e) {
-        listEl.innerHTML = '<div class="wbs-empty">会话加载失败: ' + esc(e.message || e) + '</div>';
+        if (!silent && alive && serial === sessionsState.readSerial) {
+          listEl.innerHTML = '<div class="wbs-empty">会话加载失败: ' + esc(e.message || e) + '</div>';
+        }
       });
     }
 
@@ -11346,12 +11455,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
 
     // ===== 模型 pane（当前模型 + WorkDaddy 本地备份） =====
-    // ⭐ 2026-10-01：模型页整合「子 Agent 能力」——
-    //    agentDefaults 来自 /api/models 的 agentCatalog（后端已用 defaults 兜底，前端**不猜**）
-    //    agentStats/agentSummary 来自 /api/agent-usage（**独立降级**：它挂了不影响模型列表）
-    //    ⚠️ 三态要分清：`undefined` = 还没加载 / `null` = 加载失败 / 对象 = 结果
-    //       （我第一版把"未加载"和"失败"都写成 null ⇒ 界面永远显示"统计不可用"，实测抓到）
-    var modelsState = { tab: 'official', official: [], groups: [], imports: [], selected: {}, batch: false, officialError: '', agentDefaults: null, agentStats: undefined, agentSummary: undefined };
+    var modelsState = { tab: 'official', official: [], groups: [], imports: [], selected: {}, batch: false, officialError: '' };
     function buildModelsPane() {
       if (!modelsPane) return;
       modelsPane.dataset.built = '1';
@@ -11373,7 +11477,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<button class="wbs-sess-bbtn wbs-sess-done" type="button" id="wbs-model-done">取消</button>' +
         '</div>' +
         '</div>' +
-        '<div class="wbs-agent-summary" id="wbs-model-agent-summary" style="display:none"></div>' +
         '<div class="wbs-model-tip" id="wbs-model-tip" style="display:none"><span class="wbs-model-tip-ico">' + MODEL_TIP_SVG + '</span><strong>小贴士</strong><span>解决 WorkBuddy 不支持多个同名模型的问题。</span></div>' +
         '<div class="wbs-model-list" id="wbs-model-list"><div class="wbs-empty">加载中…</div></div>' +
         '</div>' +
@@ -11426,145 +11529,19 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '</div>' +
         '<div class="wbs-model-tag-row">' + tags + '</div>' +
         modelDetailsHtml(model) +
-        agentBlockHtml(model, options) +
         '</div></div>';
     }
 
-    /* ================= ⭐ 子 Agent 能力（2026-10-01 整合进模型页）=================
-       设计原则（用户要求「与具体 AI 解耦」）：
-         · **不硬编码任何模型名** —— 数据全部来自 `modelsState.agentDefaults.entries[id]`
-           （后端已用 defaults 兜底），前端只负责画
-         · 三个控件**改动即存**，失败**回滚控件状态**（不让界面骗人）
-         · 统计来自另一个接口 ⇒ **独立降级**：它挂了不影响模型列表渲染
-       ============================================================================ */
-    function kindLabelOf(kind) {
-      if (kind === 'local') return '本地';
-      if (kind === 'cloud') return '云端';
-      return '未定';
-    }
-
-    /** 每行底部的「子 Agent」区块。⚠️ 只在「当前模型」tab 显示（备选模型没生效 ⇒ 统计无意义）。 */
-    function agentBlockHtml(model, options) {
-      if (!options.official) return '';
-      var id = String(model.id || '').trim();
-      if (!id) {
-        return '<div class="wbs-agent-block"><span class="wbs-agent-noid">请先填写模型 ID，才能配置子 Agent 属性</span></div>';
-      }
-      var entry = ((modelsState.agentDefaults || {}).entries || {})[id] || {};
-      var kind = entry.kind || 'unknown';
-      var record = entry.record !== false;
-      var delegate = entry.delegate === true;
-      var stat = (modelsState.agentStats || {})[id] || null;
-
-      var statText;
-      if (modelsState.agentStats === undefined) statText = '统计加载中…';
-      else if (modelsState.agentStats === null) statText = '统计不可用';
-      else if (!stat) statText = '从未派活';
-      else {
-        // ⚠️ 分母必须是「**已有结果的派活**」（succeeded+failed），**不是** count ——
-        //    否则会与顶部汇总条的口径打架（实测第一版就是 count，同一模型两处显示 59.8% vs 62.0%）。
-        var paired = (stat.succeeded || 0) + (stat.failed || 0);
-        var rate = paired ? Math.round((stat.succeeded / paired) * 1000) / 10 : 0;
-        statText = '派活 ' + stat.count + ' · 成功 ' + stat.succeeded
-          + (stat.failed ? ' · 失败 ' + stat.failed : '') + ' · ' + rate + '%';
-      }
-
-      return '<div class="wbs-agent-block" data-agent-for="' + escAttr(id) + '">'
-        + '<div class="wbs-agent-head">'
-        + '<span class="wbs-agent-dot wbs-agent-dot-' + escAttr(kind) + '"></span>'
-        + '<span class="wbs-agent-label">子 Agent</span>'
-        + '<span class="wbs-agent-kind">' + esc(kindLabelOf(kind)) + '</span>'
-        + '<span class="wbs-agent-stat" data-wbs-i18n-skip>' + esc(statText) + '</span>'
-        + '</div>'
-        + '<div class="wbs-agent-controls">'
-        + '<label class="wbs-agent-ctl"><span class="wbs-agent-ctl-name">类型</span>'
-        + '<select class="wbs-agent-select" data-agent-kind="' + escAttr(id) + '">'
-        + '<option value="local"' + (kind === 'local' ? ' selected' : '') + '>' + esc(kindLabelOf('local')) + '</option>'
-        + '<option value="cloud"' + (kind === 'cloud' ? ' selected' : '') + '>' + esc(kindLabelOf('cloud')) + '</option>'
-        + '<option value="unknown"' + (kind === 'unknown' ? ' selected' : '') + '>' + esc(kindLabelOf('unknown')) + '</option>'
-        + '</select></label>'
-        + '<label class="wbs-agent-ctl" title="勾选后写进「提醒 AI 可用」的规则"><input type="checkbox" data-agent-delegate="' + escAttr(id) + '"' + (delegate ? ' checked' : '') + '><span>可委派</span></label>'
-        + '<label class="wbs-agent-ctl" title="取消勾选则不计入使用台账"><input type="checkbox" data-agent-record="' + escAttr(id) + '"' + (record ? ' checked' : '') + '><span>记录</span></label>'
-        + '</div></div>';
-    }
-
-    /** 顶部汇总条（**只在「当前模型」tab 显示**）。 */
-    function renderAgentSummary() {
-      var host = modelsPane && modelsPane.querySelector('#wbs-model-agent-summary');
-      if (!host) return;
-      if (modelsState.tab !== 'official' || !modelsState.agentDefaults) { host.style.display = 'none'; return; }
-      var entries = (modelsState.agentDefaults || {}).entries || {};
-      var ids = Object.keys(entries);
-      var recordOn = ids.filter(function (id) { return entries[id].record !== false; }).length;
-      var delegateOn = ids.filter(function (id) { return entries[id].delegate === true; }).length;
-      var s = modelsState.agentSummary;
-      var parts = [];
-      parts.push('<span>可委派 <b>' + delegateOn + '</b></span>');
-      parts.push('<span>计入记录 <b>' + recordOn + '/' + ids.length + '</b></span>');
-      if (s) {
-        parts.push('<span>派活 <b>' + s.total + '</b></span>');
-        parts.push('<span>成功率 <b>' + s.successRate + '%</b></span>');
-        parts.push('<span>本地 <b>' + s.localCount + '</b></span>');
-        parts.push('<span>未指定 <b>' + s.unspecifiedCount + '</b></span>');
-      }
-      // ⚠️ 统计里有、模型页却没有的模型 —— 必须提示，否则用户会困惑（"这个模型哪来的？"）
-      var unlisted = [];
-      if (modelsState.agentStats) {
-        Object.keys(modelsState.agentStats).forEach(function (k) {
-          if (k && k.indexOf('(未指定') < 0 && !entries[k]) unlisted.push(k);
-        });
-      }
-      host.innerHTML = '<div class="wbs-agent-sum-row">' + parts.join('') + '</div>'
-        + (unlisted.length ? '<div class="wbs-agent-sum-warn" data-wbs-i18n-skip>有 ' + unlisted.length + ' 个未登记的模型在记录里：' + esc(unlisted.join('、')) + '</div>' : '');
-      host.style.display = '';
-    }
-
-    /** 拉使用统计（**独立降级**：失败只影响统计区，不影响模型列表）。 */
-    function loadAgentStats() {
-      return api('/api/agent-usage').then(function (data) {
-        modelsState.agentStats = (data && data.summary && data.summary.byModel) || {};
-        modelsState.agentSummary = (data && data.summary) || null;
-        renderModels();
-      }).catch(function () {
-        modelsState.agentStats = null;   // 约定：null = 统计不可用（与"空对象"区分）
-        modelsState.agentSummary = null;
-        renderModels();
-      });
-    }
-
-    /** 保存单个模型的子 Agent 声明（改动即存；失败回滚控件）。 */
-    function saveAgentEntry(id, patch, el) {
-      var entries = (modelsState.agentDefaults || {}).entries || {};
-      var prev = entries[id] || { kind: 'unknown', record: true, delegate: false };
-      var body = { id: id, kind: patch.kind !== undefined ? patch.kind : prev.kind,
-        record: patch.record !== undefined ? patch.record : prev.record !== false,
-        delegate: patch.delegate !== undefined ? patch.delegate : prev.delegate === true };
-      return api('/api/agent-catalog', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-        .then(function () { return Promise.all([loadModels(), loadAgentStats()]); })
-        .then(function () { toast('子 Agent 配置已保存', false, root); })
-        .catch(function (e) {
-          // ⚠️ **回滚控件状态** —— 不让界面显示一个其实没保存成功的值
-          if (el && el.type === 'checkbox') el.checked = !el.checked;
-          else if (el && el.value !== undefined) el.value = prev.kind || 'unknown';
-          toast((e && e.message) || '保存失败', true, root);
-        });
-    }
     function loadModels() {
       if (!modelsPane) return;
       var list = modelsPane.querySelector('#wbs-model-list');
       if (list) list.innerHTML = '<div class="wbs-empty">加载中…</div>';
-      // ⭐ 统计与模型列表是**两个数据源** ⇒ **并行**发起（串行会让统计慢好几秒才出现）
-      loadAgentStats();
       api('/api/models').then(function (data) {
         modelsState.official = data.official || [];
         modelsState.groups = data.backups || [];
         modelsState.imports = data.imports || [];
         modelsState.officialError = data.officialError || '';
-        // ⭐ 子 Agent 目录随模型列表**同一次请求**返回（后端已用 defaults 兜底）—— 不再多发一次
-        modelsState.agentDefaults = data.agentCatalog || null;
         renderModels();
-        // ⭐ 使用统计是**另一个数据源**（会话 jsonl）⇒ 单独拉、**独立降级**
-        loadAgentStats();
       }).catch(function (e) {
         modelsState.official = [];
         modelsState.groups = [];
@@ -11585,7 +11562,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
     function renderModels() {
       if (!modelsPane) return;
-      renderAgentSummary();   // ⭐ 顶部汇总条（自带 tab 判断，独立于列表，放最前面即可）
       var list = modelsPane.querySelector('#wbs-model-list');
       if (!list) return;
       modelsPane.querySelectorAll('.wbs-model-tab').forEach(function (tab) {
@@ -11791,20 +11767,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       cancel.focus();
     }
     function wireModelsPane() {
-      // ⭐ 子 Agent 三个控件（类型 / 可委派 / 记录）—— 用**事件委托**绑定，避免逐行挂监听
-      //    （逐行绑定会在每次 renderModels 重渲染后失效，委托不会）
-      modelsPane.addEventListener('change', function (event) {
-        var el = event.target;
-        if (!el || !el.getAttribute) return;
-        var idKind = el.getAttribute('data-agent-kind');
-        var idDel = el.getAttribute('data-agent-delegate');
-        var idRec = el.getAttribute('data-agent-record');
-        var id = idKind || idDel || idRec;
-        if (!id) return;
-        if (idKind) saveAgentEntry(id, { kind: el.value }, el);
-        else if (idDel) saveAgentEntry(id, { delegate: !!el.checked }, el);
-        else saveAgentEntry(id, { record: !!el.checked }, el);
-      });
       listen(document, 'click', function (event) { if (!event.target.closest || !event.target.closest('.wbs-model-third-party')) closeThirdPartyMenu(); });
       modelsPane.addEventListener('keydown', function (event) {
         var menu = modelsPane.querySelector('#wbs-model-source-menu');
@@ -11855,7 +11817,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
               } else {
                 var imported = (data && data.imported || []).length;
                 var skipped = (data && data.skipped || []).length;
-                toast('已导入 ' + imported + ' 个模型' + (skipped ? '，跳过同名模型 ' + skipped + ' 个' : ''), false, root);
+                // 0 新增 + 全是同名 ⇒ 「已导入 0 个模型」读起来像失败（实测用户就是这么理解的，
+                // 还去查为什么客户端看不到）。这其实是「你要的都在列表里」，直说。
+                if (!imported && skipped) toast('这 ' + skipped + ' 个模型都已经在列表里了，无需重复导入', false, root);
+                else toast('已导入 ' + imported + ' 个模型' + (skipped ? '，跳过同名模型 ' + skipped + ' 个' : ''), false, root);
               }
               loadModels();
             })
@@ -12053,7 +12018,29 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<div class="wbs-ask-row">' +
         '<label class="wbs-ask-label" for="wbs-text-shadow">消息文字阴影<span class="wbs-ask-hint">增强壁纸上的消息文字辨识度</span></label>' +
         '<label class="wbs-switch"><input type="checkbox" id="wbs-text-shadow" checked disabled><span class="wbs-switch-slider"></span></label>' +
-        '</div></div>';
+        '</div></div>' +
+        '<div class="wbs-pcard" id="wbs-motion-card">' +
+        '<div class="wbs-pcard-title">性能<span class="wbs-pcard-sub">动效降级</span></div>' +
+        '<div class="wbs-nd-row">' +
+        '<span class="wbs-nd-title">动效降级</span>' +
+        '<span class="wbs-nd-hint">实测可降低主线程渲染负载约 30%。流畅＝只停装饰性动画（机器人眨眼、扫光闪烁）；极速＝页面内所有动画静止（加载转圈也会停）</span>' +
+        '</div>' +
+        '<div class="wbs-theme-seg wbs-motion-seg" role="radiogroup" aria-label="动效降级">' +
+        '<label class="wbs-theme-opt" title="保留全部动效"><input type="radio" name="wbs-motion-mode" value="off"><span>关闭</span></label>' +
+        '<label class="wbs-theme-opt" title="只停纯装饰动画，保留加载转圈等交互反馈"><input type="radio" name="wbs-motion-mode" value="lite"><span>流畅</span></label>' +
+        '<label class="wbs-theme-opt" title="页面内所有 animation 静止"><input type="radio" name="wbs-motion-mode" value="turbo"><span>极速</span></label>' +
+        '</div>' +
+        '</div>';
+      if (CAPS.nativeComposer) {
+        // CodeBuddy：官方不提供可替换头像，悬浮球也只有原生黑白两档 ⇒ 相关控件留着点了不生效。
+        var avatarCard = themePane.querySelector('.wbs-avatar-card');
+        if (avatarCard) avatarCard.style.display = 'none';
+        Array.prototype.forEach.call(themePane.querySelectorAll('.wbs-robot-option'), function (opt) {
+          var input = opt.querySelector('input');
+          var value = input && input.value;
+          if (value === 'theme' || value === 'glass') opt.style.display = 'none';
+        });
+      }
       wireThemePane();
       applyAvatar();
     }
@@ -12062,6 +12049,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (!enhancePane) return;
       enhancePane.dataset.built = '1';
       enhancePane.innerHTML =
+        '<div class="wbs-pcard" id="wbs-dshops-card">' +
+        '<div class="wbs-pcard-title">dsh-ops 工具<span class="wbs-pcard-sub" id="wbs-dshops-status"></span></div>' +
+        '<div class="wbs-nd-row">' +
+        '<span class="wbs-nd-title">原生检索 / 批处理</span>' +
+        '<span class="wbs-nd-hint">Rust 原生 MCP 工具：fastctx（glob/grep/inspect/replace，常驻进程，大目录检索比内置引擎快）＋ dsh-ops（batch/result 两段式安全批处理）。一键安装后需重启 WorkBuddy 生效</span>' +
+        '</div>' +
+        '<div id="wbs-dshops-body"></div>' +
+        '</div>' +
         '<div class="wbs-pcard" id="wbs-no-disturb-card">' +
         '<div class="wbs-pcard-title wbs-nd-head">' +
         '<span>免打扰</span>' +
@@ -12097,18 +12092,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<label class="wbs-switch" title="开启后仍有确认弹窗时自动替你点「允许」，所有自动批准记录在审计日志"><input type="checkbox" id="wbs-nd-auto"><span class="wbs-switch-slider"></span></label>' +
         '</div>' +
         '</div>' +
-        '<div class="wbs-pcard" id="wbs-motion-card">' +
-        '<div class="wbs-pcard-title">性能<span class="wbs-pcard-sub">动效降级</span></div>' +
-        '<div class="wbs-nd-row">' +
-        '<span class="wbs-nd-title">动效降级</span>' +
-        '<span class="wbs-nd-hint">实测可降低主线程渲染负载约 30%。流畅＝只停装饰性动画（机器人眨眼、扫光闪烁）；极速＝页面内所有动画静止（加载转圈也会停）</span>' +
-        '</div>' +
-        '<div class="wbs-theme-seg wbs-motion-seg" role="radiogroup" aria-label="动效降级">' +
-        '<label class="wbs-theme-opt" title="保留全部动效"><input type="radio" name="wbs-motion-mode" value="off"><span>关闭</span></label>' +
-        '<label class="wbs-theme-opt" title="只停纯装饰动画，保留加载转圈等交互反馈"><input type="radio" name="wbs-motion-mode" value="lite"><span>流畅</span></label>' +
-        '<label class="wbs-theme-opt" title="页面内所有 animation 静止"><input type="radio" name="wbs-motion-mode" value="turbo"><span>极速</span></label>' +
-        '</div>' +
-        '</div>' +
         '<div class="wbs-pcard" id="wbs-ac-card">' +
         '<div class="wbs-pcard-title">会话<span class="wbs-pcard-sub" id="wbs-ac-status"></span></div>' +
         '<div class="wbs-nd-row" id="wbs-ac-row">' +
@@ -12125,11 +12108,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<span class="wbs-nd-title">会话消息索引</span>' +
         '<span class="wbs-nd-hint">悬停预览，点击或拖动快速定位消息</span>' +
         '<label class="wbs-switch" title="在会话左侧显示消息索引"><input type="checkbox" id="wbs-sess-message-nav"><span class="wbs-switch-slider"></span></label>' +
-        '</div>' +
-        '<div class="wbs-nd-row">' +
-        '<span class="wbs-nd-title">token 速度读数</span>' +
-        '<span class="wbs-nd-hint">默认关闭。打开后在输入框下方显示 ≈ N tok/s（按正文字符分类估算，非真实用量），可拖动、双击复位</span>' +
-        '<label class="wbs-switch" title="关闭后不再显示 token 速度读数"><input type="checkbox" id="wbs-sess-token-rate"><span class="wbs-switch-slider"></span></label>' +
         '</div>' +
         '<div class="wbs-nd-row">' +
         '<span class="wbs-nd-title">md 快速查看</span>' +
@@ -12195,6 +12173,119 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '</div>' +
         '</div>';
       wireEnhancePane();
+      loadDshOps();
+    }
+
+    // dsh-ops 集成：状态 / 一键安装 / 启停 / 卸载（写 mcp.json 与磁盘，重启 WorkBuddy 生效）。
+    function loadDshOps() {
+      var bodyEl = enhancePane.querySelector('#wbs-dshops-body');
+      var statusEl = enhancePane.querySelector('#wbs-dshops-status');
+      if (!bodyEl) return;
+      var txt = function (cls, text) {
+        var n = el('span', cls);
+        n.setAttribute('data-wbs-i18n-skip', '');
+        n.textContent = text;
+        return n;
+      };
+      var mkBtn = function (label, title, cls) {
+        var b = el('button', 'wbs-dshops-btn' + (cls ? ' ' + cls : ''));
+        b.type = 'button';
+        b.title = title;
+        b.textContent = label;
+        return b;
+      };
+      var row = function (label, hint, action) {
+        var r = el('div', 'wbs-nd-row');
+        r.appendChild(txt('wbs-nd-title', label));
+        r.appendChild(txt('wbs-nd-hint', hint));
+        var a = el('span', 'wbs-dshops-actions');
+        if (action) a.appendChild(action);
+        r.appendChild(a);
+        bodyEl.appendChild(r);
+        return r;
+      };
+      var refresh = function () { loadDshOps(); };
+      var install = function (btn, force) {
+        btn.disabled = true;
+        var old = btn.textContent;
+        btn.textContent = '安装中…';
+        api('/api/dsh-ops/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ force: !!force }) })
+          .then(function (r) {
+            toast((r && r.reused ? '已复用现有 dsh-ops 部署并注册' : 'dsh-ops 安装完成') + ' —— 重启 WorkBuddy 后生效', false, root);
+            refresh();
+          })
+          .catch(function (e) {
+            btn.disabled = false;
+            btn.textContent = old;
+            toast((e && e.message) || '安装失败', true, root);
+          });
+      };
+      api('/api/dsh-ops/status').then(function (d) {
+        bodyEl.innerHTML = '';
+        if (statusEl) statusEl.textContent = d.installed ? (d.enabled ? '已启用' : '已安装 · 已停用') : '未安装';
+        if (!d.supported) {
+          row('平台不支持', '上游只发布 win32-x64 二进制，当前平台（' + d.platform + '）无法使用', null);
+          return;
+        }
+        var pv = function (k) {
+          var list = d.packages || [];
+          for (var pi = 0; pi < list.length; pi++) { if (list[pi].key === k) return list[pi].version; }
+          return '?';
+        };
+        if (!d.installed) {
+          var ib = mkBtn('一键安装', '从 npm 官方源下载 fastctx + dsh-ops worker，校验 sha512 后注册到 mcp.json', 'primary');
+          ib.addEventListener('click', function () { install(ib, false); });
+          row('安装', '将安装 fastctx ' + pv('fastctx') + ' · worker ' + pv('worker') + ' → ' + d.managedDir, ib);
+          return;
+        }
+        var ver = d.versions || null;
+        var verTxt = (ver && (ver.fastctx || ver.worker)) ? ('fastctx ' + (ver.fastctx || '?') + ' · worker ' + (ver.worker || '?') + ' · ') : '';
+        row('已安装', verTxt + (d.managed ? 'WorkDaddy 管理' : '检测到外部部署') + (d.dir ? ' · ' + d.dir : ''), null);
+        var sw = document.createElement('label');
+        sw.className = 'wbs-switch';
+        sw.title = '启用 / 停用 dsh-ops（需重启 WorkBuddy 生效）';
+        var input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = !!d.enabled;
+        input.disabled = !d.registered;
+        input.addEventListener('change', function () {
+          var next = !!input.checked;
+          input.disabled = true;
+          api('/api/dsh-ops/toggle', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: next }) })
+            .then(function () { toast('已' + (next ? '启用' : '停用') + ' dsh-ops —— 重启 WorkBuddy 后生效', false, root); refresh(); })
+            .catch(function (e) { input.checked = !next; input.disabled = false; toast((e && e.message) || '设置失败', true, root); });
+        });
+        sw.appendChild(input);
+        sw.appendChild(el('span', 'wbs-switch-slider'));
+        row('启用', d.registered ? '已注册进 mcp.json' : '尚未注册', sw);
+        var acts = el('span', 'wbs-dshops-actions');
+        var reBtn = mkBtn('重新下载', '强制从 npm 重新下载并覆盖（校验 sha512）');
+        reBtn.addEventListener('click', function () { install(reBtn, true); });
+        var unBtn = mkBtn('卸载', '从 mcp.json 注销' + (d.managed ? '，并删除 WorkDaddy 安装的文件' : ''), 'danger');
+        unBtn.addEventListener('click', function () {
+          if (unBtn.getAttribute('data-armed') !== '1') {
+            unBtn.setAttribute('data-armed', '1');
+            unBtn.textContent = '确认卸载';
+            setTimeout(function () {
+              if (unBtn.isConnected) { unBtn.removeAttribute('data-armed'); unBtn.textContent = '卸载'; }
+            }, 3200);
+            return;
+          }
+          unBtn.disabled = true;
+          api('/api/dsh-ops/uninstall', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purge: !!d.managed }) })
+            .then(function () { toast('已卸载 dsh-ops —— 重启 WorkBuddy 后生效', false, root); refresh(); })
+            .catch(function (e) { unBtn.disabled = false; toast((e && e.message) || '卸载失败', true, root); });
+        });
+        acts.appendChild(reBtn);
+        acts.appendChild(unBtn);
+        row('维护', '下载源 ' + d.registry, acts);
+      }).catch(function (e) {
+        bodyEl.innerHTML = '';
+        var note = el('div', 'wbs-nd-hint');
+        note.setAttribute('data-wbs-i18n-skip', '');
+        note.textContent = '读取 dsh-ops 状态失败：' + ((e && e.message) || e);
+        bodyEl.appendChild(note);
+      });
     }
 
     // 电脑 pane：休眠设置（从增强页迁出，单独 Tab)
@@ -12827,6 +12918,27 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
     // 主题 pane 事件绑定（元素在 buildThemePane 之后才存在，延迟到首次切换时绑定）
     function wireThemePane() {
+      // 性能：动效降级分段（关闭 / 流畅 / 极速）。切换即写 localStorage + 改 html 属性，立刻生效。
+      var motionRadios = themePane.querySelectorAll('input[name="wbs-motion-mode"]');
+      if (motionRadios.length) {
+        var motionCur = readPerfMode();
+        Array.prototype.forEach.call(motionRadios, function (input) {
+          input.checked = input.value === motionCur;
+          var opt = input.closest ? input.closest('.wbs-theme-opt') : null;
+          if (opt) opt.classList.toggle('active', input.checked);
+          input.addEventListener('change', function () {
+            if (!input.checked) return;
+            var applied = applyPerfMode(input.value);
+            Array.prototype.forEach.call(motionRadios, function (r) {
+              var o = r.closest ? r.closest('.wbs-theme-opt') : null;
+              if (o) o.classList.toggle('active', r.checked);
+            });
+            toast(applied === 'off' ? '已恢复全部动效'
+              : applied === 'lite' ? '已开启流畅模式：仅停装饰动画'
+              : '已开启极速模式：页面内动画全部静止', false, root);
+          });
+        });
+      }
       var themeSwitch = themePane.querySelector('#wbs-theme-takeover');
       if (themeSwitch) {
         themeSwitch.checked = sessState.themeTakeover;
@@ -13010,103 +13122,823 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         });
       }
     }
-    /* ===== API 网关（反代）卡片 —— 2026-09-30 =====
-     * 把第三方 wb2api 的 sidecar 集成暴露到面板上：安装（下载+SHA 校验+凭证桥）/ 启停 / 注册模型 / 打开网关自带面板。
-     * 纪律：① 用 insertAdjacentHTML 追加，**不碰 buildEnhancePane 里既有的大段 HTML 拼接**；
-     *       ② 按钮样式内联（不新增 CSS 类，避免与既有选择器打架）；③ 所有动作都走 daemon 的 /api/gateway*，
-     *       面板只负责展示与触发 —— 判据与实现全在 scripts/api-gateway.js。 */
-    function gwCardEl() { return enhancePane && enhancePane.querySelector('#wbs-gw-card'); }
-    function gwBtn(text, attrs) {
-      return '<button type="button" style="margin:2px 4px 0 0;padding:4px 10px;border-radius:6px;'
-        + 'border:1px solid var(--wb-border-subtle,rgba(0,0,0,.16));background:transparent;color:inherit;'
-        + 'font-size:12px;cursor:pointer" ' + attrs + '>' + text + '</button>';
-    }
-    function gwRender(status) {
-      var card = gwCardEl();
-      if (!card) return;
-      var s = status || {};
-      var state = !s.installed ? '未安装' : (s.running ? (s.healthy ? '运行中' : '已启动（未探活）') : '已安装 · 未运行');
-      var sub = card.querySelector('#wbs-gw-sub');
-      if (sub) sub.textContent = state + (s.installed ? '（' + (s.accountCount || 0) + ' 个账号）' : '');
-      var info = card.querySelector('#wbs-gw-info');
-      if (info) {
-        info.textContent = s.installed
-          ? ('监听 127.0.0.1:' + (s.port || '') + '　密钥 ' + (s.apiKeyHint || '') + '　账号 ' + (s.accountCount || 0))
-          : '尚未安装（安装时会自动用本机已登录账号生成凭证，无需再登录一次）';
+    /* ===== API 网关（反代）卡片 —— 2026-09-30 初版 / 2026-10-15 重做 =====
+     * 初版只有 6 个哑按钮；重做后是「状态机驱动的控制台」：
+     *   ① 按钮按 installed / running 决定可用，不再出现「没装也能点启动」；
+     *   ② 账号池健康度（网关 /status）—— 之前完全看不到「有账号被禁用」；
+     *   ③ 可复制的用法（base_url / api_key / model）；
+     *   ④ 显式「自动拉起」开关 + 版本漂移提示 + 日志尾部。
+     * 纪律：① 判据与实现全在 scripts/api-gateway.js 与 daemon 的 /api/gateway*，面板只展示与触发；
+     *       ② 只碰本卡自己的 DOM（id 一律 wbs-gw-*），不动 buildEnhancePane 既有拼接；
+     *       ③ **api_key 绝不常驻卡片状态** —— 一律按需从 /api/gateway/api-key 取。 */
+    var gwState = { last: null, pool: null, logShown: false, models: null, modelsShown: false, modelsSel: null };
+
+    /* ---------- 上下文档位（客户端认知的窗口，写 models.json 的 maxInputTokens） ----------
+     * 为什么需要它：网关注册的条目一律用网关声明的 context_length（常见 1M），
+     * 而 WorkBuddy 没有选上下文的入口 ⇒ 客户端以为窗口无限，迟迟不自己压缩，
+     * 历史越堆越长，最后触发客户端裁头（历史头部被整段丢弃）。
+     * 给它一个档位，就能把「客户端认知的窗口」压到合理范围。 */
+    var GW_CTX_PRESETS = [
+      { v: 0, label: '模型默认' },
+      { v: 1000000, label: '1M' },
+      { v: 600000, label: '600K' },
+      { v: 300000, label: '300K' },
+      { v: 200000, label: '200K' },
+      { v: 100000, label: '100K' },
+    ];
+    // 自定义输入的可用区间（K 为单位）：用户定的是 64K – 1000K。
+    var GW_CTX_MIN_K = 64;
+    var GW_CTX_MAX_K = 1000;
+    function gwCtxLabel(v) {
+      var n = Number(v) || 0;
+      if (n <= 0) return '模型默认';
+      for (var i = 0; i < GW_CTX_PRESETS.length; i += 1) {
+        if (GW_CTX_PRESETS[i].v === n) return GW_CTX_PRESETS[i].label;
       }
-      var open = card.querySelector('#wbs-gw-open');
-      if (open) { open.disabled = !s.installed; open.setAttribute('data-url', s.panelUrl || ''); }
+      if (n >= 1000) return (n % 1000 === 0 ? String(n / 1000) : (n / 1000).toFixed(1)) + 'K';
+      return String(n);
     }
-    function gwRefresh() {
-      api('/api/gateway').then(function (d) {
-        if (d && d.ok) gwRender(d.gateway);
-      }).catch(function () {});
+
+    /** 写一个模型的 maxInputTokens；value=0 表示删掉该字段（回落到客户端默认）。 */
+    function gwSetModelContext(modelId, value, btn) {
+      if (btn) btn.disabled = true;
+      return api('/api/gateway/set-model-context', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ modelId: modelId, maxInputTokens: Number(value) || 0 }),
+      }).then(function (d) {
+        if (!d || d.ok === false) throw new Error((d && d.error) || '失败');
+        var shown = Number(d.maxInputTokens) > 0 ? gwCtxLabel(d.maxInputTokens) : '模型默认';
+        toast('上下文已设为 ' + shown + '（只对新建会话生效，已有会话的预算是创建时定下的）', false, root);
+        if (gwState.modelsShown) gwOpenModels();
+        return d;
+      }).catch(function (e) {
+        toast('设置上下文失败: ' + ((e && e.message) || e), true, root);
+        throw e;
+      }).finally(function () { if (btn) btn.disabled = false; });
     }
-    function gwAction(path, label, confirmText) {
-      if (confirmText && !window.confirm(confirmText)) return;
+
+    /* 行内自定义输入（替代 window.prompt）。
+     * ⚠️ Electron / Chromium 不实现 window.prompt —— 调用返回 null 且不弹窗，
+     *    之前「自定义…」点了像没反应就是这个原因。
+     * 单位用 K（64–1000），比让人数一串零更不容易错。
+     * 提交成功才调用 onCommit；取消 / 非法则原样复位下拉，不写盘。 */
+    function gwCtxInlineEdit(anchor, current, onCommit) {
+      if (!anchor || !anchor.parentNode) return;
+      var host = anchor.parentNode;
+      var stale = host.querySelector('.wbs-gw-ctx-edit');
+      if (stale) stale.remove();
+      anchor.style.display = 'none';
+      var wrap = el('span', 'wbs-gw-ctx-edit');
+      var input = document.createElement('input');
+      input.type = 'number';
+      input.min = String(GW_CTX_MIN_K);
+      input.max = String(GW_CTX_MAX_K);
+      input.step = '1';
+      input.className = 'wbs-gw-ctx-input';
+      input.setAttribute('data-wbs-i18n-skip', '');
+      input.value = Number(current) > 0 ? String(Math.round(Number(current) / 1000)) : '';
+      input.placeholder = GW_CTX_MIN_K + '–' + GW_CTX_MAX_K;
+      input.title = '上下文大小（' + GW_CTX_MIN_K + 'K – ' + GW_CTX_MAX_K + 'K）。'
+        + '\n单位是 K：输 128 = 128K；也可以直接输 128000（按 token 数理解）。'
+        + '\n回车确定，Esc 取消。';
+      var unit = el('span', 'wbs-gw-ctx-unit');
+      unit.textContent = 'K';
+      var okBtn = el('button', 'wbs-gw-ctx-ok');
+      okBtn.type = 'button'; okBtn.textContent = '确定'; okBtn.title = '回车也可';
+      var noBtn = el('button', 'wbs-gw-ctx-no');
+      noBtn.type = 'button'; noBtn.textContent = '取消';
+      function close() {
+        if (wrap.parentNode) wrap.remove();
+        anchor.style.display = '';
+      }
+      function commit() {
+        var raw = Number(String(input.value).replace(/[^0-9]/g, ''));
+        // 兼容两种输法：128 = 128K；128000 = 128K（≥64K 的数字按 token 数理解）
+        var k = raw >= GW_CTX_MIN_K * 1000 ? Math.round(raw / 1000) : raw;
+        if (!k) { toast('请输入 ' + GW_CTX_MIN_K + ' – ' + GW_CTX_MAX_K + ' 之间的数字（单位 K）', true, root); input.focus(); return; }
+        if (k < GW_CTX_MIN_K || k > GW_CTX_MAX_K) {
+          toast('超出范围：' + k + 'K（只接受 ' + GW_CTX_MIN_K + 'K – ' + GW_CTX_MAX_K + 'K）', true, root);
+          input.focus();
+          return;
+        }
+        close();
+        onCommit(k * 1000);
+      }
+      okBtn.addEventListener('click', commit);
+      noBtn.addEventListener('click', function () { close(); });
+      input.addEventListener('keydown', function (e2) {
+        if (e2.key === 'Enter') { e2.preventDefault(); commit(); }
+        else if (e2.key === 'Escape' || e2.key === 'Esc') { e2.preventDefault(); close(); }
+      });
+      wrap.appendChild(input);
+      wrap.appendChild(unit);
+      wrap.appendChild(okBtn);
+      wrap.appendChild(noBtn);
+      anchor.parentNode.appendChild(wrap);
+      try { input.focus(); input.select(); } catch (_) {}
+    }
+
+    /** 批量：把同一档位应用到全部已注册条目。 */
+    function gwSetAllContexts(value) {
+      var items = (gwState.models || []).filter(function (m) { return m.registration !== 'absent'; });
+      if (!items.length) { toast('还没有已注册的模型', true, root); return; }
+      var shown = Number(value) > 0 ? gwCtxLabel(value) : '模型默认';
+      toast('正在把 ' + items.length + ' 个模型设为 ' + shown + '…', false, root);
+      var seq = Promise.resolve();
+      var failed = 0;
+      items.forEach(function (m) {
+        seq = seq.then(function () {
+          return api('/api/gateway/set-model-context', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ modelId: m.id, maxInputTokens: Number(value) || 0 }),
+          }).then(function (d) {
+            if (!d || d.ok === false) failed += 1;
+          }).catch(function () { failed += 1; });
+        });
+      });
+      return seq.then(function () {
+        toast(failed
+          ? ('部分失败：' + failed + ' / ' + items.length + ' 个未生效')
+          : ('已把 ' + items.length + ' 个模型设为 ' + shown), failed > 0, root);
+        if (gwState.modelsShown) gwOpenModels();
+      });
+    }
+    function gwCardEl() { return enhancePane && enhancePane.querySelector('#wbs-gw-card'); }
+    function gwDockEl() { return panel ? panel.querySelector('#wbs-gw-dock') : null; }
+    function gwEl(id) { var d = gwDockEl(); return d ? d.querySelector('#' + id) : null; }
+    /** 折叠行 ↔ 大浮层：开 = 每次回到干净初始态（日志与模型面板收起）后刷新；关 = 复位到折叠行。 */
+    function gwSetDock(open) {
+      var btn = gwCardEl() && gwCardEl().querySelector('#wbs-gw-expand');
+      if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      var d = gwDockEl();
+      if (!d) return;
+      d.hidden = !open;
+      gwState.logShown = false;
+      var log = gwEl('wbs-gw-log');
+      if (log) log.style.display = 'none';
+      var models = gwEl('wbs-gw-models');
+      if (models) models.style.display = 'none';
+      gwState.modelsShown = false;
+      if (open) gwRefresh();
+    }
+    /** Esc 收起（仅在浮层可见时生效；document 级只绑一次）。 */
+    var gwDockKeyBound = false;
+    function gwBindDockKey() {
+      if (gwDockKeyBound) return;
+      gwDockKeyBound = true;
+      document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Escape' && e.key !== 'Esc') return;
+        var d = gwDockEl();
+        if (d && !d.hidden) {
+          // 自定义上下文输入框里按 Esc = 只取消输入，别把整个浮层一起关掉
+          var ae = document.activeElement;
+          if (ae && ae.classList && ae.classList.contains('wbs-gw-ctx-input')) return;
+          e.preventDefault(); gwSetDock(false);
+        }
+      }, true);
+    }
+    function gwBtnEl(label, act, cls, title) {
+      var b = el('button', 'wbs-mini-btn' + (cls ? ' ' + cls : ''));
+      b.type = 'button';
+      b.textContent = label;
+      if (act) b.setAttribute('data-gw', act);
+      if (title) b.title = title;
+      return b;
+    }
+    function gwFmtCredits(n) {
+      var v = Number(n) || 0;
+      if (v >= 10000) return (v / 10000).toFixed(1).replace(/\.0$/, '') + ' 万';
+      return String(v);
+    }
+    function gwFmtRel(iso) {
+      if (!iso || /^0001-/.test(iso)) return '';
+      var t = Date.parse(iso);
+      if (!isFinite(t)) return '';
+      var sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+      if (sec < 60) return sec + ' 秒前';
+      if (sec < 3600) return Math.round(sec / 60) + ' 分钟前';
+      if (sec < 86400) return Math.round(sec / 3600) + ' 小时前';
+      return Math.round(sec / 86400) + ' 天前';
+    }
+    function gwAction(path, label, opts) {
+      var o = opts || {};
       toast(label + '中…', false, root);
-      api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      return api(path, { method: o.method || 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(o.body || {}) })
         .then(function (d) {
           if (!d || !d.ok) throw new Error((d && d.error) || '失败');
           toast(label + '完成', false, root);
           gwRefresh();
+          return d;
         })
         .catch(function (e) {
           toast(label + '失败: ' + ((e && e.message) || e), true, root);
           gwRefresh();
+          throw e;
         });
+    }
+    /** 破坏性操作二次确认（armed 双点，替代风格突兀的 window.confirm）。 */
+    function gwArm(btn, label, run) {
+      if (btn.getAttribute('data-armed') !== '1') {
+        btn.setAttribute('data-armed', '1');
+        var old = btn.textContent;
+        btn.textContent = '确认' + label + '？';
+        setTimeout(function () {
+          if (btn.isConnected) { btn.removeAttribute('data-armed'); btn.textContent = old; }
+        }, 3500);
+        return;
+      }
+      btn.removeAttribute('data-armed');
+      run();
+    }
+
+    function gwRenderPool(pool) {
+      var box = gwEl('wbs-gw-pool');
+      if (!box) return;
+      var list = (pool && pool.accounts) || [];
+      box.innerHTML = '';
+      // ⭐ 账号池对齐度（2026-10-16）：本仓已登录、但网关池里还没有的账号 —— 提示 + 手动兜底入口。
+      //    （正常情况下账号一登录就会自动同步，这里只是「万一没同步」时的可见抓手）
+      var ap = gwState.last && gwState.last.accountPool;
+      if (ap && ap.missing > 0) {
+        var drift = el('div', 'wbs-gw-pool-note');
+        drift.setAttribute('data-wbs-i18n-skip', '');
+        drift.textContent = '⚠️ 本仓有 ' + ap.missing + ' 个账号还没进池（池 ' + ap.pool + ' / 本仓 ' + ap.local + '）—— 点「同步账号池」补齐。';
+        box.appendChild(drift);
+      } else if (ap && ap.stale > 0) {
+        var stale = el('div', 'wbs-gw-pool-note');
+        stale.setAttribute('data-wbs-i18n-skip', '');
+        stale.textContent = 'ℹ️ 池里有 ' + ap.stale + ' 个账号本仓已不存在（点「同步账号池」可清理）。';
+        box.appendChild(stale);
+      }
+      if (!list.length) {
+        var none = el('div', 'wbs-gw-meta');
+        none.setAttribute('data-wbs-i18n-skip', '');
+        none.textContent = gwState.last && gwState.last.running ? '（账号池为空或网关未响应）' : '（网关未运行）';
+        box.appendChild(none);
+        return;
+      }
+      list.slice().sort(function (a, b) { return (b.credits || 0) - (a.credits || 0); }).forEach(function (a) {
+        var row = el('div', 'wbs-gw-acct');
+        var left = el('span', 'wbs-gw-acct-name');
+        left.setAttribute('data-wbs-i18n-skip', '');
+        var tone = a.disabled ? ' bad' : (a.cooling || a.consecutiveFails > 0 ? ' warn' : '');
+        left.appendChild(el('span', 'wbs-gw-dot' + tone));
+        left.appendChild(document.createTextNode(' ' + (a.nickname || String(a.uid).slice(0, 8)) + (a.realm ? ' · ' + a.realm : '')));
+        var mid = el('span', 'wbs-gw-acct-credits');
+        mid.setAttribute('data-wbs-i18n-skip', '');
+        mid.textContent = gwFmtCredits(a.credits) + ' 积分';
+        var right = el('span', 'wbs-gw-acct-credits');
+        right.setAttribute('data-wbs-i18n-skip', '');
+        right.textContent = a.disabled ? '已禁用' : (a.cooling ? '冷却中' : ('正常 · ' + (a.requests || 0) + ' 次'));
+        right.title = [a.lastModel ? '最后 ' + a.lastModel : '', gwFmtRel(a.lastUsedAt)].filter(Boolean).join(' · ');
+        row.appendChild(left); row.appendChild(mid); row.appendChild(right);
+        box.appendChild(row);
+      });
+      if (pool.disabled > 0) {
+        var note = el('div', 'wbs-gw-meta');
+        note.setAttribute('data-wbs-i18n-skip', '');
+        note.textContent = '⚠️ ' + pool.disabled + ' 个账号在网关侧被禁用（不参与选号），可在网关面板里解冻。';
+        box.appendChild(note);
+      }
+    }
+
+    function gwRender(status) {
+      var card = gwCardEl();
+      if (!card) return;
+      var s = status || {};
+      gwState.last = s;
+      var installed = !!s.installed;
+      var running = !!s.running;
+      var h = s.health || {};
+      var healthyAccounts = Number(h.healthyAccounts) || 0;
+      var totalAccounts = Number(h.total) || Number(s.accountCount) || 0;
+
+      var subText = !installed ? '未安装'
+        : (running ? (h.reachable ? (healthyAccounts > 0 ? '运行中' : '运行中 · 无可用账号') : '已启动 · 未响应')
+                   : '已安装 · 未运行');
+      var sub = gwCardEl() && gwCardEl().querySelector('#wbs-gw-sub');
+      if (sub) { sub.setAttribute('data-wbs-i18n-skip', ''); sub.textContent = subText; }
+      var dsub = gwEl('wbs-gw-dock-sub');
+      if (dsub) { dsub.setAttribute('data-wbs-i18n-skip', ''); dsub.textContent = subText; }
+      var meta = gwEl('wbs-gw-meta');
+      if (meta) {
+        meta.setAttribute('data-wbs-i18n-skip', '');
+        meta.textContent = installed
+          ? ('127.0.0.1:' + (s.port || '') + ' · ' + (s.gatewayVersion || '?')
+             + ' · 账号 ' + healthyAccounts + '/' + totalAccounts + ' 可用'
+             + ' · 密钥 ' + (s.apiKeyHint || '')
+             + ' · 已注册模型 ' + (s.registeredModelCount || 0))
+          : '把本机已登录账号的额度暴露成本地 OpenAI 兼容接口（/v1/chat/completions）；安装时自动生成凭证，无需再走一遍登录';
+      }
+      var alertBox = gwEl('wbs-gw-alert');
+      if (alertBox) {
+        alertBox.innerHTML = '';
+        if (installed && s.versionDrift) {
+          var a1 = el('div', 'wbs-gw-alert-line');
+          a1.setAttribute('data-wbs-i18n-skip', '');
+          a1.textContent = '可升级：当前 ' + (s.gatewayVersion || '?') + ' → ' + (s.expectedVersion || '?') + '（点「安装 / 更新」，会自动停→装→重启）';
+          alertBox.appendChild(a1);
+        }
+        if (installed && running && h.reachable === false) {
+          var a2 = el('div', 'wbs-gw-alert-line');
+          a2.setAttribute('data-wbs-i18n-skip', '');
+          a2.textContent = '进程在跑但 /healthz 探不通 —— 可能刚启动或端口被占，可点「检查」。';
+          alertBox.appendChild(a2);
+        }
+      }
+
+      var auto = gwEl('wbs-gw-auto');
+      if (auto) {
+        auto.checked = !!s.autoStart;
+        auto.disabled = !installed;
+        auto.title = '开启后，WorkDaddy 每次启动都会把网关一并拉起（注意：关掉网关闭面板不影响网关进程）';
+      }
+
+      // 按钮：状态机（避免「没装也能点启动」）
+      var box = gwEl('wbs-gw-actions');
+      if (box) {
+        box.innerHTML = '';
+        var mk = function (label, act, cls, title, enabled) {
+          var b = gwBtnEl(label, act, cls, title);
+          if (enabled === false) b.disabled = true;
+          box.appendChild(b);
+          return b;
+        };
+        mk('安装 / 更新', 'install', 'primary', installed ? '重新下载并校验官方二进制（会先停进程，装完自动重启）' : '下载官方二进制（约 3.4MB，SHA-256 校验）并用本机账号生成凭证');
+        mk('启动', 'start', '', '', installed && !running);
+        mk('停止', 'stop', '', '', installed && running);
+        mk('复制密钥', 'key', '', '复制网关 api_key（走剪贴板，不常驻面板）', installed);
+        mk(gwState.modelsShown ? '收起模型' : '注册模型', 'models', '', '挑选要写进 WorkBuddy models.json 的网关模型（含思考档位；写前自动备份）', installed && running);
+        mk('撤销注册', 'unregister', '', '按上次登记的名单摘掉本插件写入的模型条目', installed && (s.registeredModelCount || 0) > 0);
+        mk(gwState.logShown ? '收起日志' : '日志', 'log', '', '看网关运行日志尾部（排障）', installed);
+        mk('检查', 'probe', '', '重新探活一次', installed && running);
+        var poolDrift = (s.accountPool && s.accountPool.missing) || 0;
+        mk('同步账号池' + (poolDrift ? ' (' + poolDrift + ')' : ''), 'sync-accounts', poolDrift ? 'primary' : '',
+          '把本仓已登录的账号补进网关账号池（增量、幂等）。账号登录后本应自动同步，这是手动兜底', installed);
+        mk('打开网关面板', 'panel', '', '打开网关自带的 7 视图管理面板（账号池 / 用量 / 积分 / 任务 / 模型档位 / 配置 / 日志）', installed);
+        mk('复制用法', 'usage', 'primary', '复制 OpenAI 兼容配置片段（含 base_url 与 api_key）', installed);
+      }
+
+      // 用法块（常显，装了就显示）
+      var usage = gwEl('wbs-gw-usage');
+      if (usage) {
+        if (installed) {
+          usage.style.display = '';
+          usage.setAttribute('data-wbs-i18n-skip', '');
+          usage.textContent = 'base_url  http://127.0.0.1:' + (s.port || '') + '/v1\n'
+            + 'api_key   ' + (s.apiKeyHint || '') + '（点「复制用法」拿到完整片段）\n'
+            + 'model     网关里的模型 id，形如 cn:deepseek-v4.1-flash';
+        } else {
+          usage.style.display = 'none';
+        }
+      }
+
+      // 账号池：运行中才拉
+      if (installed && running) {
+        var pool = gwEl('wbs-gw-pool');
+        if (pool) pool.style.display = '';
+        gwFetchPool();
+      } else {
+        var p2 = gwEl('wbs-gw-pool');
+        if (p2) { p2.style.display = ''; gwRenderPool(null); }
+        gwState.pool = null;
+      }
+
+      var risk = gwEl('wbs-gw-risk');
+      if (risk) {
+        risk.setAttribute('data-wbs-i18n-skip', '');
+        risk.textContent = '⚠️ 该网关以伪造客户端指纹直连上游，存在账号风控风险；仅限自用，请勿分发额度。';
+      }
+    }
+
+    function gwFetchPool() {
+      if (!gwState.last || !gwState.last.running) return;
+      api('/api/gateway/pool').then(function (d) {
+        if (d && d.ok) { gwState.pool = d.pool; gwRenderPool(d.pool); }
+      }).catch(function (e) {
+        var box = gwEl('wbs-gw-pool');
+        if (!box) return;
+        box.innerHTML = '';
+        var n = el('div', 'wbs-gw-meta');
+        n.setAttribute('data-wbs-i18n-skip', '');
+        n.textContent = '读账号池失败：' + ((e && e.message) || e);
+        box.appendChild(n);
+      });
+    }
+
+    function gwRefresh() {
+      return api('/api/gateway').then(function (d) {
+        if (d && d.ok) gwRender(d.gateway);
+      }).catch(function () { /* 静默：面板其它部分不该被网关拖累 */ });
+    }
+
+    function gwCopyUsage() {
+      return api('/api/gateway/api-key').then(function (d) {
+        if (!d || !d.ok || !d.apiKey) throw new Error((d && d.error) || '取不到密钥');
+        var s = gwState.last || {};
+        var text = 'base_url: http://127.0.0.1:' + (s.port || '') + '/v1\n'
+          + 'api_key: ' + d.apiKey + '\n'
+          + 'model: cn:deepseek-v4.1-flash（换网关里任意模型 id；完整列表见网关面板「模型与档位」）\n';
+        return copyPlainText(text);
+      }).then(function () { toast('用法已复制到剪贴板', false, root); })
+        .catch(function (e) { toast('复制失败: ' + ((e && e.message) || e), true, root); });
+    }
+
+    function gwToggleLog() {
+      var box = gwEl('wbs-gw-log');
+      if (!box) return;
+      if (gwState.logShown) {
+        gwState.logShown = false;
+        box.style.display = 'none';
+        box.textContent = '';
+      } else {
+        gwState.logShown = true;
+        box.style.display = '';
+        box.textContent = '读取中…';
+        api('/api/gateway/log?lines=60').then(function (d) {
+          var lines = (d && d.lines) || [];
+          box.textContent = lines.length ? lines.join('\n') : '（日志为空）';
+        }).catch(function (e) {
+          box.textContent = '读取日志失败：' + ((e && e.message) || e);
+        });
+      }
+      var btn = gwEl('wbs-gw-actions') && gwEl('wbs-gw-actions').querySelector('[data-gw="log"]');
+      if (btn) btn.textContent = gwState.logShown ? '收起日志' : '日志';
+    }
+
+    /** 倍率 "x0.05" → 0.05（取不到时给个大值，排序时沉底）。 */
+    function gwCreditsNum(s) {
+      var m = /([0-9]+(?:\.[0-9]+)?)/.exec(String(s || ''));
+      return m ? parseFloat(m[1]) : 9999;
+    }
+
+    /** 一个模型的徽标（思考档位 / 只能思考 / 视觉 / 上下文 / 倍率）。 */
+    function gwModelBadges(m) {
+      var out = [];
+      if (m.supportsReasoning) out.push(m.efforts && m.efforts.length ? ('思考 ' + m.efforts.join('/')) : '思考');
+      if (m.onlyReasoning) out.push('只能思考');
+      if (m.supportsImages) out.push('视觉');
+      if (m.context) out.push(Math.round(m.context / 1000) + 'k');
+      if (m.credits) out.push(m.credits);
+      return out;
+    }
+
+    /** 打开「注册模型」选择面板：拉可取清单 → 渲染（默认只勾本插件已注册的）。 */
+    function gwOpenModels() {
+      var box = gwEl('wbs-gw-models');
+      if (!box) return;
+      gwState.modelsShown = true;
+      gwState.modelsSel = null;
+      box.style.display = '';
+      var list = gwEl('wbs-gw-models-list');
+      if (list) list.textContent = '读取中…';
+      var btn = gwEl('wbs-gw-actions') && gwEl('wbs-gw-actions').querySelector('[data-gw="models"]');
+      if (btn) btn.textContent = '收起模型';
+      api('/api/gateway/models-available').then(function (d) {
+        if (!d || !d.ok) throw new Error((d && d.error) || '取不到模型清单');
+        gwState.models = d.models || [];
+        var sel = {};
+        // 打开即回填**当前真实状态**：models.json 里已经有的（本插件写的 / 你手工配的）一律勾上 ——
+        // 于是「勾选 = 保留或安装，取消勾选 = 从 WorkBuddy 移除」从打开那一刻起就是自洽的。
+        gwState.models.forEach(function (m) { sel[m.id] = m.registration !== 'absent'; });
+        gwState.modelsSel = sel;
+        gwState.modelsBase = Object.assign({}, sel);
+        gwRenderModels();
+      }).catch(function (e) {
+        if (list) list.textContent = '读取失败：' + ((e && e.message) || e);
+      });
+    }
+
+    function gwCloseModels() {
+      var box = gwEl('wbs-gw-models');
+      if (box) box.style.display = 'none';
+      gwState.modelsShown = false;
+      var btn = gwEl('wbs-gw-actions') && gwEl('wbs-gw-actions').querySelector('[data-gw="models"]');
+      if (btn) btn.textContent = '注册模型';
+    }
+
+    function gwRenderModels() {
+      var host = gwEl('wbs-gw-models-list');
+      if (host && !host.getAttribute('data-ctx-bound')) {
+        host.setAttribute('data-ctx-bound', '1');
+        host.addEventListener('change', gwOnCtxChange);
+      }
+      var bulk = gwEl('wbs-gw-ctx-bulk');
+      if (bulk && !bulk.getAttribute('data-ctx-bound')) {
+        bulk.setAttribute('data-ctx-bound', '1');
+        bulk.addEventListener('change', function () {
+          var v = bulk.value;
+          bulk.value = '';
+          if (v === '') return;
+          if (v === '-1') {
+            gwCtxInlineEdit(bulk, 0, function (n) { gwSetAllContexts(n); });
+            return;
+          }
+          gwSetAllContexts(Number(v) || 0);
+        });
+      }
+      var list = gwEl('wbs-gw-models-list');
+      if (!list) return;
+      var items = gwState.models || [];
+      var sel = gwState.modelsSel || {};
+      var running = !!(gwState.last && gwState.last.running);
+      list.innerHTML = '';
+      items.forEach(function (m) {
+        // ⚠️ 行容器必须是 div：行内现在有 <select>，label 会把「点下拉」当成「切换勾选」
+        var row = el('div', 'wbs-gw-mrow');
+        row.setAttribute('data-wbs-i18n-skip', '');
+        var pick = el('label', 'wbs-gw-mpick');
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.setAttribute('data-gwmid', m.id);
+        cb.checked = !!sel[m.id];
+        cb.disabled = !running;
+        var main = el('span', 'wbs-gw-mmain');
+        var nm = el('span', 'wbs-gw-mname');
+        nm.textContent = m.name || m.id;
+        nm.title = m.id + (m.description ? '\n' + m.description : '');
+        main.appendChild(nm);
+        gwModelBadges(m).forEach(function (t) {
+          var b = el('span', 'wbs-gw-mbadge');
+          b.textContent = t;
+          main.appendChild(b);
+        });
+        var st = el('span', 'wbs-gw-mstate' + (m.registration === 'registered' ? ' ok' : (m.registration === 'external' ? ' warn' : '')));
+        st.textContent = m.registration === 'registered' ? '已注册' : (m.registration === 'external' ? '已存在' : '未注册');
+        if (m.registration === 'registered') st.title = '已写进 WorkBuddy 自定义模型。取消勾选 → 点「应用」，即可把它从 WorkBuddy 里移除。';
+        if (m.registration === 'external') st.title = 'models.json 里已有这个模型的条目（指向同一网关，多半是你手工配的）。勾选 = 保留它并同步网关最新的能力字段（id 保持不变）；取消勾选 → 点「应用」= 从 WorkBuddy 里移除。';
+        pick.appendChild(cb); pick.appendChild(main);
+        row.appendChild(pick); row.appendChild(st);
+
+        // 上下文下拉：只有「有对应条目」的才可调（未注册的没东西可改）
+        var ctx = document.createElement('select');
+        ctx.className = 'wbs-gw-mctx';
+        ctx.setAttribute('data-gwctx', m.id);
+        ctx.title = '客户端认知的上下文窗口（写 models.json 的 maxInputTokens + contextWindow.defaultLength）。'
+          + '\n⚠️ 官方目录给 deepseek / glm 这类模型预置了「默认 300K」，只改 maxInputTokens 会被它盖住，'
+          + '\n所以这里两个字段一起写 —— 面板上的值才是客户端真正会用的值。'
+          + '\n调小 → 客户端会更早自行压缩，历史不会堆到触发裁头；'
+          + '\n调大 → 能塞更多历史，但更容易被裁。'
+          + '\n⚠️ 只对新建会话生效；只影响客户端怎么规划上下文，不改变网关真实能吞多少 token。';
+        var cur = Number(m.currentMaxInput) || 0;
+        ctx.setAttribute('data-gwcur', String(cur));
+        var opts = GW_CTX_PRESETS.slice();
+        if (cur > 0 && !opts.some(function (o) { return o.v === cur; })) {
+          opts.splice(opts.length - 1, 0, { v: cur, label: gwCtxLabel(cur) });
+        }
+        opts.forEach(function (o) {
+          var op = document.createElement('option');
+          op.value = String(o.v);
+          op.textContent = o.label;
+          if (o.v === cur) op.selected = true;
+          ctx.appendChild(op);
+        });
+        var custom = document.createElement('option');
+        custom.value = '-1';
+        custom.textContent = '自定义…';
+        ctx.appendChild(custom);
+        if (m.registration === 'absent') {
+          // 未注册 = models.json 里还没有条目，没有东西可调 —— 直接不渲染下拉
+          // （渲染成灰下拉会让人以为能点，反而误导）
+          var dash = el('span', 'wbs-gw-mctx-off');
+          dash.textContent = '—';
+          dash.title = '还没注册进 WorkBuddy，没有可调的条目。先勾选并「应用」再调。';
+          row.appendChild(dash);
+        } else {
+          row.appendChild(ctx);
+        }
+
+        list.appendChild(row);
+      });
+      var sum = gwEl('wbs-gw-models-sum');
+      if (sum) {
+        var c = { registered: 0, external: 0, absent: 0 };
+        items.forEach(function (m) { c[m.registration] = (c[m.registration] || 0) + 1; });
+        sum.textContent = '共 ' + items.length + ' 个 · 已注册 ' + c.registered + ' · 已存在 ' + c.external + ' · 未注册 ' + c.absent;
+      }
+      gwUpdateModelsDiff();
+    }
+
+    /** 上下文下拉的 change 委托：读值 → 自定义走行内输入 → 写盘。 */
+    function gwOnCtxChange(e) {
+      var sel = e.target;
+      if (!sel || !sel.getAttribute || !sel.getAttribute('data-gwctx')) return;
+      var modelId = sel.getAttribute('data-gwctx');
+      var v = String(sel.value);
+      if (v === '-1') {
+        var cur = Number(sel.getAttribute('data-gwcur')) || 0;
+        sel.value = String(cur);   // 先复位，免得停在一个不存在的档位上
+        gwCtxInlineEdit(sel, cur, function (n) { gwSetModelContext(modelId, n, null); });
+        return;
+      }
+      gwSetModelContext(modelId, Number(v) || 0, null);
+    }
+
+    /** 差异预览：应用后会发生什么。基准 = 面板打开时的勾选快照（所以「只是打开」不算改动）。 */
+    function gwUpdateModelsDiff() {
+      var box = gwEl('wbs-gw-models-diff');
+      var sel = gwState.modelsSel || {};
+      var base = gwState.modelsBase || {};
+      var add = 0, del = 0;
+      (gwState.models || []).forEach(function (m) {
+        var now = !!sel[m.id], was = !!base[m.id];
+        if (now && !was) add += 1;
+        if (!now && was) del += 1;
+      });
+      var parts = [];
+      if (add) parts.push('新增 ' + add);
+      if (del) parts.push('移除 ' + del);
+      var changed = add + del;
+      if (box) {
+        box.textContent = changed ? ('将 ' + parts.join(' · ')) : '与当前一致，无改动';
+        box.classList.toggle('warn', del > 0);
+      }
+      // 「应用」按钮直接说明这次会动多少 —— 用户抱怨「不能取消」的根因就是看不出取消勾选会怎样
+      var apply = gwEl('wbs-gw-models') && gwEl('wbs-gw-models').querySelector('[data-gw="mk-apply"]');
+      if (apply) {
+        apply.disabled = !changed;
+        apply.textContent = changed ? ('应用（' + changed + ' 项改动）') : '应用';
+      }
+    }
+
+    /** 勾选状态回填到 DOM（工具按钮改完 sel 后调用）。 */
+    function gwSyncModelsChecks() {
+      var list = gwEl('wbs-gw-models-list');
+      if (!list) return;
+      var sel = gwState.modelsSel || {};
+      var boxes = list.querySelectorAll('input[data-gwmid]');
+      for (var i = 0; i < boxes.length; i += 1) boxes[i].checked = !!sel[boxes[i].getAttribute('data-gwmid')];
+    }
+
+    function gwModelsTool(act) {
+      var items = gwState.models || [];
+      if (!gwState.modelsSel) gwState.modelsSel = {};
+      var sel = gwState.modelsSel;
+      if (act === 'mk-cancel') { gwCloseModels(); return; }
+      if (act === 'mk-apply') { gwApplyModels(); return; }
+      if (act === 'mk-all') items.forEach(function (m) { sel[m.id] = true; });
+      else if (act === 'mk-none') items.forEach(function (m) { sel[m.id] = false; });
+      else if (act === 'mk-cheap') {
+        sel = {};
+        items.slice().sort(function (a, b) { return gwCreditsNum(a.credits) - gwCreditsNum(b.credits); })
+          .slice(0, 5).forEach(function (m) { sel[m.id] = true; });
+        gwState.modelsSel = sel;
+      }
+      gwRenderModels();
+      gwSyncModelsChecks();
+    }
+
+    function gwApplyModels() {
+      var sel = gwState.modelsSel || {};
+      var ids = [];
+      (gwState.models || []).forEach(function (m) { if (sel[m.id]) ids.push(m.id); });
+      toast('应用模型注册中…', false, root);
+      api('/api/gateway/register-models', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ selected: ids }),
+      }).then(function (d) {
+        if (!d || !d.ok) throw new Error((d && d.error) || '失败');
+        var msg = '模型已更新：新增 ' + (d.added || 0) + ' · 移除 ' + (d.removed || 0);
+        if (d.rewritten) msg += ' · 更新 ' + d.rewritten;
+        if (d.skipped && d.skipped.length) msg += ' · 跳过重复 ' + d.skipped.length;
+        toast(msg, false, root);
+        return gwRefresh().then(function () { if (gwState.modelsShown) gwOpenModels(); });
+      }).catch(function (e) {
+        toast('应用失败: ' + ((e && e.message) || e), true, root);
+      });
     }
     function buildGatewayCard() {
       if (!enhancePane || gwCardEl()) return;
       enhancePane.insertAdjacentHTML('beforeend',
-        '<div class="wbs-pcard" id="wbs-gw-card">' +
-        '<div class="wbs-pcard-title"><span>API 网关</span><span class="wbs-pcard-sub" id="wbs-gw-sub">读取中…</span></div>' +
-        '<div class="wbs-nd-row"><span class="wbs-nd-hint" id="wbs-gw-info"></span></div>' +
-        '<div class="wbs-nd-row">' +
-        gwBtn('复制密钥', 'data-gw="key"') +
-        gwBtn('安装 / 更新', 'data-gw="install"') +
-        gwBtn('启动', 'data-gw="start"') +
-        gwBtn('停止', 'data-gw="stop"') +
-        gwBtn('注册模型', 'data-gw="models"') +
-        gwBtn('打开网关面板', 'id="wbs-gw-open"') +
-        '</div>' +
-        '<div class="wbs-nd-row"><span class="wbs-nd-hint">把账号额度暴露成本地 OpenAI 兼容接口（/v1/chat/completions）。'
-        + '⚠️ 该网关以伪造客户端指纹直连上游，存在账号风控风险；仅限自用，请勿分发额度。</span></div>' +
+        '<div class="wbs-pcard collapsed" id="wbs-gw-card">' +
+        '<button class="wbs-fold-head" type="button" id="wbs-gw-expand" aria-expanded="false" title="展开 / 收起反代控制台">' +
+        '<span class="wbs-fold-chevron"></span>' +
+        '<span class="wbs-fold-title">API 网关</span>' +
+        '<span class="wbs-fold-summary" id="wbs-gw-sub">读取中…</span>' +
+        '</button>' +
         '</div>');
+      // 控制台浮层挂在 .wbs-panel 上 —— 挂 pane 里会被 .wbs-body 的 overflow 裁切（同 ops-popover 的理由）。
+      if (panel && !panel.querySelector('#wbs-gw-dock')) {
+        panel.insertAdjacentHTML('beforeend',
+          '<div class="wbs-gw-dock" id="wbs-gw-dock" hidden>' +
+          '<div class="wbs-gw-dock-head">' +
+          '<span class="wbs-gw-dock-title">API 网关 · 反代控制台</span>' +
+          '<span class="wbs-gw-dock-sub" id="wbs-gw-dock-sub"></span>' +
+          '<button class="wbs-ops-close" type="button" id="wbs-gw-dock-close" title="收起（Esc）" aria-label="收起">✕</button>' +
+          '</div>' +
+          '<div class="wbs-gw-dock-body" id="wbs-gw-dock-body">' +
+          '<div class="wbs-nd-row">' +
+          '<span class="wbs-nd-title">反代为 OpenAI 接口</span>' +
+          '<span class="wbs-gw-meta" id="wbs-gw-meta"></span>' +
+          '<label class="wbs-switch" title="WorkDaddy 启动时自动拉起网关"><input type="checkbox" id="wbs-gw-auto"><span class="wbs-switch-slider"></span></label>' +
+          '</div>' +
+          '<div id="wbs-gw-alert"></div>' +
+          '<div id="wbs-gw-pool" class="wbs-gw-pool"></div>' +
+          '<pre class="wbs-gw-usage" id="wbs-gw-usage" style="display:none"></pre>' +
+          '<div class="wbs-nd-row"><span class="wbs-gw-actions" id="wbs-gw-actions"></span></div>' +
+          '<pre class="wbs-gw-log" id="wbs-gw-log" style="display:none"></pre>' +
+          '<div class="wbs-gw-models" id="wbs-gw-models" style="display:none">' +
+          '<div class="wbs-gw-models-bar"><span class="wbs-gw-meta" id="wbs-gw-models-sum"></span>' +
+          '<span class="wbs-gw-models-tools">' +
+          '<button type="button" class="wbs-mini-btn" data-gw="mk-all" title="全部勾选；再点「应用」即全部写入 WorkBuddy 自定义模型">全选</button>' +
+          '<button type="button" class="wbs-mini-btn" data-gw="mk-none" title="取消全部勾选；再点「应用」即把已注册的网关模型从 WorkBuddy 里全部移除">全不选</button>' +
+          '<button type="button" class="wbs-mini-btn" data-gw="mk-cheap" title="按积分倍率从低到高取前 5 个">只选便宜</button>' +
+          '<select class="wbs-gw-mctx wbs-gw-mctx-bulk" id="wbs-gw-ctx-bulk" title="把同一个上下文档位应用到**全部已注册模型**">' +
+          '<option value="">统一上下文…</option>' +
+          '<option value="0">模型默认</option>' +
+          '<option value="1000000">1M</option>' +
+          '<option value="600000">600K</option>' +
+          '<option value="300000">300K</option>' +
+          '<option value="200000">200K</option>' +
+          '<option value="100000">100K</option>' +
+          '<option value="-1">自定义…</option>' +
+          '</select>' +
+          '</span></div>' +
+          '<div class="wbs-gw-models-hint" id="wbs-gw-models-hint">打开时已按 <b>当前实际状态</b> 勾好（models.json 里已有的都会勾上）。勾选 = 保留或写进 WorkBuddy 自定义模型；<b>取消勾选后点「应用」= 从 WorkBuddy 里移除该模型</b>。标「已存在」的是你手工配的条目，勾选会就地更新它（id 不变）。<br><b>右侧「上下文」</b>= 客户端认知的窗口（同时写 <code>maxInputTokens</code> 与 <code>contextWindow.defaultLength</code>）：调小可让客户端更早自行压缩、避免历史堆到触发裁头；<b>只对新建会话生效，已有会话的预算不会回溯</b>。<br>⚠️ 客户端自己那个「上下文」按钮里的档位只显示<b>当前值附近 2~3 档</b>（官方写死只认 2/3 档，给多了它整块不渲染），要换其它档位在这里选，改完<b>重启客户端</b>才会读到新档位。</div>' +
+          '<div class="wbs-gw-models-list" id="wbs-gw-models-list"></div>' +
+          '<div class="wbs-gw-models-foot"><span class="wbs-gw-meta" id="wbs-gw-models-diff"></span>' +
+          '<span class="wbs-gw-models-tools">' +
+          '<button type="button" class="wbs-mini-btn" data-gw="mk-cancel" title="只关闭这个面板，不改动 models.json">关闭</button>' +
+          '<button type="button" class="wbs-mini-btn primary" data-gw="mk-apply">应用</button>' +
+          '</span></div>' +
+          '</div>' +
+          '<div class="wbs-gw-meta" id="wbs-gw-risk"></div>' +
+          '</div>' +
+          '</div>');
+      }
       var card = gwCardEl();
       if (!card) return;
-      card.addEventListener('click', function (e) {
-        var btn = e.target && e.target.closest ? e.target.closest('[data-gw],#wbs-gw-open') : null;
-        if (!btn) return;
-        if (btn.id === 'wbs-gw-open') {
-          var url = btn.getAttribute('data-url');
-          if (url) { try { window.open(url, '_blank'); } catch (err) { /* 被拦就静默 */ } }
-          return;
-        }
+      var gwExp = card.querySelector('#wbs-gw-expand');
+      if (gwExp) gwExp.addEventListener('click', function () { var d = gwDockEl(); gwSetDock(!!d && d.hidden); });
+      var gwClose = gwDockEl() && gwDockEl().querySelector('#wbs-gw-dock-close');
+      if (gwClose) gwClose.addEventListener('click', function () { gwSetDock(false); });
+      gwBindDockKey();
+      var auto = gwEl('wbs-gw-auto');
+      if (auto) {
+        auto.addEventListener('change', function () {
+          var next = !!auto.checked;
+          auto.disabled = true;
+          api('/api/gateway/set-enabled', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: next }) })
+            .then(function () { toast(next ? '已开启自动拉起' : '已关闭自动拉起（不影响当前进程）', false, root); gwRefresh(); })
+            .catch(function (e) { auto.checked = !next; toast('设置失败: ' + ((e && e.message) || e), true, root); })
+            .finally(function () { auto.disabled = false; });
+        });
+      }
+      var gwDockRoot = gwDockEl();
+      if (gwDockRoot) gwDockRoot.addEventListener('change', function (e) {
+        var cb = e.target;
+        if (!cb || !cb.getAttribute || !cb.getAttribute('data-gwmid')) return;
+        if (!gwState.modelsSel) gwState.modelsSel = {};
+        gwState.modelsSel[cb.getAttribute('data-gwmid')] = !!cb.checked;
+        gwUpdateModelsDiff();
+      });
+      if (gwDockRoot) gwDockRoot.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest('[data-gw]') : null;
+        if (!btn || btn.disabled) return;
         var act = btn.getAttribute('data-gw');
         if (act === 'key') {
-          // 2026-09-30 用户要求：面板上直接复制密钥（先前只做在说明 HTML 里）。
-          // 密钥**按需**从 daemon 取（不常驻在卡片状态里），并复用面板既有的 copyPlainText 封装
-          // （它已做 clipboard → execCommand 双保险，与「导出账号」等处一致）。
           if (typeof copyPlainText !== 'function') { toast('复制功能未就绪，请重开面板', true, root); return; }
           api('/api/gateway/api-key').then(function (d) {
             if (!d || !d.ok || !d.apiKey) throw new Error((d && d.error) || '取不到密钥');
             return copyPlainText(d.apiKey);
-          }).then(function () {
-            toast('密钥已复制到剪贴板', false, root);
-          }).catch(function (e) {
-            toast('复制密钥失败: ' + ((e && e.message) || e), true, root);
-          });
+          }).then(function () { toast('密钥已复制到剪贴板', false, root); })
+            .catch(function (e2) { toast('复制密钥失败: ' + ((e2 && e2.message) || e2), true, root); });
+        } else if (act === 'usage') {
+          gwCopyUsage();
+        } else if (act === 'sync-accounts') {
+          api('/api/gateway/sync-accounts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+            .then(function (d) {
+              if (!d || !d.ok) throw new Error((d && d.error) || '失败');
+              var msg = (d.added || d.updated || d.removed)
+                ? ('账号池：新增 ' + (d.added || 0) + ' · 更新 ' + (d.updated || 0) + ' · 移除 ' + (d.removed || 0))
+                : ('账号池已是最新（' + (d.total || 0) + ' 个账号）');
+              toast(msg, false, root);
+              gwRefresh();
+            })
+            .catch(function (e2) { toast('同步账号池失败: ' + ((e2 && e2.message) || e2), true, root); gwRefresh(); });
         } else if (act === 'install') {
-          gwAction('/api/gateway/install', '安装网关',
-            '将下载并校验官方二进制（约 3.4MB，SHA-256 比对），并用本机已登录账号自动生成凭证。继续？');
+          gwArm(btn, '安装 / 更新', function () {
+            gwAction('/api/gateway/install', '安装网关', { body: {} });
+          });
         } else if (act === 'start') {
-          gwAction('/api/gateway/start', '启动网关');
+          gwAction('/api/gateway/start', '启动网关', { body: {} });
         } else if (act === 'stop') {
-          gwAction('/api/gateway/stop', '停止网关');
+          gwAction('/api/gateway/stop', '停止网关', { body: {} });
+        } else if (act.indexOf('mk-') === 0) {
+          gwModelsTool(act);
         } else if (act === 'models') {
-          gwAction('/api/gateway/register-models', '注册模型',
-            '将把网关模型写入 WorkBuddy 的 models.json（写前自动备份，可一键撤销）。继续？');
+          if (gwState.modelsShown) gwCloseModels(); else gwOpenModels();
+        } else if (act === 'unregister') {
+          gwArm(btn, '清空注册', function () {
+            gwAction('/api/gateway/register-models', '清空模型注册', { body: { remove: true } });
+          });
+        } else if (act === 'log') {
+          gwToggleLog();
+        } else if (act === 'probe') {
+          gwAction('/api/gateway/probe', '探活', { body: {} });
+        } else if (act === 'panel') {
+          var url = (gwState.last && gwState.last.panelUrl) || '';
+          if (url) { try { window.open(url, '_blank'); } catch (err) { toast('浏览器拦截了打开请求', true, root); } }
         }
       });
       gwRefresh();
@@ -13276,12 +14108,28 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }
       if (!open && typeof closeAccountNotePopover === 'function') closeAccountNotePopover();
       state.open = open;
+      // 供重注入后恢复开合态用（见脚本顶部 WBS_PREV_PANEL_OPEN）
+      try { window.__wbsPanelOpen = open; } catch (_) {}
       panel.classList.toggle('show', open);
       fab.classList.toggle('hidden', open); // 打开时隐藏按钮
       fabQuietMode.wake();
       if (open) {
         if (newlyOpened && typeof preloadAutomationDiscovery === 'function') preloadAutomationDiscovery().catch(function () {});
-        if (newlyOpened && !(options && options.automation)) api('/api/automations/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'panelOpened' }) }).catch(function () {});
+        // ⚠️ 只有「用户亲手打开」才上报：automation（daemon 程序化开合）与 restore（重注入还原）都不算。
+        if (newlyOpened && !(options && (options.automation || options.restore))) {
+          // 熔断：任何未知链路导致的开合自激都在这里止血（10 秒内超过 4 次就不再上报）。
+          var nowTs = Date.now();
+          if (!window.__wbsPanelOpenedLog || nowTs - window.__wbsPanelOpenedLog.at > 10000 || window.__wbsPanelOpenedLog.at > nowTs) {
+            window.__wbsPanelOpenedLog = { at: nowTs, count: 1 };
+          } else {
+            window.__wbsPanelOpenedLog.count += 1;
+          }
+          if (window.__wbsPanelOpenedLog.count <= 4) {
+            api('/api/automations/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'panelOpened' }) }).catch(function () {});
+          } else if (window.__wbsPanelOpenedLog.count === 5) {
+            console.warn('[wbs] panelOpened 10 秒内已达 5 次，疑似面板开合自激，暂停上报');
+          }
+        }
         if (newlyOpened) state.dailyProgressForceNext = true;
         var panelRefresh = refresh();
         if (newlyOpened && CAPS.accounts) {
@@ -13310,6 +14158,20 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         state.creditRunId++;
         state.dailyProgressRunId++;
       }
+    }
+
+    // ⭐ 重注入恢复：本次注入前面板是展开的 ⇒ 界面建好后自动展开回去（见脚本顶部 WBS_PREV_PANEL_OPEN）。
+    //    ⚠️ 自动化任务正在输入时不恢复（否则会顶掉任务的焦点，且 setOpen 里的守卫会弹一句用户没触发的提示）。
+    //    ⚠️ 带代际守卫：期间若又发生一次重注入，交回给最新副本处理，避免旧副本抢着开面板。
+    if (WBS_PREV_PANEL_OPEN && !window.__wbsAutomationInputActive) {
+      setTimeout(function () {
+        try {
+          if (window.__wbsGeneration !== WBS_GENERATION) return;
+          // restore:true —— 这是「重注入后把面板还原」，不是用户点了机器人按钮，
+          // 不能当成 panelOpened 事件上报（否则会触发自动化任务并可能形成开合循环）。
+          if (!state.open) setOpen(true, { restore: true });
+        } catch (_) {}
+      }, 0);
     }
 
     function setupFabDrag() {
@@ -13404,7 +14266,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     registerDisposer(function () { try { window.removeEventListener('workdaddy:panel-open', panelOpenBridge); } catch (_) {} });
 
     // 登录新账号：弹窗二选一 —— 方法一 假退出当前账号 / 方法二 无感登录
-    logoutBtn.addEventListener('click', function () {
+    if (logoutBtn) logoutBtn.addEventListener('click', function () {
       if (this.disabled) return;
       openLoginChoice();
     });
@@ -13740,7 +14602,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       applyAvatar();
     });
     function applyAvatar() {
-      if (!avatarLibrary) return;
+      if (CAPS.nativeComposer || !avatarLibrary) return;
       var saved = avatarLibrary.snapshot();
       var customList = root.querySelector('#wbs-avatar-custom-list');
       if (customList) {
@@ -15181,6 +16043,17 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
      *  → URL 参数 conversationId/conversation_id → active/aria-selected=true 的官方 data-conversation-id。
      *  全部取不到返回 ''；绝不回退到任意会话、标题或文本（共享的 getConversationId 有任意会话兜底，本模块不用） */
     function acActiveConversationId() {
+      // CodeBuddy 没有 wb SDK，且关闭 composer 增强后连 adapter 预热都不会跑 ⇒ 直接读挂载的官方 adapter。
+      // 注意：这里只读取，不缓存到 window.__wbsAdapter，否则会顺带激活队列/输入相关逻辑。
+      if (PROFILE_ID === 'codebuddy-cn' || PROFILE_ID === 'codebuddy-intl') {
+        try {
+          var nativeAdapter = WBS_COMPAT.findQueueAdapter(document);
+          var nativeId = nativeAdapter && nativeAdapter.adapter && nativeAdapter.adapter.currentActiveSessionId;
+          if (nativeId) return String(nativeId);
+        } catch (_) {}
+        try { return String(WBS_COMPAT.getSelectedConversationId(document) || ''); } catch (_) {}
+        return '';
+      }
       try {
         var a = window.__wbsAdapter;
         if (a && a.currentActiveSessionId) return a.currentActiveSessionId;
@@ -16313,27 +17186,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     /** 会话模块控件绑定：暂存提示词/消息索引/快捷短语开关 + 快捷短语列表。面板每次打开重建时重绑。 */
     function wireSessionControls() {
       var pane2 = enhancePane;
-      // 性能：动效降级分段（关闭 / 流畅 / 极速）。切换即写 localStorage + 改 html 属性，立刻生效。
-      var motionRadios = pane2.querySelectorAll('input[name="wbs-motion-mode"]');
-      if (motionRadios.length) {
-        var motionCur = readPerfMode();
-        Array.prototype.forEach.call(motionRadios, function (input) {
-          input.checked = input.value === motionCur;
-          var opt = input.closest ? input.closest('.wbs-theme-opt') : null;
-          if (opt) opt.classList.toggle('active', input.checked);
-          input.addEventListener('change', function () {
-            if (!input.checked) return;
-            var applied = applyPerfMode(input.value);
-            Array.prototype.forEach.call(motionRadios, function (r) {
-              var o = r.closest ? r.closest('.wbs-theme-opt') : null;
-              if (o) o.classList.toggle('active', r.checked);
-            });
-            toast(applied === 'off' ? '已恢复全部动效'
-              : applied === 'lite' ? '已开启流畅模式：仅停装饰动画'
-              : '已开启极速模式：页面内动画全部静止', false, root);
-          });
-        });
-      }
       if (!pane2) { syncSessionModule(); return; }
       var swS = pane2.querySelector('#wbs-sess-stash');
       if (swS) swS.addEventListener('change', function () { setSessionSwitchWire('stashEnabled', this); });
@@ -16343,11 +17195,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         writeMessageNavigationEnabled(sessState.messageNav);
         if (messageNavigation) messageNavigation.setEnabled(sessState.messageNav);
       });
-      var swT = pane2.querySelector('#wbs-sess-token-rate');
-      if (swT) {
-        swT.checked = readTokenRateEnabled();
-        swT.addEventListener('change', function () { applyTokenRateEnabled(!!this.checked); });
-      }
       var swM = pane2.querySelector('#wbs-md-quick-view');
       if (swM) {
         swM.checked = mdqvReadEnabled();
@@ -18394,7 +19241,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             }
             autoCopyWatch.accountName = '';
           }
-          setBuildTimeout(function () { loadSessions(); }, 800);
+          // 自动复制收尾用静默刷新：用户可能正在勾选下一条，不能整块重置。
+          setBuildTimeout(function () { refreshSessionsSilently(); }, 800);
           scheduleAutoCopyHide(15000);
         }).catch(function () {
           if (Date.now() < autoCopyWatch.deadline) autoCopyWatch.timer = setBuildTimeout(tick, 3000);
@@ -19138,7 +19986,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var debugPanel = document.createElement('div');
     debugPanel.id = 'wbs-debug-panel';
     debugPanel.style.cssText = 'display:none;position:fixed;right:8px;top:8px;z-index:2147483647;background:rgba(0,0,0,.86);color:#fff;font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;padding:9px 12px;border-radius:6px;max-width:420px;white-space:pre-wrap;box-shadow:0 6px 18px rgba(0,0,0,.4);border:1px solid rgba(255,255,255,.1);';
-    document.body.appendChild(debugPanel);
+    mountPersistentOverlay(debugPanel);
     function updateDebugPanel() {
       if (!alive) return;
       // 【性能】调试面默认 display:none（Alt+D 才开），却每 500ms 跑一遍 findSendButton /
@@ -19227,352 +20075,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     //     保留代码与元素，需要时恢复下面两行即可。
     // sessionHealthTimer = setBuildInterval(scanSessionHealth, 1000);
     // setBuildTimeout(scanSessionHealth, 250);
-    // ---- token 速度读数（估算值 ≈，非真值）2026-09-23 ----
-    // 挂点：输入框「下方」的空置提示带 .conversation-input-area__disclaimer
-    //   （实测 1368×36、position:static、pointer-events:none、原生内容只有一行居中的
-    //    「内容由 AI 生成…」⇒ 左侧整块空置）。我们给它加 position:relative 当定位祖先，
-    //    再把读数以绝对定位挂进去 ⇒ 不参与原生布局、不挤动任何控件。
-    //   （早先版本挂在右下角 .wbs-fab 上，但该图标本身只有 41×32，13px 字号实际看不清，已废弃。）
-    // 数据源（CDP 实测比对确定）：
-    //   当前助手消息 = document.querySelectorAll('[class*="cr-frame--left"]') 的末元素
-    //   （实测 --left 是助手、--right 是用户）；
-    //   帧内 '[class*="cr-text-block"]' 是本轮「纯正文」分块——已排除 cr-reasoning（实测 3090 字）
-    //   与工具区（cr-tool-call__slot / cr-tool-exec__command）。其 textContent 长度之和在流式期间
-    //   单调增长，且「正在输出的那一段」也计入（实测 6404 → 6466 → 7315）。
-    //   不用帧总长：帧总长会因工具块折叠而回退（实测 14421 → 12499 → 13824），做差分会出现负增量。
-    // 纪律：① 不新增 body 级 MutationObserver（本文件 16644 行记过这个坑：监听整个 body 会为
-    //          每次 React class mutation 付费）；② 1s tick、空闲即早退；
-    //       ③ 只用 querySelectorAll / textContent —— innerText 与 getBoundingClientRect 会强制
-    //          同步布局，流式期间每秒 reflow 会拖慢渲染本身；
-    //       ④ 读数节点标 data-wbs-i18n-skip（否则每次变值都会触发全局 i18n 扫描）。
-    // 【2026-09-23 定案】默认关闭：读数本质是字符估算（口径见 readRateEstTokens），非真实用量；
-    //   常开会误导，且拖动在跨 iframe 场景易丢事件（已加事件盾修好）。需要时手动开。
-    var TOKEN_RATE_FRAME = '[class*="cr-frame--left"]';
-    var TOKEN_RATE_BLOCKS = ['[class*="cr-text-block"]', '[class*="cr-markdown"]'];
-    var TOKEN_RATE_HOST = '.conversation-input-area__disclaimer';
-    var TOKEN_RATE_WINDOW = 5;              // 滑动窗口样本数（约 5 秒）
-    var TOKEN_RATE_MIN_TOKENS = 5;          // 窗口内增量低于此值不显示，避免 0.1 tok/s 这类噪音
-    var TOKEN_RATE_ASCII_PER_TOKEN = 3.6;   // 内容感知口径（2026-09-23）：ASCII（英文/数字/代码）约 3.6 字符/token
-    var TOKEN_RATE_WIDE_PER_TOKEN = 1.3;    // 内容感知口径：非 ASCII（中/日/韩等宽字符）约 1.3 字符/token
-    var tokenRateState = { samples: [], idle: 0, shown: '', el: null, timer: null, pos: null, saved: false, enabled: false };
-    // ---- 读数可拖动（2026-09-23 追加；次日修正为「不搬动节点」）----
-    // 行为：按住小框直接拖到任意位置；双击复位回「输入框下方」默认位。
-    // 定位：读数常驻 <body> 直下 + position:fixed（视口坐标）——**全程不搬动节点**。
-    //   ⚠️ 踩过的坑：曾在 pointerdown 里把它从输入框宿主摘到 body，结果 Chrome 在改挂父节点时
-    //   会立刻释放指针捕获（实测 lostpointercapture 立即触发），后续 pointermove 全部收不到
-    //   ⇒ 拖动彻底失效（元素纹丝不动）。故改为「一开始就挂在 body」，拖动只改 left/top。
-    // 存储：localStorage 按账号隔离（键含 PROFILE_ID），切号不串位。
-    // 纪律：① getBoundingClientRect / offsetWidth 只在「首次定默认位」「按住拖动」「窗口 resize」
-    //          这类一次性 / 交互路径里读，1s 的 updateTokenRateBadge tick 里一行都不读；
-    //       ② 拖动节点仍带 data-wbs-i18n-skip；③ 坐标夹在视口内，拖出屏幕也拿得回来。
-    var TOKEN_RATE_POS_KEY = 'wbs-token-rate-pos-' + PROFILE_ID;
-    var TOKEN_RATE_DRAG_THRESHOLD = 3;
-    var TOKEN_RATE_DEFAULT_GAP = 6;      // 默认位相对输入框下方空置带的左边距
-    var tokenRateDrag = null;
-    var TOKEN_RATE_ENABLED_KEY = 'workdaddy.tokenRateReadoutEnabled';
-
-    /** 面板开关：是否显示读数。**默认关**（2026-09-23 定案）：读数是字符估算、非真实用量，
-     *  常开会让用户把估算当精确值；需要时在 面板 → 会话 → token 速度读数 手动打开，一旦手动开过就记住。 */
-    function readTokenRateEnabled() {
-      try { return localStorage.getItem(TOKEN_RATE_ENABLED_KEY) === '1'; } catch (e) { return false; }
-    }
-
-    function writeTokenRateEnabled(on) {
-      try { localStorage.setItem(TOKEN_RATE_ENABLED_KEY, on ? '1' : '0'); } catch (e) {}
-    }
-
-    /** 开关变化时立即生效：关 ⇒ 立刻隐藏并停算；开 ⇒ 恢复上一次读数、并重算。 */
-    function applyTokenRateEnabled(on) {
-      tokenRateState.enabled = !!on;
-      writeTokenRateEnabled(!!on);
-      var el = tokenRateState.el;
-      if (!on) {
-        tokenRateState.samples = [];
-        tokenRateState.idle = 0;
-        if (el && !el.hidden) el.hidden = true;
-        return;
-      }
-      // 重新打开：之前若已读到过数值，立即恢复显示（保留 is-stale 旧值提示），不必等下一次流式
-      if (el && el.isConnected && tokenRateState.shown) el.hidden = false;
-      updateTokenRateBadge();
-    }
-
-    /** 读用户拖动后保存的视口坐标；无有效值返回 null。 */
-    function readTokenRatePos() {
-      try {
-        var raw2 = localStorage.getItem(TOKEN_RATE_POS_KEY);
-        if (!raw2) return null;
-        var p = JSON.parse(raw2);
-        if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') return null;
-        if (!isFinite(p.x) || !isFinite(p.y)) return null;
-        return { x: p.x, y: p.y };
-      } catch (e) { return null; }
-    }
-
-    function saveTokenRatePos(x, y) {
-      var p = { x: Math.round(x), y: Math.round(y) };
-      tokenRateState.pos = p;
-      tokenRateState.saved = true;
-      try { localStorage.setItem(TOKEN_RATE_POS_KEY, JSON.stringify(p)); } catch (e) {}
-    }
-
-    /** 默认位 = 输入框下方空置带左侧、垂直居中。量不到返回 null（下次再试）。 */
-    function tokenRateDefaultPos(el) {
-      var host = null;
-      try { host = document.querySelector(TOKEN_RATE_HOST); } catch (e) { return null; }
-      if (!host) return null;
-      var r;
-      try { r = host.getBoundingClientRect(); } catch (e) { return null; }
-      if (!r || !r.width) return null;
-      var h = el.offsetHeight || 40;
-      return { x: r.left + TOKEN_RATE_DEFAULT_GAP, y: r.top + Math.max(0, (r.height - h) / 2) };
-    }
-
-    /** 夹进视口（留 4px 边距）。仅在交互 / 定位路径调用。 */
-    function clampTokenRatePos(el, x, y) {
-      var w = el.offsetWidth || 120;
-      var h = el.offsetHeight || 44;
-      return {
-        x: Math.min(Math.max(4, x), Math.max(4, window.innerWidth - w - 4)),
-        y: Math.min(Math.max(4, y), Math.max(4, window.innerHeight - h - 4))
-      };
-    }
-
-    function applyTokenRatePos(el, pos) {
-      el.style.left = Math.round(pos.x) + 'px';
-      el.style.top = Math.round(pos.y) + 'px';
-    }
-
-    /** 复用页面上已有的读数节点，否则新建；两者都补挂拖动。 */
-    function reuseOrBuildTokenRateEl(el) {
-      if (!el || !el.isConnected) {
-        try { el = document.querySelector('.wbs-token-rate-bar'); } catch (e) { el = null; }
-      }
-      if (!el) {
-        el = document.createElement('span');
-        el.className = 'wbs-token-rate-bar';
-        el.setAttribute('data-wbs-i18n-skip', '');
-        el.setAttribute('title', '按住可拖动 · 双击复位');
-        el.hidden = true;
-        var num = document.createElement('span');
-        num.className = 'wbs-token-rate-num';
-        var unit = document.createElement('span');
-        unit.className = 'wbs-token-rate-unit';
-        unit.textContent = 'tok/s';
-        el.appendChild(num);
-        el.appendChild(unit);
-      }
-      setupTokenRateDrag(el);
-      return el;
-    }
-
-    // ---- 拖动「全屏事件盾」（2026-09-23 追加）----
-    // 症状：小框拖到一半就卡住、或干脆拖不动。原因：拖动路径要经过 WorkBuddy 的预览 iframe /
-    //   产物面板，指针一旦进入 iframe，父文档 window 就再也收不到 pointermove（跨文档无法捕获，
-    //   setPointerCapture 也救不了）。盖一层覆盖全视口的透明 div 后，指针事件永远落在父文档内。
-    // 只在按住期间存在（pointerup/cancel/blur 立即移除），平时零开销、零视觉。
-    var tokenRateShield = null;
-
-    function showTokenRateDragShield() {
-      if (tokenRateShield && tokenRateShield.isConnected) return;
-      try {
-        var d = document.createElement('div');
-        d.className = 'wbs-token-rate-shield';
-        d.setAttribute('data-wbs-i18n-skip', '');
-        d.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483646;background:transparent;cursor:grabbing';
-        document.body.appendChild(d);
-        tokenRateShield = d;
-      } catch (e) { tokenRateShield = null; }
-    }
-
-    function hideTokenRateDragShield() {
-      var d = tokenRateShield;
-      tokenRateShield = null;
-      try { if (d && d.parentNode) d.parentNode.removeChild(d); } catch (e) {}
-    }
-
-    /** 挂拖动：按住拖到任意位置（只改 left/top，**绝不搬动节点**），双击复位。
-     *  move/up 挂在 window 的**捕获阶段**，不依赖 setPointerCapture —— 实测本环境
-     *  （WorkBuddy/CDP 注入的鼠标事件）下 setPointerCapture 会静默失效：press 后指针一离开
-     *  小框就再也收不到 pointermove。而拖动本来就必须跟手到框外，所以直接吃 window 事件最稳。 */
-    function setupTokenRateDrag(el) {
-      if (el.__wbsDragBound) return;
-      el.__wbsDragBound = true;
-
-      listen(el, 'pointerdown', function (e) {
-        if (e.button !== undefined && e.button !== 0) return;
-        var rect = el.getBoundingClientRect();   // 仅交互时读一次布局
-        tokenRateDrag = {
-          pointerId: e.pointerId,
-          startX: e.clientX, startY: e.clientY,
-          startLeft: rect.left, startTop: rect.top,
-          moved: false
-        };
-        el.classList.add('is-dragging');
-        showTokenRateDragShield();
-        try { el.setPointerCapture(e.pointerId); } catch (_) {}   // 能生效更好，不生效也不影响
-        if (e.preventDefault) e.preventDefault();
-        if (e.stopPropagation) e.stopPropagation();
-      });
-
-      function onWinMove(e) {
-        if (!tokenRateDrag || (e.pointerId !== undefined && e.pointerId !== tokenRateDrag.pointerId)) return;
-        var dx = e.clientX - tokenRateDrag.startX;
-        var dy = e.clientY - tokenRateDrag.startY;
-        if (!tokenRateDrag.moved && Math.max(Math.abs(dx), Math.abs(dy)) < TOKEN_RATE_DRAG_THRESHOLD) return;
-        tokenRateDrag.moved = true;
-        var p = clampTokenRatePos(el, tokenRateDrag.startLeft + dx, tokenRateDrag.startTop + dy);
-        tokenRateState.pos = p;
-        applyTokenRatePos(el, p);
-        if (e.preventDefault) e.preventDefault();
-      }
-
-      function finishTokenRateDrag(e) {
-        if (!tokenRateDrag || (e && e.pointerId !== undefined && e.pointerId !== tokenRateDrag.pointerId)) return;
-        var moved = tokenRateDrag.moved;
-        var pos = tokenRateState.pos;
-        tokenRateDrag = null;
-        el.classList.remove('is-dragging');
-        hideTokenRateDragShield();
-        if (moved && pos) saveTokenRatePos(pos.x, pos.y);
-      }
-
-      listen(window, 'pointermove', onWinMove, true);
-      listen(window, 'pointerup', finishTokenRateDrag, true);
-      listen(window, 'pointercancel', finishTokenRateDrag, true);
-      listen(window, 'blur', finishTokenRateDrag, true);   // 拖到一半切窗口/失焦 ⇒ 收尾，别卡在 is-dragging
-
-      // 双击复位：清存储 + 回到输入框下方默认位
-      listen(el, 'dblclick', function (e) {
-        if (e.preventDefault) e.preventDefault();
-        if (e.stopPropagation) e.stopPropagation();
-        tokenRateState.saved = false;
-        tokenRateState.pos = null;
-        try { localStorage.removeItem(TOKEN_RATE_POS_KEY); } catch (_) {}
-        var d = tokenRateDefaultPos(el);
-        if (d) {
-          tokenRateState.pos = clampTokenRatePos(el, d.x, d.y);
-          applyTokenRatePos(el, tokenRateState.pos);
-        }
-      });
-    }
-
-    // 窗口尺寸变化且用户没手动定过位 ⇒ 重新贴回输入框（否则默认位会浮在旧坐标上）
-    listen(window, 'resize', function () {
-      if (tokenRateState.saved) return;
-      tokenRateState.pos = null;
-      var el = tokenRateState.el;
-      if (el && el.isConnected && !el.hidden) {
-        var d = tokenRateDefaultPos(el);
-        if (d) {
-          tokenRateState.pos = clampTokenRatePos(el, d.x, d.y);
-          applyTokenRatePos(el, tokenRateState.pos);
-        }
-      }
-    });
-
-    // 启动即恢复上次拖动位置（saved=true 表示这是用户定的位，不再跟着输入框走）
-    tokenRateState.pos = readTokenRatePos();
-    tokenRateState.saved = !!tokenRateState.pos;
-    tokenRateState.enabled = readTokenRateEnabled();
-    if (!tokenRateState.enabled) applyTokenRateEnabled(false);
-
-    /** 取「当前助手消息」正文，按字符类别折算成 token 估算值；取不到返回 -1。
-     *  口径（2026-09-23 起）：ASCII 字符 ÷ TOKEN_RATE_ASCII_PER_TOKEN，其余（CJK 等宽）÷ TOKEN_RATE_WIDE_PER_TOKEN。
-     *  旧版「字符数 ÷ 1.8」一刀切：纯英文正文低估近半、纯中文正文高估，故改为分类折算。
-     *  仍是估算（真实用量只能从 usage 记录拿），但比一刀切贴近。只用 querySelectorAll + textContent，不触发 reflow。 */
-    function readRateEstTokens() {
-      var frames, frame = null;
-      try { frames = document.querySelectorAll(TOKEN_RATE_FRAME); } catch (e) { return -1; }
-      if (frames && frames.length) frame = frames[frames.length - 1];
-      var scope = frame || document;
-      for (var i = 0; i < TOKEN_RATE_BLOCKS.length; i++) {
-        var blocks;
-        try { blocks = scope.querySelectorAll(TOKEN_RATE_BLOCKS[i]); } catch (e) { continue; }
-        if (!blocks.length) continue;
-        var ascii = 0, wide = 0;
-        for (var j = 0; j < blocks.length; j++) {
-          var t = blocks[j].textContent;
-          if (!t) continue;
-          for (var k = 0; k < t.length; k++) { if (t.charCodeAt(k) < 128) ascii++; else wide++; }
-        }
-        if (ascii + wide > 0) return ascii / TOKEN_RATE_ASCII_PER_TOKEN + wide / TOKEN_RATE_WIDE_PER_TOKEN;
-      }
-      var tail = frame && frame.textContent ? frame.textContent : null;
-      if (!tail) return -1;
-      var a2 = 0, w2 = 0;
-      for (var m = 0; m < tail.length; m++) { if (tail.charCodeAt(m) < 128) a2++; else w2++; }
-      return a2 / TOKEN_RATE_ASCII_PER_TOKEN + w2 / TOKEN_RATE_WIDE_PER_TOKEN;
-    }
-
-    /** 取（必要时新建）读数节点。常驻 body 直下 + position:fixed；无用户位置时贴输入框下方默认位。 */
-    function ensureTokenRateEl() {
-      var el = tokenRateState.el;
-      if (!el || !el.isConnected) el = reuseOrBuildTokenRateEl(el);
-      if (el.parentNode !== document.body) { try { document.body.appendChild(el); } catch (_) {} }
-      // 默认位不在这里解算：此处元素多半还 hidden，offsetHeight=0 量不准；
-      // 统一交给首次「显示」时（setTokenRateBadge，已把 hidden 置 false）算。
-      if (tokenRateState.pos) applyTokenRatePos(el, clampTokenRatePos(el, tokenRateState.pos.x, tokenRateState.pos.y));
-      tokenRateState.el = el;
-      return el;
-    }
-
-    function setTokenRateBadge(value) {
-      if (!tokenRateState.enabled) return;
-      var el = tokenRateState.el;
-      if (el && !el.isConnected) { tokenRateState.el = null; el = null; }
-      if (!value) {
-        // 读不到 / 没有输出 ⇒ 【保留上一次读数】，只加 .is-stale 降透明度提示「这是旧值」，不再隐藏。
-        // 从未读到过（还没有第一次读数）⇒ 保持隐藏，别闪一个空框。
-        if (el && !el.hidden && !el.classList.contains('is-stale')) el.classList.add('is-stale');
-        return;
-      }
-      if (!el) el = ensureTokenRateEl();
-      if (!el) return;
-      if (el.hidden) el.hidden = false;   // 先可见，offsetHeight 才量得准 ⇒ 默认位算得准
-      if (!tokenRateState.pos) {
-        var d = tokenRateDefaultPos(el);
-        if (d) { tokenRateState.pos = d; applyTokenRatePos(el, clampTokenRatePos(el, d.x, d.y)); }
-      }
-      // 拿到新值 ⇒ 先撤掉旧值提示（即使数值恰好相同，也要恢复不透明度）
-      if (el.classList.contains('is-stale')) el.classList.remove('is-stale');
-      if (tokenRateState.shown === value) return; // 值未变 ⇒ 不碰 DOM
-      tokenRateState.shown = value;
-      var num = el.querySelector('.wbs-token-rate-num');
-      if (num) num.textContent = '≈ ' + value;
-      el.hidden = false;
-    }
-
-    function updateTokenRateBadge() {
-      if (!alive) return;
-      if (!tokenRateState.enabled) return;   // 面板开关关掉 ⇒ 直接不算
-      var tok = -1;
-      try { tok = readRateEstTokens(); } catch (e) { return; }
-      if (tok < 0) { tokenRateState.samples = []; setTokenRateBadge(''); return; }
-      var now = Date.now();
-      var s = tokenRateState.samples;
-      // 换轮（估算值回退）或中间静默 >3s ⇒ 窗口重置
-      if (s.length && (tok < s[s.length - 1].tok || (now - s[s.length - 1].at) > 3000)) s.length = 0;
-      if (s.length && tok === s[s.length - 1].tok) {
-        tokenRateState.idle += 1;
-        if (tokenRateState.idle >= 3) { tokenRateState.samples = []; setTokenRateBadge(''); }
-        return;
-      }
-      tokenRateState.idle = 0;
-      s.push({ tok: tok, at: now });
-      while (s.length > TOKEN_RATE_WINDOW) s.shift();
-      if (s.length < 2) return;
-      var first = s[0], last = s[s.length - 1];
-      var dt = (last.at - first.at) / 1000;
-      if (dt < 1) return;
-      var dTok = last.tok - first.tok;
-      if (dTok < TOKEN_RATE_MIN_TOKENS) { setTokenRateBadge(''); return; }
-      var rate = dTok / dt;
-      setTokenRateBadge(rate >= 100 ? String(Math.round(rate)) : rate.toFixed(1));
-    }
-
-    tokenRateState.timer = setBuildInterval(updateTokenRateBadge, 1000);
-    registerDisposer(function () { tokenRateState.timer = null; });
     // 初始同步防休眠状态（悬浮角标）
     syncSleepState();
     // 定期同步（30s）：daemon 重启或外部状态变化后角标保持一致
@@ -20566,6 +21068,122 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   }
 
   var pendingReady = null;
+  /* ---------------- 侧栏运营位轮播广告：常驻清理器（2026-10-21） ----------------
+     内置任务 close-buddy-popups 只在 pageReady 后约 30 秒内轮询（100 × 300ms），
+     而「积分包购买全面开放 / 做任务赢积分好礼」这组运营位是页面就绪很久之后才冒出来的
+     ⇒ 那一轮窗口早关了，只能看着它一直挂着。这里改成 inject 层常驻轻量扫描：
+     每 1.5 秒查一次（页面隐藏时跳过），命中就按真实指针序列点关闭，
+     点不掉再兜底隐藏宿主 slot。只在 WorkBuddy profile 生效。
+     ⚠️ 幂等：window.__wbsAdGuard 作代际守卫，重注入时先 stop 旧实例。
+     ⚠️ 定位器**绝不能**用 daemon 那套带 visible 的判断：daemon 的 dom.click 对
+        visible=true 会 skipMove 而点不掉（见 2026-10-16 排查记录）；这里是页内直点，
+        必须发完整 pointerdown → mousedown → pointerup → mouseup → click 序列。 */
+  var WBS_AD_GUARD_HOST = '.wb-slot--avatar-top-combo';
+  var WBS_AD_GUARD_CLOSE = 'button[data-track-id="pc_fusion_carousel_close"]';
+  var WBS_AD_GUARD_EXPOSE = '[data-track-expose-id="pc_fusion_carousel_show"]';
+  var WBS_AD_GUARD_TICK_MS = 1500;
+
+  function wbsTapAdClose(btn) {
+    try {
+      var rect = btn.getBoundingClientRect();
+      var cx = rect.left + rect.width / 2;
+      var cy = rect.top + rect.height / 2;
+      var base = { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, view: window };
+      var pointer = Object.assign({}, base, { pointerId: 1, isPrimary: true, pointerType: 'mouse', button: 0 });
+      btn.dispatchEvent(new PointerEvent('pointerdown', Object.assign({}, pointer, { buttons: 1 })));
+      btn.dispatchEvent(new MouseEvent('mousedown', Object.assign({}, base, { button: 0, buttons: 1 })));
+      btn.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, pointer, { buttons: 0 })));
+      btn.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, base, { button: 0, buttons: 0 })));
+      btn.dispatchEvent(new MouseEvent('click', Object.assign({}, base, { button: 0, buttons: 0 })));
+      return true;
+    } catch (e) {
+      try { btn.click(); return true; } catch (_) { return false; }
+    }
+  }
+
+  function startSidebarAdGuard() {
+    if (PROFILE_ID === 'codebuddy-cn' || PROFILE_ID === 'codebuddy-intl') return null;
+    try {
+      var prevGuard = window.__wbsAdGuard;
+      if (prevGuard && typeof prevGuard.stop === 'function') prevGuard.stop();
+    } catch (_) {}
+    var stopped = false;
+    var timer = null;
+    var HIDDEN_ATTR = 'data-wbs-ad-hidden';
+
+    function hideHost(host) {
+      try {
+        host.setAttribute(HIDDEN_ATTR, '1');
+        host.style.setProperty('display', 'none', 'important');
+      } catch (_) {}
+    }
+
+    function releaseHost(host) {
+      try {
+        if (!host.getAttribute || host.getAttribute(HIDDEN_ATTR) !== '1') return;
+        host.removeAttribute(HIDDEN_ATTR);
+        if (host.style.getPropertyValue('display') === 'none') host.style.removeProperty('display');
+      } catch (_) {}
+    }
+
+    function scan() {
+      if (stopped) return;
+      var hosts;
+      try { hosts = document.querySelectorAll(WBS_AD_GUARD_HOST); } catch (_) { return; }
+      for (var i = 0; i < hosts.length; i++) {
+        var host = hosts[i];
+        var sr = null;
+        try { sr = host.shadowRoot; } catch (_) { sr = null; }
+        if (!sr) continue;
+        var isAd = false;
+        try { isAd = !!sr.querySelector(WBS_AD_GUARD_EXPOSE); } catch (_) { isAd = false; }
+        if (!isAd) { releaseHost(host); continue; }
+        var btn = null;
+        try { btn = sr.querySelector(WBS_AD_GUARD_CLOSE); } catch (_) { btn = null; }
+        if (!btn) { hideHost(host); continue; }
+        if (host.getAttribute && host.getAttribute(HIDDEN_ATTR) === '1') continue;
+        if (!wbsTapAdClose(btn)) { hideHost(host); continue; }
+        (function (target, fallbackHost) {
+          setTimeout(function () {
+            if (stopped) return;
+            var stillOpen = false;
+            try { stillOpen = !!(target.isConnected && fallbackHost.shadowRoot && fallbackHost.shadowRoot.querySelector(WBS_AD_GUARD_CLOSE)); } catch (_) { stillOpen = false; }
+            if (stillOpen) hideHost(fallbackHost); else releaseHost(fallbackHost);
+          }, 800);
+        })(btn, host);
+      }
+    }
+
+    // 窗口重新可见时立刻扫一次：后台被节流期间冒出来的广告不该再等 1.5 秒。
+    function onAdGuardVisible() {
+      if (stopped || document.hidden) return;
+      scan();
+    }
+    document.addEventListener('visibilitychange', onAdGuardVisible);
+    timer = setInterval(function () {
+      if (stopped) return;
+      if (document.hidden) return;
+      scan();
+    }, WBS_AD_GUARD_TICK_MS);
+    scan();
+
+    var guardApi = {
+      stop: function () {
+        stopped = true;
+        if (timer !== null) { clearInterval(timer); timer = null; }
+        try { document.removeEventListener('visibilitychange', onAdGuardVisible); } catch (_) {}
+        if (window.__wbsAdGuard === guardApi) {
+          try { delete window.__wbsAdGuard; } catch (_) { window.__wbsAdGuard = null; }
+        }
+      },
+      scan: scan,
+    };
+    window.__wbsAdGuard = guardApi;
+    return guardApi;
+  }
+
+  startSidebarAdGuard();
+
   function start() {
     if (currentBuild && currentBuild.alive && currentBuild.alive()) return currentBuild;
     if (document.body) return registerBuild(build());
@@ -20707,18 +21325,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-fab{--wbs-robot-shell:#111;--wbs-robot-eye:#fff;--wbs-robot-blur:none;--wbs-robot-rim:rgba(255,255,255,.55);position:fixed;right:22px;bottom:22px;z-index:2147483647;transform:scale(0.5);transform-origin:bottom right;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;will-change:transform;transition:transform .22s cubic-bezier(.22,1,.36,1)}',
     '.wbs-fab-health-dot{position:absolute;top:-5px;left:-5px;width:14px;height:14px;border-radius:50%;background:#8b8f98;border:2px solid #141416;box-shadow:0 1px 3px rgba(0,0,0,.5);z-index:3}',
     '.wbs-fab-health-dot.running{background:#4da3ff}.wbs-fab-health-dot.blocked{background:#ffb03a}.wbs-fab-health-dot.error{background:#ef6262}.wbs-fab-health-dot.suspected{background:#f08a3c}.wbs-fab-health-dot.stopped{background:#9ca3af}',
-    /* token 速度读数：常驻 body + position:fixed，可拖到任意位置；双击复位回输入框下方。 */
-    '.wbs-token-rate-bar{position:fixed;left:0;top:0;display:inline-flex;align-items:baseline;padding:1px 11px 2px;border-radius:9px;background:rgba(255,255,255,.94);border:1px solid rgba(0,0,0,.12);color:#1b1b1f;box-shadow:0 2px 10px rgba(0,0,0,.12);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;line-height:1;white-space:nowrap;pointer-events:auto;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;z-index:2147483000}',
-    '.wbs-token-rate-bar.is-dragging{cursor:grabbing;background:rgba(0,0,0,.06);border-color:rgba(0,0,0,.22)}',
-    '.wbs-token-rate-bar[hidden]{display:none}',
-    '.wbs-token-rate-num{font-size:30px;font-weight:700;letter-spacing:-.01em}',
-    '.wbs-token-rate-unit{font-size:14px;font-weight:600;opacity:.6;margin-left:3px}',
-    '.wbs-token-rate-bar{transition:opacity .22s}',
-    /* 旧值提示：读不到 / 没输出时保留上一次读数，降透明度表示「不是实时值」 */
-    '.wbs-token-rate-bar.is-stale{opacity:.42}',
-    'html.cb-dark .wbs-token-rate-bar,html[data-theme="dark"] .wbs-token-rate-bar{background:rgba(30,30,34,.94);border-color:rgba(255,255,255,.16);color:#f2f2f5}',
-    'html.cb-dark .wbs-token-rate-bar,html[data-theme="dark"] .wbs-token-rate-bar{background:rgba(255,255,255,.10);border-color:rgba(255,255,255,.18);color:#f2f2f5}',
-    'html.cb-dark .wbs-token-rate-bar.is-floating,html[data-theme="dark"] .wbs-token-rate-bar.is-floating{background:rgba(30,30,34,.94);border-color:rgba(255,255,255,.16)}',
     '.wbs-health-status{display:none;align-items:center;min-height:18px;padding:2px 7px;border-radius:999px;font-size:10px;line-height:14px;white-space:nowrap;color:var(--wb-color-text-secondary,#666);background:var(--wb-bg-tertiary,#f2f2f2)}',
     '.wbs-health-status.running,.wbs-health-status.blocked,.wbs-health-status.error,.wbs-health-status.suspected,.wbs-health-status.stopped{display:inline-flex}',
     '.wbs-health-status.running{color:#2369a8;background:rgba(77,163,255,.14)}.wbs-health-status.blocked{color:#9a5b00;background:rgba(255,176,58,.18)}.wbs-health-status.error{color:#a52828;background:rgba(239,98,98,.16)}.wbs-health-status.suspected{color:#9a4d0a;background:rgba(240,138,60,.17)}.wbs-health-status.stopped{color:var(--wb-color-text-secondary,#666)}',
@@ -20792,6 +21398,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-title-wrap{display:flex;flex-direction:column;align-items:flex-start;min-width:0}',
     '.wbs-title-row{display:flex;align-items:center;flex-wrap:wrap;gap:6px 9px;min-width:0}',
     '.wbs-title{font-family:"Avenir Next",Avenir,"Segoe UI Variable Display","Segoe UI",sans-serif;font-size:15px;line-height:1.15;font-weight:750;letter-spacing:-.55px;color:var(--wb-color-text-primary,#1f1f1f);white-space:nowrap;user-select:none}',
+    '.wbs-root.wbs-panel-light,[data-wbs-appearance="light"]{color-scheme:light;--wb-bg-primary:#fff;--wb-bg-secondary:#fff;--wb-bg-tertiary:#f2f2f2;--wb-bg-popover:#fff;--wb-bg-input:#fff;--wb-bg-hover:#f5f5f5;--wb-bg-active:#eee;--wb-border-subtle:#f0f0f0;--wb-border-default:#e5e5e5;--wb-border-hover:#ccc;--wb-border-strong:#ccc;--wb-color-text-primary:#1f1f1f;--wb-color-text-secondary:#666;--wb-color-text-tertiary:#999;--wb-icon-secondary:#666;--wb-icon-tertiary:#999;--wb-button-primary-bg:#1f1f1f;--wb-button-primary-fg:#fff;--wb-button-primary-bg-hover:#333;--wb-button-primary-bg-disabled:#eee;--wb-button-primary-fg-disabled:#999}',
+    '.wbs-panel-light .wbs-panel{background:var(--wb-bg-popover);color:var(--wb-color-text-primary)}',
     '.wbs-version-line{margin:0;color:var(--wb-color-text-tertiary,#a3a6ad);font-size:10px;font-weight:400;line-height:1.2;letter-spacing:0;font-variant-numeric:tabular-nums;white-space:nowrap}',
     /* 元素检查拾取按钮（隐藏入口，连点标题 5 次显示） */
     '.wbs-pick-btn{flex:0 0 auto;width:22px;height:22px;border:none;border-radius:7px;background:color-mix(in srgb,var(--wb-accent-blue,#4f86ff) 14%,transparent);color:var(--wb-accent-blue,#4f86ff);font-size:12px;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:background .15s}',
@@ -20988,7 +21596,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-theme-takeover-row:has(#wbs-theme-takeover:not(:checked)){margin-bottom:0;padding-bottom:0;border-bottom:0}',
     '.wbs-explore-inline{position:fixed;left:auto;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;z-index:auto;top:0;right:0;overflow:visible;padding:0 8px}',
     /* 复用暂存按钮视觉（wbs-stash-inline 提供 32px 圆形/背景/阴影），但 hover 不变宽 */
-    '.wbs-stash-inline.wbs-explore-inline:hover,.wbs-stash-inline.wbs-explore-inline.wbs-stash-inline-inline:hover{width:32px!important;min-width:32px!important;height:32px!important;border-radius:50%;padding:0 8px}',
+    // CodeBuddy 原生 IconButton：24px 方形、4px 圆角；只有暂存按钮 hover 时展开文案。
+    '.wbs-stash-inline.wbs-explore-inline:not(.wbs-composer-native):hover,.wbs-stash-inline.wbs-explore-inline.wbs-stash-inline-inline:not(.wbs-composer-native):hover{width:32px!important;min-width:32px!important;height:32px!important;border-radius:50%;padding:0 8px}',
+    '.wbs-stash-inline.wbs-composer-native,.wbs-stash-inline.wbs-composer-native:hover{box-sizing:border-box;width:24px!important;min-width:24px!important;max-width:24px;height:24px!important;border-radius:4px!important;padding:0!important;justify-content:center;box-shadow:none;transition:background .15s}',
+    '.wbs-stash-inline.wbs-composer-native:not(.wbs-explore-inline){max-width:none;padding:0 4px!important;justify-content:flex-start;transition:width .18s,background .15s}',
+    '.wbs-stash-inline.wbs-composer-native:not(.wbs-explore-inline):hover{width:calc(39px + var(--wbs-stash-text-width,65px))!important;padding-right:12px!important}',
+    '.wbs-composer-native .wbs-stash-ico svg,.wbs-composer-native .wbs-explore-ico svg{width:16px;height:16px}',
     /* 图标常显；hover 无任何自身动画 */
     '.wbs-explore-ico{display:flex;align-items:center;justify-content:center}',
     '.wbs-explore-inline.wbs-stash-inline-inline{position:relative;z-index:99999}',
@@ -21071,7 +21684,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-pcard-title{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f);margin-bottom:8px}',
     '.wbs-pcard-sub{font-size:11px;color:var(--wb-icon-tertiary,#999);font-weight:400}',
     '.wbs-auto-card{display:flex;flex:1;flex-direction:column;min-height:0;margin-bottom:0}',
-    /* [2026-10-07] 自动化页的两张折叠卡（本地子 Agent / 官方定时任务）：
+    /* [2026-10-07] 自动化页的折叠卡（官方定时任务）：
        · flex:0 0 auto —— 只占内容高度，**不参与拉伸**，把剩余空间全留给上面的自动化列表
        · margin-top:8px —— .wbs-auto-card 的 margin-bottom 是 0，不补就会贴在一起
        （折叠状态本身由 .wbs-pcard.collapsed > .wbs-fold-body{display:none} 控制，无需额外规则） */
@@ -21138,6 +21751,88 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-nd-row:first-of-type{border-top:none}',
     '.wbs-nd-title{font-size:12px;font-weight:600;color:var(--wb-color-text-primary,#1f1f1f);white-space:nowrap}',
     '.wbs-nd-hint{font-size:11px;color:var(--wb-icon-tertiary,#999);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.wbs-dshops-actions{display:inline-flex;flex:0 0 auto;align-items:center;gap:5px}',
+    '.wbs-dshops-btn{padding:3px 9px;border:1px solid var(--wb-border-default,#ddd);border-radius:7px;background:var(--wb-bg-tertiary,#f5f5f5);color:var(--wb-color-text-primary,#1f1f1f);font:inherit;font-size:11px;line-height:1.5;cursor:pointer;white-space:nowrap}',
+    '.wbs-dshops-btn:hover:not(:disabled){border-color:var(--wb-border-strong,#bbb);background:var(--wb-bg-hover,#eef0f3)}',
+    '.wbs-dshops-btn:disabled{opacity:.5;cursor:default}',
+    '.wbs-dshops-btn.primary{background:var(--wb-button-primary-bg,#1f1f1f);border-color:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff)}',
+    '.wbs-dshops-btn.primary:hover:not(:disabled){background:var(--wb-button-primary-bg-hover,#333)}',
+    '.wbs-dshops-btn.danger{color:#c0392b;border-color:color-mix(in srgb,#c0392b 40%,transparent)}',
+    '.wbs-mini-btn{padding:3px 9px;border:1px solid var(--wb-border-default,#ddd);border-radius:7px;background:var(--wb-bg-tertiary,#f5f5f5);color:var(--wb-color-text-primary,#1f1f1f);font:inherit;font-size:11px;line-height:1.5;cursor:pointer;white-space:nowrap}',
+    '.wbs-mini-btn:hover:not(:disabled){border-color:var(--wb-border-strong,#bbb);background:var(--wb-bg-hover,#eef0f3)}',
+    '.wbs-mini-btn:disabled{opacity:.4;cursor:default}',
+    '.wbs-mini-btn.primary{background:var(--wb-button-primary-bg,#1f1f1f);border-color:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff)}',
+    '.wbs-mini-btn.primary:hover:not(:disabled){background:var(--wb-button-primary-bg-hover,#333)}',
+    'html.cb-dark .wbs-mini-btn,html[data-theme="dark"] .wbs-mini-btn{color:#d5d5d9;border-color:rgba(232,232,234,.16);background:rgba(255,255,255,.05)}',
+    'html.cb-dark .wbs-mini-btn.primary,html[data-theme="dark"] .wbs-mini-btn.primary{color:#111;background:#e8e8ea;border-color:#e8e8ea}',
+    // [2026-10-15] API 网关 = 折叠行 + 大浮层控制台（浮层挂 .wbs-panel，挂 pane 会被 .wbs-body 裁切）
+    '#wbs-gw-expand[aria-expanded="true"] > .wbs-fold-chevron{transform:rotate(45deg)}',
+    '.wbs-gw-dock{position:absolute;z-index:30;left:10px;right:10px;top:10px;bottom:10px;display:flex;flex-direction:column;box-sizing:border-box;padding:12px 14px;border-radius:14px;background:var(--wb-bg-popover,#fff);border:1px solid var(--wb-border-subtle,#e6e6e6);box-shadow:0 16px 44px rgba(0,0,0,.18)}',
+    '.wbs-gw-dock[hidden]{display:none}',
+    'html.cb-dark .wbs-gw-dock,html[data-theme="dark"] .wbs-gw-dock{background:var(--wb-bg-popover,#1e1e20);border-color:rgba(232,232,234,.14);box-shadow:0 16px 44px rgba(0,0,0,.5)}',
+    '.wbs-gw-dock-head{display:flex;align-items:center;gap:8px;flex:none;padding-bottom:8px;border-bottom:1px solid var(--wb-border-subtle,#f0f0f0)}',
+    '.wbs-gw-dock-title{font-size:13px;font-weight:700;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-gw-dock-sub{flex:1;min-width:0;text-align:right;font-size:11px;color:var(--wb-icon-tertiary,#999);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.wbs-gw-dock-body{flex:1;min-height:0;overflow-y:auto;margin-top:8px;padding-right:2px}',
+    '.wbs-gw-dock .wbs-gw-acct{padding:6px 0;font-size:11.5px}',
+    '.wbs-gw-dock .wbs-gw-models-list{max-height:none}',
+    '.wbs-gw-dock .wbs-gw-log{max-height:360px}',
+    '.wbs-gw-dock .wbs-gw-usage{font-size:11.5px}',
+    '.wbs-gw-actions{display:inline-flex;flex-wrap:wrap;gap:5px}',
+    '.wbs-gw-meta{font-size:11px;line-height:1.55;color:var(--wb-icon-tertiary,#999);overflow-wrap:anywhere}',
+    '.wbs-gw-alert-line{margin-top:5px;padding:5px 8px;border-radius:7px;font-size:11px;line-height:1.5;background:color-mix(in srgb,#f59e0b 15%,transparent);color:#8a5200}',
+    'html.cb-dark .wbs-gw-alert-line,html[data-theme="dark"] .wbs-gw-alert-line{background:rgba(245,158,11,.16);color:#f2c078}',
+    '.wbs-gw-pool{display:flex;flex-direction:column;margin-top:5px}',
+    '.wbs-gw-acct{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center;padding:4px 0;border-top:1px solid var(--wb-border-subtle,#f0f0f0);font-size:11px}',
+    '.wbs-gw-acct:first-child{border-top:none}',
+    '.wbs-gw-acct-name{display:flex;align-items:center;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-gw-acct-credits{color:var(--wb-color-text-secondary,#666);white-space:nowrap;font-variant-numeric:tabular-nums}',
+    '.wbs-gw-dot{display:inline-block;width:7px;height:7px;flex:none;border-radius:50%;background:#22c55e}',
+    '.wbs-gw-dot.warn{background:#f59e0b}',
+    '.wbs-gw-dot.bad{background:#ef4444}',
+    '.wbs-gw-usage{display:block;margin-top:6px;padding:7px 9px;border-radius:8px;background:var(--wb-bg-secondary,#f7f8fa);font:11px/1.75 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;cursor:text;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-gw-log{display:block;margin-top:6px;max-height:190px;overflow:auto;padding:7px 9px;border-radius:8px;background:var(--wb-bg-secondary,#f7f8fa);font:10.5px/1.5 ui-monospace,Consolas,monospace;white-space:pre;user-select:text;color:var(--wb-color-text-primary,#1f1f1f)}',
+    'html.cb-dark .wbs-gw-usage,html[data-theme="dark"] .wbs-gw-usage,html.cb-dark .wbs-gw-log,html[data-theme="dark"] .wbs-gw-log{background:rgba(255,255,255,.05)}',
+    '.wbs-gw-models{display:flex;flex-direction:column;gap:6px;margin-top:6px;padding:8px;border:1px dashed var(--wb-border-default,#ddd);border-radius:8px}',
+    '.wbs-gw-models-bar,.wbs-gw-models-foot{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+    '.wbs-gw-models-hint{font-size:10.5px;line-height:1.6;color:var(--wb-icon-tertiary,#999);padding:0 2px}',
+    '.wbs-gw-models-hint b{color:var(--wb-color-text-secondary,#555);font-weight:600}',
+    '.wbs-gw-models-diff.warn{color:#b45309;font-weight:600}',
+    '.wbs-gw-pool-note{margin:2px 0 4px;font-size:11px;line-height:1.5;color:#b45309;font-weight:600;overflow-wrap:anywhere}',
+    /* ---- 上下文压缩面板 ---- */
+    'html.cb-dark .wbs-gw-pool-note,html[data-theme="dark"] .wbs-gw-pool-note{color:#f2c078}',
+    'html.cb-dark .wbs-gw-models-diff.warn,html[data-theme="dark"] .wbs-gw-models-diff.warn{color:#f2c078}',
+    '.wbs-gw-models-tools{margin-left:auto;display:inline-flex;gap:4px}',
+    '.wbs-gw-models-list{display:flex;flex-direction:column;gap:1px;max-height:230px;overflow:auto}',
+    '.wbs-gw-mrow{display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:6px;cursor:pointer}',
+    '.wbs-gw-mrow:hover{background:var(--wb-bg-hover,#f5f5f5)}',
+    '.wbs-gw-mrow input{margin:0;flex:none}',
+    '.wbs-gw-mpick{display:flex;align-items:center;gap:6px;flex:1;min-width:0;cursor:pointer}',
+    '.wbs-gw-mctx{flex:none;width:86px;height:22px;box-sizing:border-box;padding:0 4px;border:1px solid var(--wb-border-default,#ddd);border-radius:6px;background:var(--wb-bg-secondary,#f7f8fa);color:var(--wb-color-text-primary,#1f1f1f);font:11px/1 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;cursor:pointer}',
+    '.wbs-gw-mctx:hover:not(:disabled){border-color:var(--wb-border-strong,#c9ced6)}',
+    '.wbs-gw-mctx:focus-visible{outline:2px solid var(--wb-accent-blue,#4f86ff);outline-offset:1px}',
+    '.wbs-gw-mctx.off{opacity:.4;cursor:default}',
+    '.wbs-gw-mctx-off{flex:none;width:86px;text-align:center;font-size:11px;color:var(--wb-icon-tertiary,#b9bdc7)}',
+    '.wbs-gw-mctx-bulk{width:auto;min-width:96px;height:24px;margin-left:2px}',
+    '.wbs-gw-ctx-edit{flex:none;display:inline-flex;align-items:center;gap:3px}',
+    '.wbs-gw-ctx-input{width:54px;height:22px;box-sizing:border-box;padding:0 4px;border:1px solid var(--wb-accent-blue,#4f86ff);border-radius:6px;background:var(--wb-bg-primary,#fff);color:var(--wb-color-text-primary,#1f1f1f);font:11px/1 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}',
+    '.wbs-gw-ctx-unit{font-size:10px;color:var(--wb-color-text-secondary,#666)}',
+    '.wbs-gw-ctx-ok,.wbs-gw-ctx-no{height:22px;padding:0 6px;box-sizing:border-box;border:1px solid var(--wb-border-default,#ddd);border-radius:6px;background:var(--wb-bg-secondary,#f7f8fa);color:var(--wb-color-text-secondary,#555);font-size:11px;line-height:20px;cursor:pointer}',
+    '.wbs-gw-ctx-ok{border-color:var(--wb-accent-blue,#4f86ff);color:var(--wb-accent-blue,#4f86ff)}',
+    'html.cb-dark .wbs-gw-ctx-input,html[data-theme="dark"] .wbs-gw-ctx-input{background:rgba(255,255,255,.06);color:#eee}',
+    'html.cb-dark .wbs-gw-mctx,html[data-theme="dark"] .wbs-gw-mctx{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.16)}',
+    '.wbs-gw-mmain{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}',
+    '.wbs-gw-mname{font-size:11.5px;color:var(--wb-color-text-primary,#1f1f1f)}',
+    '.wbs-gw-mbadge{font-size:10px;padding:0 4px;border-radius:4px;background:color-mix(in srgb,var(--wb-button-primary-bg,#1f1f1f) 9%,transparent);color:var(--wb-icon-secondary,#666);white-space:nowrap}',
+    '.wbs-gw-mstate{margin-left:auto;flex:none;font-size:10px;color:var(--wb-icon-tertiary,#999);white-space:nowrap}',
+    '.wbs-gw-mstate.ok{color:#0f9d63}',
+    '.wbs-gw-mstate.warn{color:#9a6400}',
+    'html.cb-dark .wbs-gw-mstate.ok,html[data-theme="dark"] .wbs-gw-mstate.ok{color:#3ddc97}',
+    'html.cb-dark .wbs-gw-mstate.warn,html[data-theme="dark"] .wbs-gw-mstate.warn{color:#f2c078}',
+
+    'html.cb-dark .wbs-dshops-btn,html[data-theme="dark"] .wbs-dshops-btn{color:#d5d5d9;border-color:rgba(232,232,234,.16);background:rgba(255,255,255,.05)}',
+    'html.cb-dark .wbs-dshops-btn.primary,html[data-theme="dark"] .wbs-dshops-btn.primary{color:#111;background:#e8e8ea;border-color:#e8e8ea}',
+    'html.cb-dark .wbs-dshops-btn.danger,html[data-theme="dark"] .wbs-dshops-btn.danger{color:#f08a8a;border-color:rgba(240,138,138,.35)}',
     /* 会话页：筛选 + 批量 + 列表 + 迁移/删除弹窗 */
     '.wbs-sess-filters{display:flex;flex-direction:row;align-items:center;gap:8px;margin-bottom:10px}',
     // 账号 + 时间筛选同一行：账号下拉缩窄，时间分段占用剩余宽度
@@ -21309,23 +22004,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-model-title-row{display:flex;align-items:center;gap:9px;min-width:0;margin-bottom:6px}',
     '.wbs-model-name{min-width:0;flex:0 1 auto;font-size:14px;font-weight:650;color:var(--wb-color-text-primary,#1f1f1f);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.wbs-model-details{display:flex;flex-direction:column;gap:4px;min-width:0}',
-    // ⭐ 2026-10-01：模型页的「子 Agent」区块（与具体 AI 解耦；本地/云端靠**声明**不靠猜）
-    '.wbs-agent-block{margin-top:8px;padding-top:8px;border-top:1px dashed var(--wb-border-default,#e5e5e5)}',
-    '.wbs-agent-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;line-height:1.6}',
-    '.wbs-agent-label{font-weight:600;color:var(--wb-icon-secondary,#666)}',
-    '.wbs-agent-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--wb-icon-tertiary,#bbb)}',
-    '.wbs-agent-dot-local{background:#18a058}',
-    '.wbs-agent-dot-cloud{background:#2080f0}',
-    '.wbs-agent-kind{padding:1px 7px;border-radius:999px;background:var(--wb-bg-tertiary,#f5f5f5);color:var(--wb-icon-secondary,#666)}',
-    '.wbs-agent-stat{margin-left:auto;color:var(--wb-icon-tertiary,#999)}',
-    '.wbs-agent-controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:7px;font-size:12px}',
-    '.wbs-agent-ctl{display:inline-flex;align-items:center;gap:5px;cursor:pointer;color:var(--wb-icon-secondary,#666)}',
-    '.wbs-agent-ctl-name{color:var(--wb-icon-tertiary,#999)}',
-    '.wbs-agent-select{height:24px;padding:0 6px;border:1px solid var(--wb-border-default,#e5e5e5);border-radius:6px;background:transparent;color:var(--wb-color-text-primary,#1f1f1f);font-size:12px}',
-    '.wbs-agent-noid{font-size:12px;color:var(--wb-icon-tertiary,#999)}',
-    '.wbs-agent-summary{margin:8px 0}',
-    '.wbs-agent-sum-row{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--wb-icon-secondary,#666)}',
-    '.wbs-agent-sum-warn{margin-top:4px;font-size:11px;color:#d03050}',
     // 第二行：vendor 标签 + 模型 id 标签
     '.wbs-model-tag-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0;margin-bottom:6px}',
     '.wbs-model-tag{display:inline-flex;align-items:center;max-width:100%;padding:2px 8px;border:1px solid color-mix(in srgb,var(--wb-border-default,#e5e5e5) 85%,transparent);border-radius:999px;background:var(--wb-bg-tertiary,#f0f0f0);color:var(--wb-icon-secondary,#555);font-size:11px;font-weight:500;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',

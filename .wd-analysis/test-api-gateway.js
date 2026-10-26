@@ -271,9 +271,15 @@ console.log('\n== E. 模型闭环：注册进 models.json（只增删自己的�
   ok(first.models.length === 4 && first.added === 2 && first.removed === 0, 'E8 首次注册：2 加 0 删', first.models.length);
   ok(first.models[0].id === 'qwen3.8-27b' && first.models[1].id === 'deepseek-flash',
     'E9 ⭐ 用户原有条目原样保留且在数组前段（顺序也不动）');
-  const second = GW.mergeGatewayModels(first.models, entries, {});
-  ok(second.models.length === 4 && second.added === 2 && second.removed === 2,
-    'E10 ⭐ 重复注册幂等：先摘旧再加新，总数不变（不叠加）', second.models.length);
+  const second = GW.mergeGatewayModels(first.models, entries, { baseUrl: 'http://127.0.0.1:7863' });
+  ok(second.models.length === 4 && second.added === 0 && second.removed === 0 && second.rewritten === 2,
+    'E10 ⭐ 重复注册幂等：原地认领更新（added/removed 都是 0，重写单列 rewritten）', { added: second.added, rewritten: second.rewritten });
+  // 用户诉求「在自定义模型里去掉某个」= 取消勾选 → 应用；被取消的那个才算 removed
+  const partial = GW.mergeGatewayModels(first.models, [entries[0]], { baseUrl: 'http://127.0.0.1:7863' });
+  ok(partial.removed === 1 && partial.rewritten === 1
+    && !partial.models.some((m) => m.id === 'cn:glm-5.3-flash')
+    && partial.models.some((m) => m.id === 'cn:hy3-x'),
+    'E10c 取消勾选一个 ⇒ 它被移除（保留那个只算重写）', { removed: partial.removed, rewritten: partial.rewritten });
   // ⭐ 前缀机制：网关的 qwen 与用户的 qwen 是**两个不同 id**，天生不冲突 ⇒ 用户条目原样保留
   const clash = GW.toWorkbuddyModelEntry({ id: 'qwen3.8-27b' }, { baseUrl: 'http://127.0.0.1:7863' });
   const merged = GW.mergeGatewayModels(userModels, [clash], {});
@@ -284,13 +290,131 @@ console.log('\n== E. 模型闭环：注册进 models.json（只增删自己的�
   // 代码级第二道保护：即使有人绕过前缀传裸 id，occupied 检查也不让用户条目被覆盖
   const rawClash = { id: 'qwen3.8-27b', name: '同名覆盖尝试', vendor: 'Custom', url: 'http://evil/v1/chat/completions' };
   const merged2 = GW.mergeGatewayModels(userModels, [rawClash], {});
-  ok(merged2.added === 0 && merged2.models.length === 2 && merged2.models[0].url.indexOf('lyonn.fun') > 0,
-    'E12b ⭐ 裸 id 撞车时用户条目胜出（occupied 保护不被绕过）', merged2.models.length);
+  ok(merged2.added === 1 && merged2.models.length === 3 && merged2.models[0].url.indexOf('lyonn.fun') > 0
+    && merged2.models.some((m) => m.id === 'gateway:qwen3.8-27b'),
+    'E12b ⭐ 裸 id 撞名但不同源 ⇒ 绝不覆盖用户条目，改用前缀共存', merged2.models.map((m) => m.id));
   const undone = GW.unmergeGatewayModels(first.models, first.ids);
   ok(undone.models.length === 2 && undone.removed === 2, 'E13 撤销：按名单摘掉 2 条', undone.models.length);
   ok(JSON.stringify(undone.models) === JSON.stringify(userModels),
     'E14 ⭐ 撤销后用户原有条目逐字节恢复（JSON 深比较）');
   ok(GW.unmergeGatewayModels(userModels, null).removed === 0, 'E15 空名单安全（不误删）');
+}
+
+/* ===== F 组：字段映射补全（2026-10-15）===== */
+{
+  const full = GW.toWorkbuddyModelEntry({
+    id: 'cn:hy3-x', name: 'Hy3', credits: 'x0.05',
+    context_length: 192000, max_output_tokens: 64000, max_allowed_size: 192000,
+    supports_tool_call: true, supports_images: true, supports_reasoning: true,
+    only_reasoning: true,
+    reasoning_supported_efforts: ['low', 'high'],
+    reasoning_default_effort: 'high', reasoning_summary: 'auto',
+  }, { baseUrl: 'http://127.0.0.1:7863', apiKey: 'K' });
+  ok(full.supportsReasoning === true, 'F1 supports_reasoning → supportsReasoning');
+  ok(full.onlyReasoning === true, 'F2 only_reasoning → onlyReasoning');
+  ok(full.supportsImages === true, 'F3 supports_images → supportsImages');
+  ok(full.maxInputTokens === 192000 && full.maxOutputTokens === 64000, 'F4 上下文 / 输出上限都透传');
+  ok(full.reasoning && full.reasoning.supportedEfforts.join(',') === 'low,high', 'F5 思考档位清单透传');
+  ok(full.reasoning.defaultEffort === 'high', 'F6 默认档位透传');
+  ok(full.reasoning.canDisableThinking === false, 'F7 ⭐ only_reasoning ⇒ 不能关思考（与官方判据一致）');
+  ok(full.reasoning.summary === 'auto', 'F8 摘要模式透传');
+  ok(full.name.indexOf('x0.05') > 0, 'F9 倍率进名称');
+  ok(full.supportedContextWindows === undefined && full.defaultContextWindow === undefined,
+    'F10 ⭐ 绝不产出上下文档位（asar 里是死字段，编出来只会骗 UI）');
+
+  const dirty = GW.toWorkbuddyModelEntry({
+    id: 'x', supports_reasoning: true, only_reasoning: false,
+    reasoning_supported_efforts: ['low', 'ULTRA', '', null, 'high'],
+    reasoning_default_effort: 'nonsense',
+  }, { baseUrl: 'http://h' });
+  ok(dirty.reasoning.supportedEfforts.join(',') === 'low,high', 'F11 ⭐ 非法档位被过滤（不编造）');
+  ok(dirty.reasoning.defaultEffort === undefined, 'F12 非法默认档位 ⇒ 不写');
+  ok(dirty.reasoning.canDisableThinking === true, 'F13 非 only_reasoning ⇒ 可关思考');
+  ok(dirty.onlyReasoning === undefined, 'F14 非 only_reasoning ⇒ 不写该字段');
+
+  const plain = GW.toWorkbuddyModelEntry({ id: 'y', supports_tool_call: true }, { baseUrl: 'http://h' });
+  ok(plain.reasoning === undefined && plain.supportsReasoning === undefined, 'F15 非思考模型不产出 reasoning');
+  ok(GW.THINKING_LEVELS.join(',') === 'off,minimal,low,medium,high,xhigh,max', 'F16 档位枚举与客户端 asar 一致');
+}
+
+/* ===== G 组：注册状态识别与防重复（2026-10-15）===== */
+{
+  const GWURL = 'http://127.0.0.1:7863';
+  const existing = [
+    { id: 'gateway:cn:a', name: '[网关] A', url: GWURL + '/v1/chat/completions' },
+    { id: 'cn:b', name: '手工配的 B', url: GWURL + '/v1/chat/completions' },
+    { id: 'cn:c', name: '别的端点同名', url: 'http://other:9999/v1/chat/completions' },
+  ];
+  ok(GW.gatewayModelState(existing, 'cn:a', { baseUrl: GWURL }) === 'registered', 'G1 本插件写过 ⇒ registered');
+  ok(GW.gatewayModelState(existing, 'cn:b', { baseUrl: GWURL }) === 'external', 'G2 手工配的（同网关）⇒ external');
+  ok(GW.gatewayModelState(existing, 'cn:c', { baseUrl: GWURL }) === 'absent', 'G3 ⭐ 同名但指向别的端点 ⇒ 不算重复');
+  ok(GW.gatewayModelState(existing, 'cn:d', { baseUrl: GWURL }) === 'absent', 'G4 完全没有 ⇒ absent');
+
+  const entries = ['cn:a', 'cn:b', 'cn:d'].map((id) => GW.toWorkbuddyModelEntry({ id: id }, { baseUrl: GWURL, apiKey: 'K' }));
+  const r1 = GW.mergeGatewayModels(existing, entries, { baseUrl: GWURL });
+  ok(r1.skipped.length === 0, 'G5 ⭐ 同源手工条目不再「跳过」，而是被认领（原地更新）', r1.skipped);
+  ok(r1.models.filter((m) => m.id === 'gateway:cn:a').length === 1, 'G6 已注册条目整条替换而非叠加');
+  ok(r1.models.some((m) => m.id === 'cn:b') && !r1.models.some((m) => m.id === 'gateway:cn:b'),
+    'G7 ⭐ 认领后保留原 id（手工的 cn:b 不会变身 gateway:cn:b）', r1.models.map((m) => m.id));
+  ok(r1.models.find((m) => m.id === 'cn:b').name === '手工配的 B', 'G7b ⭐ 认领同时保留用户起的名字（不被 [网关] 前缀改写）');
+  ok(r1.models.some((m) => m.id === 'cn:d'), 'G8 未注册的正常写入');
+  ok(r1.rewritten === 2 && r1.added === 1, 'G9 认领 cn:a / cn:b 共 2 条重写 + 新建 1 条', { rewritten: r1.rewritten, added: r1.added });
+  ok(r1.models.some((m) => m.id === 'cn:c') && r1.models.find((m) => m.id === 'cn:c').url.indexOf('other:9999') > 0,
+    'G10 别的端点那条不受影响');
+
+  const r3 = GW.mergeGatewayModels(r1.models, [], { baseUrl: GWURL });
+  ok(!r3.models.some((m) => m.id.startsWith('gateway:')) && !r3.models.some((m) => m.id === 'cn:b'),
+    'G11 ⭐ 传空数组 ⇒ 本网关条目全摘（含被认领的手工条目）', r3.removed);
+  ok(r3.models.some((m) => m.id === 'cn:c'), 'G11c ⭐ 别的端点那条原封不动');
+  ok(r3.removed === 3 && r3.rewritten === 0, 'G11b 全摘报的是 removed（数量 = 摘掉前本网关条目数）而非 rewritten', { removed: r3.removed, rewritten: r3.rewritten });
+}
+
+/* ===== H 组：url 被中间代理包裹之后，注册状态与增删必须仍然自洽 =====
+ * 事故：接线后 url 外层变成代理端口，origin 比的是代理 vs 网关 ⇒ 5 条已注册全判成
+ * absent；勾选后「应用」不认领原条目，而是新加 gateway:cn:xxx ⇒ 同一模型两份、接线被冲。
+ * 修法：比较前先剥代理包裹前缀（unwrapProxyUrl）。下面每条都是当时真实翻车的形态。 */
+{
+  const GWBASE = 'http://127.0.0.1:7863';
+  const BILI = 'http://127.0.0.1:8790';
+  const wrap = (u) => BILI + '/bili/' + u;
+  const wrapped = [
+    { id: 'cn:glm-5.3', name: 'GLM 手工名', url: wrap(GWBASE + '/v1/chat/completions') },
+    { id: 'cn:space-bunny', name: 'Space', url: wrap(GWBASE + '/v1/chat/completions') },
+    { id: 'qwen3.8-27b', name: '本地', url: 'http://lyonn.fun:12288/v1/chat/completions' },
+  ];
+
+  ok(GW.unwrapProxyUrl(wrap(GWBASE + '/v1/x')) === GWBASE + '/v1/x',
+    'H1 ⭐ 能剥掉 bili 包裹前缀（http://127.0.0.1:8790/bili/http://… ⇒ http://…）');
+  ok(GW.unwrapProxyUrl(GWBASE + '/v1/x') === GWBASE + '/v1/x', 'H2 非包裹形态原样返回');
+  ok(GW.unwrapProxyUrl('https://api.deepseek.com/chat/completions') === 'https://api.deepseek.com/chat/completions',
+    'H3 普通外网 url 不被动到');
+  ok(GW.unwrapProxyUrl(wrap(wrap(GWBASE + '/v1/x'))) === GWBASE + '/v1/x', 'H4 嵌套两级也能剥到底');
+  ok(GW.unwrapProxyUrl('') === '', 'H5 空串不炸');
+
+  ok(GW.gatewayModelState(wrapped, 'cn:glm-5.3', { baseUrl: GWBASE }) !== 'absent',
+    'H6 ⭐⭐ 包裹后的条目不能再被判成 absent（本次事故的直接症状：5 条全 absent）');
+  ok(GW.gatewayModelState(wrapped, 'cn:glm-5.3', { baseUrl: GWBASE }) === 'external',
+    'H7 尚未登记的包裹条目 ⇒ external（可勾选、可保留）');
+  ok(GW.gatewayModelState(wrapped, 'cn:glm-5.3', { baseUrl: GWBASE, registeredIds: ['cn:glm-5.3'] }) === 'registered',
+    'H8 ⭐ 登记过（无 gateway: 前缀）⇒ registered，靠 registeredIds 而不是前缀');
+  ok(GW.gatewayModelState(wrapped, 'qwen3.8-27b', { baseUrl: GWBASE, registeredIds: ['qwen3.8-27b'] }) === 'absent',
+    'H9 ⭐ registeredIds 也要过同源校验：url 若已改指别处，就不再算本插件的条目');
+
+  const entry = GW.toWorkbuddyModelEntry({ id: 'cn:glm-5.3', name: 'GLM' }, { baseUrl: GWBASE, apiKey: 'K' });
+  entry.url = wrap(entry.url);
+  const m1 = GW.mergeGatewayModels(wrapped, [entry], { baseUrl: GWBASE });
+  ok(m1.models.filter((m) => m.id === 'cn:glm-5.3').length === 1 && !m1.models.some((m) => m.id === 'gateway:cn:glm-5.3'),
+    'H10 ⭐⭐ 接线状态下「应用」是认领原条目，不再凭空多出一条 gateway:cn:xxx（同一模型两份 = 一条走 bili 一条不走）',
+    m1.models.map((m) => m.id));
+  ok(m1.added === 0 && m1.rewritten === 1, 'H11 认领记 rewritten 而非 added', { added: m1.added, rewritten: m1.rewritten });
+  ok(m1.models.find((m) => m.id === 'cn:glm-5.3').name === 'GLM 手工名',
+    'H12 认领后保留用户起的名字（不被 [网关] 前缀改写）');
+
+  const m2 = GW.mergeGatewayModels(wrapped, [], { baseUrl: GWBASE });
+  ok(m2.removed === 2 && !m2.models.some((m) => m.id === 'cn:glm-5.3') && !m2.models.some((m) => m.id === 'cn:space-bunny'),
+    'H13 ⭐ 取消勾选能真的摘掉包裹条目（旧逻辑判定不同源 ⇒ 一条都摘不掉，等于「撤销注册」失效）',
+    { removed: m2.removed, left: m2.models.map((m) => m.id) });
+  ok(m2.models.some((m) => m.id === 'qwen3.8-27b'), 'H14 指向别处的模型永不被清理');
 }
 
 /* ==================================================================== */

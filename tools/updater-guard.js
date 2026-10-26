@@ -177,7 +177,9 @@ check('F2', 'CI 发布到 GitHub Release（更新器只认 Release）', () => {
 check('G1', '三处显示名均未被改回 WorkDaddy', () => {
   const m = pick(profiles, /appName: '([^']+)'/, "profiles.js appName");
   must(/WorkBuddy 助手/.test(m[1]), `profiles.js appName 变回 ${m[1]}`);
-  must(/var WBS_BRAND = WBS_PROFILE_IS_AI \? 'WorkBuddy 助手 AI' : 'WorkBuddy 助手';/.test(inject), 'inject.js WBS_BRAND 被改回');
+  // ⚠️ 2026-10-19 阶段③-b：WBS_BRAND 外面多了一层 CodeBuddy 判断（cdp 传输下取 CAPS.appName），
+  // 显示名本身没动。只锁那个三元表达式，不锁整行字面形式 —— 否则正确的改动会被判成回归。
+  must(/var WBS_BRAND = .*WBS_PROFILE_IS_AI \? 'WorkBuddy 助手 AI' : 'WorkBuddy 助手'\)?;/.test(inject), 'inject.js WBS_BRAND 被改回');
   must(/WORKDADDY_DISPLAY_NAME = PROFILE\.id === 'workbuddy-ai' \? 'WorkBuddy 助手 AI' : 'WorkBuddy 助手'/.test(daemon), 'daemon.js WORKDADDY_DISPLAY_NAME 被改回');
   return `appName=${m[1]}，inject/daemon 显示名一致`;
 });

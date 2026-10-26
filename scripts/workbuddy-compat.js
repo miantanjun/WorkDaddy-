@@ -361,6 +361,32 @@
     return null;
   }
 
+  // CodeBuddy 4.12 uses square IconButton controls without an aria-label.
+  // Identify the official submit handler by its editor preparation contract,
+  // never by geometry or position (our composer buttons share that toolbar).
+  function findCodeBuddySendButton(doc) {
+    if (!doc) return null;
+    var selector = '[class*="_inputBox_"]';
+    var active = doc.activeElement;
+    var box = active && active.closest ? active.closest(selector) : null;
+    if (!box) {
+      var boxes = Array.from(doc.querySelectorAll(selector)).filter(function (el) {
+        return !el.getBoundingClientRect || el.getBoundingClientRect().width > 0;
+      });
+      if (boxes.length !== 1) return null;
+      box = boxes[0];
+    }
+    var matches = Array.from(box.querySelectorAll('[role="button"],button')).filter(function (el) {
+      if (el.closest('.wbs-root,.wbs-stash-inline')) return false;
+      var key = Object.keys(el).find(function (k) { return k.indexOf('__reactProps') === 0; });
+      var handler = key && el[key] && el[key].onClick;
+      if (typeof handler !== 'function') return false;
+      var source = Function.prototype.toString.call(handler);
+      return source.indexOf('prepareBeforeSubmit') >= 0 && source.indexOf('flushPendingContentChange') >= 0;
+    });
+    return matches.length === 1 ? matches[0] : null;
+  }
+
   function findQueueAdapter(doc) {
     return findModernQueueAdapter(doc) || findLegacyQueueAdapter(doc);
   }
@@ -380,10 +406,12 @@
     ['dismissHoverPeek', 'syncTaskRouteFromClick'],
   ];
 
-  function functionLooksLikeConversationNavigation(value) {
+  function functionLooksLikeConversationNavigation(value, nativeCodeBuddy) {
     if (typeof value !== 'function') return false;
     try {
       var source = Function.prototype.toString.call(value);
+      if (nativeCodeBuddy && source.indexOf('SessionLoadCancelledError') >= 0 &&
+          source.indexOf('getPendingMessageTracker') >= 0 && source.indexOf('getInitialMessages') >= 0) return true;
       for (var gi = 0; gi < CONVERSATION_NAVIGATION_MARKER_GROUPS.length; gi++) {
         var group = CONVERSATION_NAVIGATION_MARKER_GROUPS[gi];
         var matched = true;
@@ -398,13 +426,14 @@
     }
   }
 
-  function findConversationNavigationHandler(doc) {
+  function findConversationNavigationHandler(doc, nativeCodeBuddy) {
     if (!doc || typeof doc.querySelector !== 'function') return null;
     var roots = [
       doc.querySelector('#root > div'),
       doc.querySelector('.conversation-list'),
       doc.querySelector('.conversation-shell'),
       doc.querySelector('.conversation-item'),
+      nativeCodeBuddy ? doc.querySelector('[data-conversation-id]') : null,
     ];
     for (var ri = 0; ri < roots.length; ri++) {
       var root = roots[ri];
@@ -416,8 +445,8 @@
         while (hook && hookSeen++ < 700) {
           var state = hook.memoizedState;
           var candidate = state && typeof state === 'object' ? state.current : null;
-          if (functionLooksLikeConversationNavigation(candidate)) return candidate;
-          if (functionLooksLikeConversationNavigation(state)) return state;
+          if (functionLooksLikeConversationNavigation(candidate, nativeCodeBuddy)) return candidate;
+          if (functionLooksLikeConversationNavigation(state, nativeCodeBuddy)) return state;
           hook = hook.next;
         }
         fiber = fiber.return;
@@ -440,19 +469,21 @@
     return isSessionsResource(resource) ? resource : null;
   }
 
-  // WorkBuddy's conversation list owns the real navigation path. Prefer the
-  // official SDK/navigation handler; adapter.emit is retained for older builds
-  // whose list did not expose the handler through React hooks.
-  function findConversationActivationApi(doc) {
+  // WorkBuddy's conversation list owns the real navigation path, so prefer the
+  // official handler found in its React hooks (or the session-navigation SDK
+  // when a build exposes it). adapter.emit is retained for older builds whose
+  // list did not expose the handler at all.
+  function findConversationActivationApi(doc, options) {
+    var nativeCodeBuddy = !!(options && /^codebuddy-(cn|intl)$/.test(options.profileId));
     var found = findQueueAdapter(doc);
     var adapter = found && found.adapter;
     var resource = findSessionsResource(doc);
-    var handler = findConversationNavigationHandler(doc);
+    var handler = findConversationNavigationHandler(doc, nativeCodeBuddy);
     var sdkNavigate = null;
     try {
       var conversations = typeof window !== 'undefined' && window.wb && window.wb.conversations;
       // Only a real route transition may be treated as authoritative. The
-      // sibling setCurrentConversation looks similar but merely reports the
+      // sibling `setCurrentConversation` looks similar but merely reports the
       // active conversation to the main process; it never navigates, so a
       // fallback onto it produced an "official-dispatched" log with no page
       // change and retried until the activation timeout.
@@ -460,7 +491,7 @@
         sdkNavigate = conversations.navigateToSession;
       }
     } catch (_) {}
-    if (!handler && !sdkNavigate && (!adapter || typeof adapter.emit !== 'function')) return null;
+    if (!handler && !sdkNavigate && (nativeCodeBuddy || !adapter || typeof adapter.emit !== 'function')) return null;
     return {
       authoritative: !!(handler || sdkNavigate),
       hasSession: function (sessionId) {
@@ -485,7 +516,7 @@
         if (!id) return false;
         try {
           if (handler) {
-            Promise.resolve(handler(id, '', false, false, {})).catch(function () {});
+            Promise.resolve(handler(id, '', false, false, nativeCodeBuddy ? undefined : {})).catch(function () {});
           } else if (sdkNavigate) {
             var conversationsApi = (typeof window !== 'undefined' && window.wb && window.wb.conversations) || null;
             Promise.resolve(sdkNavigate.call(conversationsApi, id, { ensureLoaded: true })).catch(function () {});
@@ -571,6 +602,7 @@
     draftStorageKey: draftStorageKey,
     collectMessageNavigationTurnsFromMessages: collectMessageNavigationTurnsFromMessages,
     findComposerToolbar: findComposerToolbar,
+    findCodeBuddySendButton: findCodeBuddySendButton,
     findLegacyQueueAdapter: findLegacyQueueAdapter,
     findModernQueueAdapter: findModernQueueAdapter,
     findQueueAdapter: findQueueAdapter,

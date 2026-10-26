@@ -1,9 +1,10 @@
 {
   "schemaVersion": 1,
   "id": "buddy-fuel-station-close-on-account-switch",
-  "revision": 2,
+  "revision": 3,
   "upgradeFromContentHashes": [
-    "7409d4d92618b59326e56629f4d9ba804ae30a4e36d7d5ed156042b9a3a744bd"
+    "7409d4d92618b59326e56629f4d9ba804ae30a4e36d7d5ed156042b9a3a744bd",
+    "9c47a98a2fd9e50263290126ea3702df05d690f950b097a4a61871b6cd7bce77"
   ],
   "name": "页面就绪后自动关闭首页弹窗",
   "description": "页面就绪后立即检查首页弹窗与运营位，每 300 毫秒补查，持续约 30 秒；重新出现的弹窗继续关闭，快速切换账号时重新检测新页面。",
@@ -185,6 +186,35 @@
               "op": "notify.toast",
               "level": "success",
               "message": "已关闭首页活动弹窗"
+            }
+          ],
+          "onError": []
+        },
+        {
+          "op": "logic.catch",
+          "steps": [
+            {
+              "op": "dom.click",
+              "locator": {
+                "kind": "css",
+                "value": "button[data-track-id=\"pc_fusion_carousel_close\"]"
+              }
+            },
+            {
+              "op": "dom.wait",
+              "locator": {
+                "kind": "css",
+                "value": "button[data-track-id=\"pc_fusion_carousel_close\"]"
+              },
+              "until": {
+                "state": "hidden"
+              },
+              "timeoutMs": 750
+            },
+            {
+              "op": "notify.toast",
+              "level": "success",
+              "message": "已关闭侧栏运营位轮播广告（积分包 / 成长活动）"
             }
           ],
           "onError": []
