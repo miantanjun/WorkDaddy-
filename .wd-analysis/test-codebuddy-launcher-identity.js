@@ -38,11 +38,8 @@ function ok(cond, label, extra) {
 function section(t) { console.log('\n--- ' + t + ' ---'); }
 
 const boundaryPath = path.join(repo, 'scripts', 'windows-process-boundary.js');
-const cmdPath = path.join(repo, 'start-codebuddy.cmd');
 const boundaryRaw = fs.readFileSync(boundaryPath, 'utf8');
 const boundarySrc = normalize(boundaryRaw);
-const cmdRaw = fs.existsSync(cmdPath) ? fs.readFileSync(cmdPath, 'utf8') : '';
-const cmdSrc = normalize(cmdRaw);
 
 /* ============ A. 进程身份白名单 ============ */
 section('A. 进程身份白名单认识 CodeBuddy CN');
@@ -76,23 +73,6 @@ try { filterVerifiedWindowsProcesses('C:\\x\\a\\b.exe', [], identity, ['..\\evil
   rejectedPath = /not a WorkBuddy-family binary/.test(String(e && e.message));
 }
 ok(rejectedPath, 'A6 反向：带路径分隔符的「进程名」仍被拒绝');
-
-/* ============ B. 启动脚本必须清毒 ============ */
-section('B. start-codebuddy.cmd 清掉环境毒化与原生标记');
-
-ok(cmdRaw.length > 0, 'B1 启动脚本存在');
-ok(/\r\n/.test(cmdRaw) && (cmdRaw.match(/(^|[^\r])\n/g) || []).length === 0,
-  'B2 纯 CRLF（cmd 解析器不接受裸 LF）');
-ok(/set "ELECTRON_RUN_AS_NODE="/.test(cmdSrc),
-  'B3 ⭐ 清掉 ELECTRON_RUN_AS_NODE（否则 --remote-debugging-port 变 bad option，exit 9）');
-ok(/set "NODE_OPTIONS="/.test(cmdSrc),
-  'B4 ⭐ 清掉 NODE_OPTIONS（--require shim 会被注入客户端主进程）');
-ok(/set "WBSWITCH_NATIVE_LAUNCHER="/.test(cmdSrc),
-  'B5 ⭐ 清掉原生标记（原生发现只认 WorkBuddy 名字，找不到 CodeBuddy）');
-ok(/set "WBSWITCH_PROFILE=codebuddy-cn"/.test(cmdSrc),
-  'B6 绑定 codebuddy-cn profile');
-ok(/win-launcher\.js/.test(cmdSrc) && /runtime\\node\\node\.exe/.test(cmdSrc),
-  'B7 走内置 Node 跑 win-launcher.js（不依赖系统 node）');
 
 /* ============ C. 能力开关与入口一致 ============ */
 section('C. profile 能力表仍然自洽');

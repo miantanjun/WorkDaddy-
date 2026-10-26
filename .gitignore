@@ -3,6 +3,16 @@ _backup/
 scripts/runtime/
 release/windows/
 release/.cache/
+# Go 网关：源码入库（vendor/wb2api-go），编译产物与依赖缓存不入库
+vendor/wb2api-go/dist/
+vendor/wb2api-go/.git/
+# 网关运行期文件（可能含密钥/凭证），绝不入库
+vendor/wb2api-go/config.json
+vendor/wb2api-go/.env
+vendor/wb2api-go/.env.*
+vendor/wb2api-go/auths/
+vendor/wb2api-go/data/
+vendor/wb2api-go/backups/
 
 # Inno 卸载器状态（含本机安装路径，机器专属，不能跨机同步）
 unins000.*

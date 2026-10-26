@@ -1,0 +1,122 @@
+name: Build Gateway (Go sidecar)
+
+# 编译 WorkDaddy 的反代网关 sidecar（vendor/wb2api-go）。
+#
+# 为什么单独一个 workflow：
+#   - 它的发布节奏和主程序不同（网关改得比面板勤）
+#   - 产物只有一个 exe，不需要 Inno Setup 那一整套
+#   - 主程序的 build-win.yml 已经装了 Go，但只用来编译 windows-native，不碰网关
+#
+# 触发：
+#   - 推 gateway-v* 标签 → 编译并挂到 Release（用户可直接下载替换）
+#   - 手动触发 → 只编译 + 上传 artifact，不发 Release（除非勾选 release）
+on:
+  push:
+    tags:
+      - 'gateway-v*'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: '是否发布到 GitHub Release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  GOFLAGS: '-mod=mod'
+  CGO_ENABLED: '0'
+
+jobs:
+  build:
+    name: 编译 wb2api.exe
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: vendor/wb2api-go
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 用 go.mod 里钉的版本，不写死 —— 否则大版本升级时 CI 会悄悄跑偏。
+      - name: 安装 Go（按 go.mod 版本）
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: vendor/wb2api-go/go.mod
+          cache: true
+          cache-dependency-path: vendor/wb2api-go/go.sum
+
+      - name: 显示版本
+        shell: bash
+        run: |
+          go version
+          echo "--- go.mod ---"
+          head -5 go.mod
+
+      - name: 单元测试
+        shell: bash
+        run: go test ./internal/panel/ -run "TestProbeModel" -v
+
+      - name: 编译
+        shell: bash
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o dist/wb2api.exe ./cmd/server
+          ls -lh dist/
+
+      # 版本号直接从源码读，避免「CI 版本和二进制里的 appVersion 对不上」。
+      - name: 读取源码版本
+        id: ver
+        shell: bash
+        run: |
+          APP=$(grep -oE 'appVersion[[:space:]]*=[[:space:]]*"[^"]+"' cmd/server/main.go | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$APP" ]; then
+            echo "::error::cmd/server/main.go 里找不到 appVersion"
+            exit 1
+          fi
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+          echo "源码版本: $APP"
+
+      - name: 生成校验文件
+        shell: bash
+        run: |
+          cd dist
+          sha256sum wb2api.exe > wb2api.exe.sha256
+          cat wb2api.exe.sha256
+
+      - name: 冒烟（--help 能起来就算产物可用）
+        shell: bash
+        run: |
+          ./dist/wb2api.exe -h 2>&1 | head -5
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wb2api-gateway-${{ steps.ver.outputs.app }}
+          path: |
+            vendor/wb2api-go/dist/wb2api.exe
+            vendor/wb2api-go/dist/wb2api.exe.sha256
+          retention-days: 30
+
+      # 只有打 gateway-v* 标签、或手动勾了 release 才发 Release。
+      - name: 发布到 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/gateway-v') || inputs.release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/gateway-v') && github.ref_name || format('gateway-v{0}', steps.ver.outputs.app) }}
+          name: 网关 wb2api ${{ steps.ver.outputs.app }}
+          body: |
+            反代网关 sidecar（Go，源码基线 ${{ steps.ver.outputs.app }}）。
+
+            安装：把 `wb2api.exe` 覆盖到 `%APPDATA%\WorkDaddy\gateway\wb2api.exe`，
+            然后在面板「反代网关」卡片里重启网关。**不要停 daemon**，它跟网关是两个进程。
+
+            校验：`wb2api.exe.sha256` 是本文件的 SHA-256。
+
+            本分支由 WorkDaddy 自行维护，基线来自上游 `linguo2625469/workbuddy2api-panel`
+            的 `1.13.0-panel`，改动见仓库 `vendor/wb2api-go/README-WORKDADDY.md`。
+          files: |
+            vendor/wb2api-go/dist/wb2api.exe
+            vendor/wb2api-go/dist/wb2api.exe.sha256
+          generate_release_notes: true

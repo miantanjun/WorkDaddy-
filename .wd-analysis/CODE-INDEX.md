@@ -1,10 +1,10 @@
 # 代码索引（自动生成，勿手改）
 
-> 由 `.wd-analysis/gen-code-index.js` 生成 · 2026-10-26 08:42:15
+> 由 `.wd-analysis/gen-code-index.js` 生成 · 2026-10-26 17:37:58
 > 用途：定位大文件里的函数，**替代「grep 整个文件」**（索引按需读，不常驻上下文）。
 > 查法：`node .wd-analysis/gen-code-index.js --grep <关键词>`
 
-## scripts/daemon.js  （20777 行 / 686 个函数）
+## scripts/daemon.js  （20793 行 / 687 个函数）
 
 | 行 | 函数 | 类型 | 摘要 |
 |---|---|---|---|
@@ -533,167 +533,168 @@
 | 12765 | `auth` | const |  |
 | 12766 | `account` | const |  |
 | 12797 | `gatewaySyncAccounts` | fn |  |
-| 12806 | `uidOf` | const |  |
-| 12821 | `gatewaySyncAccountsQuiet` | fn | 同步后需要时给面板/日志一句话（安静版：只在真有变化时返回字符串）。 |
-| 12836 | `gatewayProbeHealth` | fn | 探活（/healthz 免鉴权）。null = 不可达。 |
-| 12855 | `gatewayFetchModels` | fn |  |
-| 12887 | `sameGatewayOrigin` | fn |  |
-| 12900 | `findGatewayModelEntry` | fn |  |
-| 12912 | `readWorkbuddyModels` | fn |  |
-| 12925 | `gatewayModelsOverview` | fn |  |
-| 12963 | `by` | const |  |
-| 12973 | `gatewayInstall` | fn | 下载 → SHA-256 校验 → 解压 → 凭证桥 → 生成 config。任一环节失败都不留半成品可用状态。 |
-| 12975 | `task` | const |  |
-| 13066 | `gatewayReadEnabled` | fn | 「用户是否启用」是 WorkDaddy 侧意图，与「装没装」分开记（沿用免打扰开关的记法）。 |
-| 13073 | `gatewaySetEnabled` | fn |  |
-| 13086 | `gatewayStart` | fn | 启动网关子进程（stdio 用 ['ignore','pipe','pipe']：本环境给子进程建 stdin 管道会 EBUSY）。 |
-| 13120 | `gatewayStop` | fn |  |
-| 13147 | `gatewayHealthSnapshot` | fn |  |
-| 13158 | `normalizeGatewayHealth` | fn | 把 /healthz 原始结果规范成面板要用的形状。 |
-| 13174 | `gatewayPoolSnapshot` | fn |  |
-| 13176 | `accounts` | const |  |
-| 13178 | `tu` | const |  |
-| 13200 | `realmTotals` | const |  |
-| 13214 | `gatewayFetchJson` | fn | 带鉴权地打网关自己的 HTTP 接口（本仓持有 api_key，前端不必知道它）。 |
-| 13239 | `gatewayFindPidByPort` | fn |  |
-| 13254 | `gatewayLogTail` | fn | 读网关日志尾部（面板排障用；只读最后 N 行，不整份加载）。 |
-| 13276 | `refreshGatewayIfEnabled` | fn |  |
-| 13297 | `stashDir` | fn | ================= 暂存提示词（stash）辅助 ================= |
-| 13302 | `safeKey` | fn | 与 /api/stash 写入时相同的 key 生成规则：safe(uid) + '__' + safe(conversationId) |
-| 13307 | `listStashRecords` | fn | 扫描 stash 目录，返回全部暂存记录（按 savedAt 倒序）及 uid -> nickname 映射 |
-| 13334 | `stashFilePath` | fn | key 文件名校验：替换非法字符但不截断（key 本身由 safe() 逐段限制长度，可能超过 80 字符） |
-| 13340 | `stashRecordByKey` | fn |  |
-| 13347 | `fetchConvNames` | fn | 通过 CDP 抓取侧边栏会话列表，返回 conversationId -> 会话名 映射（用于筛选下拉展示会话名而非 id） |
-| 13375 | `deleteStashRecord` | fn | 删除单条暂存记录（删文件 + 同步 stash-index.json） |
-| 13398 | `buildBusyExpr` | fn |  |
-| 13409 | `visibleIn` | fn | 误判空闲会在回复中输入，正文/图片回填容易失败，这是原设计刻意保守的原因。 |
-| 13436 | `waitAiIdle` | fn | 等待 AI 空闲；超时返回 false |
-| 13447 | `busy` | const |  |
-| 13478 | `resolveUsageBoardPython` | fn | 解析可用的 python：环境变量 → 托管 venv → 托管 base（版本目录）→ PATH 兜底。 |
-| 13500 | `latestUsageBoardHtml` | fn | usage-board 目录里最新一份看板 HTML 文件名；没有则返回 null。 |
-| 13511 | `latestUsageUnifiedHtml` | fn | 统一用量看板的产物：unified-board-<stamp>.html。 |
-| 13525 | `creditUsageQuery` | fn |  |
-| 13533 | `readUsageStatusJson` | fn |  |
-| 13538 | `runUsageStatusExtractor` | fn | 跑一次第三方抽取器（只为补充指标）。失败/超时都只返回 ok:false，绝不抛。 |
-| 13544 | `done` | const |  |
-| 13566 | `builtinAssetsDir` | fn |  |
-| 13582 | `builtinWallpaperSource` | fn |  |
-| 13591 | `initBuiltinAssets` | fn |  |
-| 13826 | `listThemes` | fn | 主题列表（内置 + 用户自定义；自定义文件与内置同名时以文件为准，不重复列出） |
-| 13853 | `getTheme` | fn | 取主题完整定义（含 colors）。优先读 themes/ 目录的自定义文件（可覆盖内置同名主题），否则回退内置 |
-| 13883 | `accountSwitchThemeExpression` | fn | 会被启动时的旧云端选择覆盖。这里不安装 hook，也不改其他账号或皮肤 CSS。 |
-| 13928 | `preserveAccountSwitchTheme` | fn |  |
-| 13945 | `nativeAppearanceSyncExpression` | fn | 的 CSS 资源；浅色/深色仍由 WorkBuddy 原生状态负责。 |
-| 13948 | `removeNativeSheet` | fn |  |
-| 13956 | `setAttr` | fn |  |
-| 13961 | `setMode` | fn |  |
-| 13972 | `sync` | fn |  |
-| 14017 | `startNativeAppearanceSyncByCdp` | fn |  |
-| 14022 | `releaseThemeByCdp` | fn |  |
-| 14036 | `restoreNativeAppearanceByCdp` | fn |  |
-| 14040 | `uid` | const |  |
-| 14113 | `restoreSavedTheme` | fn | 恢复已保存的主题（CDP 连接/页面刷新后调用）：读取 current-theme.json 重新应用，保证深浅色在重启/刷新后仍生效 |
-| 14157 | `loadThemePatches` | fn |  |
-| 14173 | `themeExtrasCss` | fn | 主题附加样式：从 theme-patches.js 热加载，不硬编码在此 |
-| 14185 | `loadThemeVars` | fn |  |
-| 14201 | `themeVarsCss` | fn | 生成变量别名 CSS：isDark 时 darkOnly 条目加 html[data-theme="dark"] 前缀；浅色主题跳过 darkOnly 条目 |
-| 14205 | `declOf` | const |  |
-| 14216 | `lead` | const |  |
-| 14224 | `readBackgroundBlur` | fn |  |
-| 14235 | `applyThemeByCdp` | fn |  |
-| 14269 | `uid` | const |  |
-| 14271 | `colors` | const |  |
-| 14394 | `wbsBuiltinAppearance` | fn | 让 WorkBuddy 内部 useTheme hook / 组件 theme prop 实时跟随，等价调用原生 setTheme()。 |
-| 14406 | `wbsSnapshotNativeAppearance` | fn |  |
-| 14430 | `wbsClearNativeCustomCss` | fn |  |
-| 14469 | `wbsWriteAppearanceState` | fn |  |
-| 14477 | `wbsSyncAppearanceKeys` | fn |  |
-| 14504 | `wbsPrepareNativeAppearance` | fn |  |
-| 14512 | `wbsSyncNativeTheme` | fn |  |
-| 14526 | `wbsSyncNativeThemeQuiet` | fn | wbsSyncNativeThemeIdempotent：250ms 守护/keeper 的周期调用路径，属性同值时不写。 |
-| 14581 | `keepSelectedTheme` | fn |  |
-| 14619 | `wbsHasSpecialNativeAppearance` | fn |  |
-| 14644 | `wbsHoldNativeAppearance` | fn |  |
-| 14716 | `clearComposerByCdp` | fn |  |
-| 14769 | `fnv1a32` | fn |  |
-| 14786 | `composerDraftHash` | fn |  |
-| 14803 | `composerDraftExpr` | fn |  |
-| 14839 | `codeBuddySubmitExpr` | fn |  |
-| 14868 | `composerDraftConsumed` | fn |  |
-| 14899 | `composerSendExpr` | const |  |
-| 14903 | `fiberOf` | fn |  |
-| 14911 | `isStore` | fn |  |
-| 14968 | `sendStashToComposer` | fn |  |
-| 14974 | `guardedSend` | const |  |
-| 14977 | `allItems` | const |  |
-| 14986 | `s` | const |  |
-| 15139 | `countBlocks` | const |  |
-| 15149 | `pasteAndVerify` | const | 通用「合成 paste 后轮询验证 contentblock 增加」 |
-| 15195 | `name` | const |  |
-| 15211 | `disp` | const |  |
-| 15243 | `visible` | fn |  |
-| 15316 | `probeSendButton` | const | React may need more than one frame to enable the official send button. |
-| 15330 | `readDraft` | const |  |
-| 15338 | `draftConsumed` | const |  |
-| 15341 | `awaitDraftConsumed` | const | 点击 / 接口调用之后统一的「草稿被吃掉了吗」等待（两条路径共用同一个判据）。 |
-| 15452 | `fetchResource` | fn |  |
-| 15486 | `data` | const |  |
-| 15489 | `accounts` | const |  |
-| 15521 | `fetchEnterpriseResource` | fn |  |
-| 15567 | `robustFetchEnterpriseResource` | fn |  |
-| 15590 | `resolveEnterpriseId` | fn |  |
-| 15618 | `retryDelay` | const |  |
-| 15622 | `robustFetchResource` | fn | 重试耗尽仍失败才抛出，由上层按现有错误路径处理。 |
-| 15654 | `fetchCredits` | fn |  |
-| 15712 | `refreshCreditRotationAccounts` | fn |  |
-| 15736 | `rememberCreditRotation` | fn |  |
-| 15748 | `cachedCreditRotationAccounts` | fn |  |
-| 15760 | `listDailyUsage` | fn |  |
-| 15766 | `syncCurrentCreditUsage` | fn |  |
-| 15769 | `task` | const |  |
-| 15810 | `exportSecretKey` | fn |  |
-| 15814 | `decryptLegacyExport` | fn |  |
-| 15825 | `handleApiRoute` | fn |  |
-| 16144 | `currentHealth` | const |  |
-| 16797 | `buildContextTiers` | const | 面板自己的 6 档预设不受影响（那是我们自己的下拉，不读这个数组）。 |
-| 17003 | `uid` | const |  |
-| 17066 | `d` | const |  |
-| 17140 | `html` | const |  |
-| 17485 | `uid` | const |  |
-| 17629 | `dayOf` | const | 积分窗口与 token 窗口取同一个区间：分子分母同区间，否则 credit/1k 会被拉偏。 |
-| 17686 | `finish` | const |  |
-| 17763 | `pad` | const |  |
-| 17771 | `prune` | const |  |
-| 17964 | `worker` | const |  |
-| 18001 | `uid` | const |  |
-| 18596 | `probeModelEndpoint` | fn | 2xx/3xx/401/403/400/405 视为端点真实命中并立即返回；404/5xx/网络错误则继续尝试下一个候选。 |
-| 18934 | `run` | const |  |
-| 19184 | `targetUid` | const |  |
-| 19213 | `targetUid` | const |  |
-| 19564 | `id` | const |  |
-| 19851 | `uid` | const |  |
-| 19852 | `conv` | const |  |
-| 19853 | `safe` | const |  |
-| 19859 | `items` | const |  |
-| 19922 | `key` | const |  |
-| 19935 | `key` | const |  |
-| 19950 | `key` | const |  |
-| 20007 | `uid` | const |  |
-| 20229 | `handleApi` | fn |  |
-| 20230 | `failure` | const |  |
-| 20261 | `stopCaffeinate` | fn |  |
-| 20281 | `stopUserActivity` | fn | 停止防锁屏：清除续期定时器并杀掉 -u 进程（UserIsActive 断言随之释放） |
-| 20289 | `startUserActivityLoop` | fn | 无需辅助功能权限（-u 走系统 IOKit 用户活动断言）。 |
-| 20292 | `tick` | const |  |
-| 20304 | `startCaffeinate` | fn |  |
-| 20335 | `applySleepMode` | fn |  |
-| 20364 | `sleepNow` | fn |  |
-| 20385 | `restoreSleepMode` | fn |  |
-| 20396 | `startServer` | fn |  |
-| 20573 | `cleanup` | const |  |
-| 20590 | `tryListen` | const |  |
-| 20675 | `cleanupClientTmpOnce` | fn | 上游没有回收机制 ⇒ 这里启动跑一次 + 每 24h 一次，只删超过 7 天的条目。 |
-| 20726 | `runAutomationSchedules` | fn |  |
+| 12814 | `key` | const | 只在真的变了才写盘：本函数挂在每次账号备份之后，高频调用，无变化时不该碰磁盘。 |
+| 12822 | `uidOf` | const |  |
+| 12837 | `gatewaySyncAccountsQuiet` | fn | 同步后需要时给面板/日志一句话（安静版：只在真有变化时返回字符串）。 |
+| 12852 | `gatewayProbeHealth` | fn | 探活（/healthz 免鉴权）。null = 不可达。 |
+| 12871 | `gatewayFetchModels` | fn |  |
+| 12903 | `sameGatewayOrigin` | fn |  |
+| 12916 | `findGatewayModelEntry` | fn |  |
+| 12928 | `readWorkbuddyModels` | fn |  |
+| 12941 | `gatewayModelsOverview` | fn |  |
+| 12979 | `by` | const |  |
+| 12989 | `gatewayInstall` | fn | 下载 → SHA-256 校验 → 解压 → 凭证桥 → 生成 config。任一环节失败都不留半成品可用状态。 |
+| 12991 | `task` | const |  |
+| 13082 | `gatewayReadEnabled` | fn | 「用户是否启用」是 WorkDaddy 侧意图，与「装没装」分开记（沿用免打扰开关的记法）。 |
+| 13089 | `gatewaySetEnabled` | fn |  |
+| 13102 | `gatewayStart` | fn | 启动网关子进程（stdio 用 ['ignore','pipe','pipe']：本环境给子进程建 stdin 管道会 EBUSY）。 |
+| 13136 | `gatewayStop` | fn |  |
+| 13163 | `gatewayHealthSnapshot` | fn |  |
+| 13174 | `normalizeGatewayHealth` | fn | 把 /healthz 原始结果规范成面板要用的形状。 |
+| 13190 | `gatewayPoolSnapshot` | fn |  |
+| 13192 | `accounts` | const |  |
+| 13194 | `tu` | const |  |
+| 13216 | `realmTotals` | const |  |
+| 13230 | `gatewayFetchJson` | fn | 带鉴权地打网关自己的 HTTP 接口（本仓持有 api_key，前端不必知道它）。 |
+| 13255 | `gatewayFindPidByPort` | fn |  |
+| 13270 | `gatewayLogTail` | fn | 读网关日志尾部（面板排障用；只读最后 N 行，不整份加载）。 |
+| 13292 | `refreshGatewayIfEnabled` | fn |  |
+| 13313 | `stashDir` | fn | ================= 暂存提示词（stash）辅助 ================= |
+| 13318 | `safeKey` | fn | 与 /api/stash 写入时相同的 key 生成规则：safe(uid) + '__' + safe(conversationId) |
+| 13323 | `listStashRecords` | fn | 扫描 stash 目录，返回全部暂存记录（按 savedAt 倒序）及 uid -> nickname 映射 |
+| 13350 | `stashFilePath` | fn | key 文件名校验：替换非法字符但不截断（key 本身由 safe() 逐段限制长度，可能超过 80 字符） |
+| 13356 | `stashRecordByKey` | fn |  |
+| 13363 | `fetchConvNames` | fn | 通过 CDP 抓取侧边栏会话列表，返回 conversationId -> 会话名 映射（用于筛选下拉展示会话名而非 id） |
+| 13391 | `deleteStashRecord` | fn | 删除单条暂存记录（删文件 + 同步 stash-index.json） |
+| 13414 | `buildBusyExpr` | fn |  |
+| 13425 | `visibleIn` | fn | 误判空闲会在回复中输入，正文/图片回填容易失败，这是原设计刻意保守的原因。 |
+| 13452 | `waitAiIdle` | fn | 等待 AI 空闲；超时返回 false |
+| 13463 | `busy` | const |  |
+| 13494 | `resolveUsageBoardPython` | fn | 解析可用的 python：环境变量 → 托管 venv → 托管 base（版本目录）→ PATH 兜底。 |
+| 13516 | `latestUsageBoardHtml` | fn | usage-board 目录里最新一份看板 HTML 文件名；没有则返回 null。 |
+| 13527 | `latestUsageUnifiedHtml` | fn | 统一用量看板的产物：unified-board-<stamp>.html。 |
+| 13541 | `creditUsageQuery` | fn |  |
+| 13549 | `readUsageStatusJson` | fn |  |
+| 13554 | `runUsageStatusExtractor` | fn | 跑一次第三方抽取器（只为补充指标）。失败/超时都只返回 ok:false，绝不抛。 |
+| 13560 | `done` | const |  |
+| 13582 | `builtinAssetsDir` | fn |  |
+| 13598 | `builtinWallpaperSource` | fn |  |
+| 13607 | `initBuiltinAssets` | fn |  |
+| 13842 | `listThemes` | fn | 主题列表（内置 + 用户自定义；自定义文件与内置同名时以文件为准，不重复列出） |
+| 13869 | `getTheme` | fn | 取主题完整定义（含 colors）。优先读 themes/ 目录的自定义文件（可覆盖内置同名主题），否则回退内置 |
+| 13899 | `accountSwitchThemeExpression` | fn | 会被启动时的旧云端选择覆盖。这里不安装 hook，也不改其他账号或皮肤 CSS。 |
+| 13944 | `preserveAccountSwitchTheme` | fn |  |
+| 13961 | `nativeAppearanceSyncExpression` | fn | 的 CSS 资源；浅色/深色仍由 WorkBuddy 原生状态负责。 |
+| 13964 | `removeNativeSheet` | fn |  |
+| 13972 | `setAttr` | fn |  |
+| 13977 | `setMode` | fn |  |
+| 13988 | `sync` | fn |  |
+| 14033 | `startNativeAppearanceSyncByCdp` | fn |  |
+| 14038 | `releaseThemeByCdp` | fn |  |
+| 14052 | `restoreNativeAppearanceByCdp` | fn |  |
+| 14056 | `uid` | const |  |
+| 14129 | `restoreSavedTheme` | fn | 恢复已保存的主题（CDP 连接/页面刷新后调用）：读取 current-theme.json 重新应用，保证深浅色在重启/刷新后仍生效 |
+| 14173 | `loadThemePatches` | fn |  |
+| 14189 | `themeExtrasCss` | fn | 主题附加样式：从 theme-patches.js 热加载，不硬编码在此 |
+| 14201 | `loadThemeVars` | fn |  |
+| 14217 | `themeVarsCss` | fn | 生成变量别名 CSS：isDark 时 darkOnly 条目加 html[data-theme="dark"] 前缀；浅色主题跳过 darkOnly 条目 |
+| 14221 | `declOf` | const |  |
+| 14232 | `lead` | const |  |
+| 14240 | `readBackgroundBlur` | fn |  |
+| 14251 | `applyThemeByCdp` | fn |  |
+| 14285 | `uid` | const |  |
+| 14287 | `colors` | const |  |
+| 14410 | `wbsBuiltinAppearance` | fn | 让 WorkBuddy 内部 useTheme hook / 组件 theme prop 实时跟随，等价调用原生 setTheme()。 |
+| 14422 | `wbsSnapshotNativeAppearance` | fn |  |
+| 14446 | `wbsClearNativeCustomCss` | fn |  |
+| 14485 | `wbsWriteAppearanceState` | fn |  |
+| 14493 | `wbsSyncAppearanceKeys` | fn |  |
+| 14520 | `wbsPrepareNativeAppearance` | fn |  |
+| 14528 | `wbsSyncNativeTheme` | fn |  |
+| 14542 | `wbsSyncNativeThemeQuiet` | fn | wbsSyncNativeThemeIdempotent：250ms 守护/keeper 的周期调用路径，属性同值时不写。 |
+| 14597 | `keepSelectedTheme` | fn |  |
+| 14635 | `wbsHasSpecialNativeAppearance` | fn |  |
+| 14660 | `wbsHoldNativeAppearance` | fn |  |
+| 14732 | `clearComposerByCdp` | fn |  |
+| 14785 | `fnv1a32` | fn |  |
+| 14802 | `composerDraftHash` | fn |  |
+| 14819 | `composerDraftExpr` | fn |  |
+| 14855 | `codeBuddySubmitExpr` | fn |  |
+| 14884 | `composerDraftConsumed` | fn |  |
+| 14915 | `composerSendExpr` | const |  |
+| 14919 | `fiberOf` | fn |  |
+| 14927 | `isStore` | fn |  |
+| 14984 | `sendStashToComposer` | fn |  |
+| 14990 | `guardedSend` | const |  |
+| 14993 | `allItems` | const |  |
+| 15002 | `s` | const |  |
+| 15155 | `countBlocks` | const |  |
+| 15165 | `pasteAndVerify` | const | 通用「合成 paste 后轮询验证 contentblock 增加」 |
+| 15211 | `name` | const |  |
+| 15227 | `disp` | const |  |
+| 15259 | `visible` | fn |  |
+| 15332 | `probeSendButton` | const | React may need more than one frame to enable the official send button. |
+| 15346 | `readDraft` | const |  |
+| 15354 | `draftConsumed` | const |  |
+| 15357 | `awaitDraftConsumed` | const | 点击 / 接口调用之后统一的「草稿被吃掉了吗」等待（两条路径共用同一个判据）。 |
+| 15468 | `fetchResource` | fn |  |
+| 15502 | `data` | const |  |
+| 15505 | `accounts` | const |  |
+| 15537 | `fetchEnterpriseResource` | fn |  |
+| 15583 | `robustFetchEnterpriseResource` | fn |  |
+| 15606 | `resolveEnterpriseId` | fn |  |
+| 15634 | `retryDelay` | const |  |
+| 15638 | `robustFetchResource` | fn | 重试耗尽仍失败才抛出，由上层按现有错误路径处理。 |
+| 15670 | `fetchCredits` | fn |  |
+| 15728 | `refreshCreditRotationAccounts` | fn |  |
+| 15752 | `rememberCreditRotation` | fn |  |
+| 15764 | `cachedCreditRotationAccounts` | fn |  |
+| 15776 | `listDailyUsage` | fn |  |
+| 15782 | `syncCurrentCreditUsage` | fn |  |
+| 15785 | `task` | const |  |
+| 15826 | `exportSecretKey` | fn |  |
+| 15830 | `decryptLegacyExport` | fn |  |
+| 15841 | `handleApiRoute` | fn |  |
+| 16160 | `currentHealth` | const |  |
+| 16813 | `buildContextTiers` | const | 面板自己的 6 档预设不受影响（那是我们自己的下拉，不读这个数组）。 |
+| 17019 | `uid` | const |  |
+| 17082 | `d` | const |  |
+| 17156 | `html` | const |  |
+| 17501 | `uid` | const |  |
+| 17645 | `dayOf` | const | 积分窗口与 token 窗口取同一个区间：分子分母同区间，否则 credit/1k 会被拉偏。 |
+| 17702 | `finish` | const |  |
+| 17779 | `pad` | const |  |
+| 17787 | `prune` | const |  |
+| 17980 | `worker` | const |  |
+| 18017 | `uid` | const |  |
+| 18612 | `probeModelEndpoint` | fn | 2xx/3xx/401/403/400/405 视为端点真实命中并立即返回；404/5xx/网络错误则继续尝试下一个候选。 |
+| 18950 | `run` | const |  |
+| 19200 | `targetUid` | const |  |
+| 19229 | `targetUid` | const |  |
+| 19580 | `id` | const |  |
+| 19867 | `uid` | const |  |
+| 19868 | `conv` | const |  |
+| 19869 | `safe` | const |  |
+| 19875 | `items` | const |  |
+| 19938 | `key` | const |  |
+| 19951 | `key` | const |  |
+| 19966 | `key` | const |  |
+| 20023 | `uid` | const |  |
+| 20245 | `handleApi` | fn |  |
+| 20246 | `failure` | const |  |
+| 20277 | `stopCaffeinate` | fn |  |
+| 20297 | `stopUserActivity` | fn | 停止防锁屏：清除续期定时器并杀掉 -u 进程（UserIsActive 断言随之释放） |
+| 20305 | `startUserActivityLoop` | fn | 无需辅助功能权限（-u 走系统 IOKit 用户活动断言）。 |
+| 20308 | `tick` | const |  |
+| 20320 | `startCaffeinate` | fn |  |
+| 20351 | `applySleepMode` | fn |  |
+| 20380 | `sleepNow` | fn |  |
+| 20401 | `restoreSleepMode` | fn |  |
+| 20412 | `startServer` | fn |  |
+| 20589 | `cleanup` | const |  |
+| 20606 | `tryListen` | const |  |
+| 20691 | `cleanupClientTmpOnce` | fn | 上游没有回收机制 ⇒ 这里启动跑一次 + 每 24h 一次，只删超过 7 天的条目。 |
+| 20742 | `runAutomationSchedules` | fn |  |
 
 ## scripts/inject.js  （22734 行 / 923 个函数）
 
@@ -2110,4 +2111,4 @@
 | 657 | `apiKeyHint` | fn | api_key 的展示用指纹（只回前 6 位 + 长度，够确认是不是同一把，又不泄漏）。 |
 | 664 | `generateApiKey` | fn | 生成本地 api_key（32 字节 base64url，约 43 字符）。 |
 
-合计 **2056** 个函数。
+合计 **2057** 个函数。

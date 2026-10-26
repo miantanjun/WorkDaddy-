@@ -385,5 +385,22 @@ console.log('\n[N] 上下文档位调节');
 }
 
 console.log('');
+console.log('── O. 账号快照写回 gateway.json（修「安装时写一次，之后再也不更新」）──');
+{
+  const syncFn = daemonSrc.slice(
+    daemonSrc.indexOf('function gatewaySyncAccounts(options)'),
+    daemonSrc.indexOf('function gatewaySyncAccountsQuiet')
+  );
+  ok(syncFn.length > 0, 'O1 能切到 gatewaySyncAccounts 函数体');
+  ok(/apiGateway\.writeGatewayState\(paths\.stateFile/.test(syncFn),
+    'O2 ⭐ 同步后把账号快照写回 gateway.json（否则面板/诊断会一直显示少一个号）');
+  ok(/prev\.installed === true && prev\.versionTag/.test(syncFn),
+    'O3 ⭐⭐ 只在状态文件完整时才写：readGatewayState 对缺失/损坏文件返回 fallback，照抄会把 versionTag/port 冲掉');
+  ok(/key\(prev\.accounts\) !== key\(next\)/.test(syncFn),
+    'O4 只在账号真的变了才写盘（本函数挂在每次账号备份之后，高频调用）');
+  ok(/状态写失败不影响账号同步本身/.test(syncFn),
+    'O5 状态写失败不得影响账号同步本身（账号池是主目标，状态是附属）');
+}
+console.log('');
 console.log('结果：' + pass + ' 通过 / ' + fail + ' 失败');
 process.exit(fail ? 1 : 0);

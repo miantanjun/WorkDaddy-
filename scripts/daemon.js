@@ -12803,6 +12803,22 @@ function gatewaySyncAccounts(options) {
   const docs = collected.accounts.map(apiGateway.buildAuthDocument).filter(Boolean);
   if (!docs.length) return { ok: false, skipped: 'no-accounts', errors: collected.errors };
   const r = apiGateway.syncAuthDocuments(paths.authDir, docs, {});
+  // ⭐ 顺手把账号快照写回 gateway.json：这张表原先**只在 install 时写一次**，
+  //    之后再登录的账号不会反映到状态里（面板与诊断会一直显示少一个号）。
+  //    只覆盖 accounts，其余字段（version / port / apiKeyHint / registeredModelIds）原样保留 ——
+  //    readGatewayState 自带完整 fallback，缺文件时也不会把 state 写成半截。
+  try {
+    const prev = apiGateway.readGatewayState(paths.stateFile);
+    const next = collected.accounts.map((a) => ({ uid: a.uid, nickname: a.nickname || '' }));
+    // 只在真的变了才写盘：本函数挂在每次账号备份之后，高频调用，无变化时不该碰磁盘。
+    const key = (list) => JSON.stringify((list || []).map((a) => [a.uid, a.nickname]).sort());
+    // ⚠️ 只在「状态文件本来就是完整的一份」时更新：readGatewayState 对缺失/损坏文件返回
+    //    fallback（installed:false / versionTag 空 / port 默认），照那个写回去会把真实
+    //    versionTag 与 port 冲掉 —— 宁可这一轮不更新账号快照，也不能破坏状态。
+    if (prev.installed === true && prev.versionTag && key(prev.accounts) !== key(next)) {
+      apiGateway.writeGatewayState(paths.stateFile, Object.assign({}, prev, { accounts: next }));
+    }
+  } catch (_) { /* 状态写失败不影响账号同步本身 */ }
   const uidOf = (name) => String(name).replace(/^workbuddy-/, '').replace(/\.json$/, '');
   return {
     ok: true,
