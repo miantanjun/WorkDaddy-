@@ -14,6 +14,63 @@
   - **工程与文档** —— 回归套件、探针、索引、构建与版本口径
   - **判定不做** —— 评估过、有明确判据、**故意不做**的项（留档，避免以后重复评估）
 
+> ⚠️ **版本断层**：v1.9.2 – v1.9.7 的条目尚未回填（那几版只打了 tag 未补文档）。
+> 需要时用 `git log v1.9.1..v1.9.7 --oneline` 还原。**跨版本的完整清单以 [`docs/DONE-TODO.md`](docs/DONE-TODO.md) 为准**，本文件只管「某一版改了什么」。
+
+## 未发版（Unreleased，基线 2026-10-27）
+
+**主题**：**吸纳上游 1.2.16 + 1.2.18** + **反代网关转为自维护**（源码入库 / CI 出包 / 出站指纹对齐）。
+
+> 完整台账（含判定不做的理由、待办优先级）见 [`docs/DONE-TODO.md`](docs/DONE-TODO.md)；
+> 反代取证过程见 [`docs/gateway-audit-2026-10.md`](docs/gateway-audit-2026-10.md)。
+
+### 新增功能
+
+- **启动环境隔离 —— 根治「一重启就静默升级」**（上游 1.2.16，提交 `3e3e329`）：把客户端子进程的 `TEMP`/`TMP` 隔离到 `<dataDir>/client-tmp/<profileId>`，并钉住 `WORKBUDDY_UPDATE_URL`。
+  为什么只钉 URL 不够：官方 Windows updater 会在检查 feed **之前**恢复缓存的 `Setup.exe`（上游 #424），所以必须换 TEMP 让它在缓存目录里找不到包。官方状态机在 `ready` 时会先 `quitAndInstallForStartup()` —— 找不到包返回 false，才走 `continuing normal startup`，此时窗口照常打开。
+  接线两处：`win-launcher.launchWorkBuddy` 与 `daemon.relaunchWorkBuddy`（**双路都要改，只改一路等于没改**）。守卫 `test-workbuddy-launch-env.js`（28 断言）。
+- **client-tmp 定时回收**（自研配套，上游没做）：启动跑一次 + 每 24h 一次；只删超过 7 天的条目；单轮上限 2000 条；**不跟符号链接**；`EBUSY` 计入 failed 不抛；路径必须落在 `client-tmp` 之内。守卫 `test-client-tmp-cleanup.js`（25 断言）。
+- **账号健康检查**（网关）：`POST /panel/api/accounts/{uid}/health`，三步诊断（积分 → 模型目录 → 真实对话），**只诊断不改状态**，`?chat=0` 只读。实测 4 账号 / 3 健康。
+
+### 缺陷修复
+
+- **加密态账号的 token 刷新存不下来**（上游 1.2.18）：此前只把刷新结果丢进内存缓存（`persisted:false`），**daemon 一重启就退回旧 token**。现在 `lib.wdCompatEncryptAuthJson` 按原备份信封重新加密，`daemon.persistRefreshedAccount` 做**双 CAS**（签名 + 全文）后 `renameSync` 原子写回。
+  ⚠️ 配套加了**刷新前可写性预检**（失败返回 `encrypt-account-unavailable`）—— refresh token 一旦被上游轮换就**无法回滚**，不能等刷完才发现存不下。守卫 `test-token-persist-encrypted.js`（22 断言）。
+- **会话列表被后台刷新冲掉勾选**（上游 1.2.18）：自动复制收尾时会整块重渲染，勾选与批量模式丢失。现在加 `readSerial` 竞态防护 + 快照比对，数据没变就不重渲染，并保留 `selected` / 滚动位置 / 批量模式。守卫 `test-session-silent-refresh.js`（18 断言）。
+- **session cwd 修复无限快重试 + 日志泄漏路径**（上游 1.2.18）：失败退避 30s 起翻倍、封顶 5 分钟；日志**只记错误码**，不再写完整工作区路径与异常原文。
+- **重启后只剩托盘、看不见窗口**（上游 1.2.18）：`relaunchWorkBuddy` 的 `windowsHide` 由 `true` 改 `false`。
+- **`gateway.json` 账号快照长期不同步**（自研）：面板读到 3 个账号、实际 4 个。现在同步时写回快照，三条保护 —— 完整性前置 · 内容比对（无变化不写盘）· 失败不影响主同步流程。守卫 `test-gateway-account-sync.js`。
+- **自动化选模型会静默选错**（自研）：官方模型与自定义模型可能同名（`custom-local:` 前缀之差），旧逻辑会静默命中错的那个。改成精确匹配，**只有**调用方漏了前缀时才回退。
+- **自维护网关的 Release 污染主程序更新检查**（自研）：`gateway-v1.13.0-panel-wd1` 被当成"新版本主程序"。两层防御 —— daemon 侧要求 tag 匹配 `^v?\d+\.\d+\.\d+$`；CI 侧该 Release 标 `prerelease: true`。
+
+### 优化调整
+
+- **出站头族对齐官方客户端**（网关，提交 `75493a5`）：修 5 类暴露 ——
+  `X-Product` 由 `WorkBuddy` 改 **`SaaS`**（它是部署形态，不是产品名）；
+  补 `X-IDE-Name`/`X-IDE-Type`/`X-IDE-Version`/`X-Private-Data`/`X-Agent-Intent`/`X-Agent-Purpose`；
+  **停用** `X-Machine-ID`/`X-Session-ID`（`app.asar` 零命中 ⇒ 我们自己造的，属于「多出来的头」，比缺头更危险）；
+  `Origin`/`Referer` 域名由 `www.codebuddy.cn` 改 `www.workbuddy.cn`（原值与同一请求的 `X-Domain` 自相矛盾）。
+  取证细节见 [`docs/gateway-audit-2026-10.md`](docs/gateway-audit-2026-10.md)。
+
+### 工程与文档
+
+- **Go 网关源码入库**：`vendor/wb2api-go/`（182 个 `.go` / 54,799 行）。`bash vendor/wb2api-go/build.sh` 32 秒出包（便携 Go 在 `%APPDATA%\WorkDaddy\golang\go`）。
+  ⚠️ 入库时**必须删掉上游的 `.github/` 与 `.gitignore`** —— 前者会被 GitHub 当成本仓 CI 跑起来，后者（`*.md` + `!README.md`）会**静默排除** `internal/prompt/defaultprompt.md` 这类源码必需文件。
+- **网关 CI 出包**：`.github/workflows/build-gateway.yml`，推 `gateway-v*` → 编译 + Release（`wb2api.exe` + `.sha256`）。该 tag 形状**不匹配** `build-win.yml` 的 `v*`，不会误触发主程序发版。
+- **网关自维护修订号**：`appVersion = "1.13.0-panel-wd<n>"`，每改一次网关行为 +1。上游基线也叫 `1.13.0-panel`，同号就分不清面板上报的是哪个包。
+- **新增 `docs/`**：`DONE-TODO.md`（已办 / 待办总清单）+ `gateway-audit-2026-10.md`（反代取证报告）。
+- **回归基线**：83 套件 / 4767 断言全通过；Go 17 个包全通过。
+
+### 判定不做
+
+- **1.2.16 壁纸轮换** —— 用户明确否决。
+- **1.2.16 client-launch-settings** —— 硬编码只支持 `workbuddy-ai`，本机是 `workbuddy-cn`，装了不生效。
+- **1.2.16 official-automation-sync / automation-account-sync** —— 用户明确否决。
+- **1.2.17 整体** —— 本仓没有「remove 官方导航」那条路径，该版改动全落在这条不存在的路径上。
+- **`persona` 系列** —— 与本仓「身份文件不做程序化改写」的边界冲突。
+- **照搬 Python 新版「401 不登出」** —— Go 的 `Classify()` 是更严谨的单飞 + 精细化错误链（`isSessionDead` 只在 refresh 失败时成立）。**release notes ≠ 待办清单**，移植前必须逐条证伪。
+- **上游遗留 A5（行修订号 / 指纹快路径）** —— 压在归档隔离不变量 I-1 上，**接线就绪、开关关闭**，另立项目。
+
 ## v1.9.1 —— 2026-09-29
 
 **本版主题**：**吸纳上游 1.2.8**（本分支迄今最大一版）+ **修掉 5 个用户报告的缺陷** + 新增「中文思考」开关。

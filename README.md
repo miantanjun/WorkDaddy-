@@ -14,6 +14,7 @@ WorkBuddy 桌面端的**多账号 · 会话同步 · 主题增强**工具集。�
 - [功能特性](#功能特性)
 - [与上游的差异](#与上游的差异)
 - [更新日志](CHANGELOG.md)
+- [文档索引](docs/README.md)
 - [安装](#安装)
 - [使用方法](#使用方法)
 - [配置说明](#配置说明)
@@ -325,9 +326,13 @@ scripts/verify-win.cmd          自检（关键文件 / JS 语法 / PS1 语法�
 | `scripts/scheduled-send.js` / `scripts/schedule-ledger.js` | 定时发送与执行核验台账 |
 | `scripts/token-stats.js` / `scripts/credit-*.js` | 账号用量归属与额度统计 |
 | `scripts/win/workdaddy.iss` | Inno Setup 安装器定义 |
+| `scripts/workbuddy-launch-env.js` | 客户端启动环境隔离：把 `TEMP`/`TMP` 指到 `<dataDir>/client-tmp/<profileId>` 并钉住更新地址 —— **这是「一重启就静默升级」的根治手段** |
+| `scripts/client-tmp-cleanup.js` | 上者的配套回收：启动跑一次 + 每 24h 一次，只删超过 7 天的条目 |
 | `scripts/windows-native/` | Windows 原生启动器（Go 源码） |
 | `tools/updater-guard.js` | 更新器护栏自检（可独立运行） |
 | `.github/workflows/` | GitHub Actions 构建流程 |
+| `vendor/wb2api-go/` | 反代网关（Go）自维护源码；`build.sh` 一键出包，详见其 `README-WORKDADDY.md` |
+| `docs/` | 跨版本长期文档：`DONE-TODO.md`（已办 / 待办总清单）、`gateway-audit-2026-10.md`（反代取证报告） |
 | `CHANGELOG.md` | 逐版本改动记录：按新增功能 / 缺陷修复 / 优化调整 / 工程与文档 / 判定不做分类，每条标注落地提交，便于追溯 |
 
 数据目录：`%APPDATA%\WorkDaddy`（账号备份、日志、自动复制规则、自动化任务）。
