@@ -31,6 +31,11 @@
   接线两处：`win-launcher.launchWorkBuddy` 与 `daemon.relaunchWorkBuddy`（**双路都要改，只改一路等于没改**）。守卫 `test-workbuddy-launch-env.js`（28 断言）。
 - **client-tmp 定时回收**（自研配套，上游没做）：启动跑一次 + 每 24h 一次；只删超过 7 天的条目；单轮上限 2000 条；**不跟符号链接**；`EBUSY` 计入 failed 不抛；路径必须落在 `client-tmp` 之内。守卫 `test-client-tmp-cleanup.js`（25 断言）。
 - **账号健康检查**（网关）：`POST /panel/api/accounts/{uid}/health`，三步诊断（积分 → 模型目录 → 真实对话），**只诊断不改状态**，`?chat=0` 只读。实测 4 账号 / 3 健康。
+- **网关面板新增「总览」页 + 整体换肤**（网关，`1.13.1-panel-wd4`）：新开 `#overview` 并设为默认落地页，一屏回答四件事 —— 钱够不够 / 用得凶不凶 / 哪个模型被额度卡住 / 哪个号坏了。
+  **后端零改动**：只接两个现成接口（`overview`、`usage?hours=24/168/720`，后者原生就返回 `series` / `by_model` / `credit_by_model`）。
+  视觉层：深色改「深海蓝黑 + 靛蓝」（**不用暖金**）、浅色「蓝白」；卡片网格、大数字排版、`conic-gradient` 缓存命中环、账号状态分布条。
+  三个坑值得记：① 参考稿是**纯静态设计稿**（`fetch` 命中 0），照抄等于零接线；② 我们的 CSP 是 `script-src 'self'` + `style-src 'self'` + **无 `font-src`** ⇒ CDN 图标字体必被拦，图标统一内联 SVG；③ 初始 `hidden` 必须跟默认落地页对齐，否则冷加载会闪一下账号表。
+  守卫 `overview_panel_test.go`（6 条：默认视图 / 无外链资源 / 空态不崩 / 额度三态 / 不限量账号不计入户均 / 除零保护）。
 
 ### 缺陷修复
 

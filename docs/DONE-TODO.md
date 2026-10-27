@@ -69,6 +69,7 @@
 | C5 | **账号健康检查** | ✅ | `POST /panel/api/accounts/{uid}/health`：三步（积分 → 模型目录 → 真实对话），只诊断不改状态，`?chat=0` 只读。**默认模型 ID 为空时会静默跳过第三步** —— 改两轮遍历才修好 |
 | C6 | **出站头族对齐官方** | ✅ | `internal/upstream/headers.go`，详见 [`gateway-audit-2026-10.md`](gateway-audit-2026-10.md) |
 | C7 | **`/releases/latest` 污染** | ✅ | CI `prerelease: true` + daemon tag 形状校验（同 B4） |
+| C8 | **面板总览页 + 换肤** | ✅ | 新开 `#overview`（默认落地页），接 `overview` + `usage?hours=24/168/720` 两个**现成**接口 —— 后端零改动。深色改「深海蓝黑 + 靛蓝」、浅色「蓝白」；卡片网格 / 环形缓存命中 / 账号分布条 / 大数字排版。图标全内联 SVG（CSP 禁外链）。守卫 `overview_panel_test.go`（6 条） |
 
 ### 3.3 判定不做 / 暂缓
 
@@ -131,9 +132,9 @@
 | 项 | 数值 | 时间 |
 |---|---|---|
 | WorkDaddy 回归 | **82 套件 / 4760 断言全通过**（另 `tools/updater-guard.js` 18 PASS） | 2026-10-27 07:38 实跑 |
-| Go 网关单测 | **17 个包全通过** | 2026-10-27 |
+| Go 网关单测 | **17 个包全通过**（含面板 `overview_panel_test.go` 6 条总览守卫） | 2026-10-27 |
 | WorkBuddy 面板实机 | `/api/inject` → `root=true widget=true` | 2026-10-27 |
-| 生产网关 | `1.13.0-panel-wd2`，7863 端口，4 账号 / 3 健康 | 2026-10-27 |
+| 生产网关 | `1.13.1-panel-wd4`，7863 端口，4 账号 / 3 健康；总览页实机截图校验（深/浅两套皮肤、数据全真） | 2026-10-27 |
 
 ---
 

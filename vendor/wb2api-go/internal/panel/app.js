@@ -350,12 +350,13 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { overview: '总览', accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
+  if (v === 'overview') loadDashboard();
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
@@ -374,8 +375,8 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDef
    initialization"），表现为该页永远显示"读取失败"，而点导航进去一切正常。
    延迟 0ms 让整份脚本先求值完，是修这一类问题最省事也最不容易再犯的办法。 */
 setTimeout(() => {
-  const hash = (location.hash || '#accounts').slice(1);
-  go(hash in TITLES ? hash : 'accounts');
+  const hash = (location.hash || '#overview').slice(1);
+  go(hash in TITLES ? hash : 'overview');
 }, 0);
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
@@ -501,6 +502,231 @@ function renderModelLocks(rows) {
   }
 }
 
+/* ── 总览仪表盘 ───────────────────────────────────────────────────────
+   一屏回答四件事：钱够不够 / 用得凶不凶 / 哪个模型被额度卡住 / 哪个号坏了。
+
+   数据只取自两个**现成**接口，不为这一页加任何后端字段、不打上游：
+     overview            → 积分、账号状态分布、model_locks、版本、uptime
+     usage?hours=N       → 请求数 / token / 积分 / 缓存命中率（N = 24 / 168 / 720）
+
+   为什么时间窗要预取 24 与 168：积分卡的「今日消耗 / 近 7 天消耗」是固定口径，
+   不随右上角下拉变化；只在用户真的切到「30 天」时才多发一次 720。 */
+
+/* 「已运行」的人话版：高位零省略。dur() 是「耗时」口径（带秒、右侧补零），
+   和「运行了多久」不是一回事 —— 后者写「0 时 1 分」纯属噪声。
+   放在本段内（而不是挨着 dur()）：守卫测试按段切片跑，函数必须在段里才看得见。 */
+function upHuman(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+  if (d) return d + ' 天 ' + h + ' 时';
+  if (h) return h + ' 时 ' + m + ' 分';
+  if (m) return m + ' 分';
+  return '不到 1 分';
+}
+
+const DASH_RANGES = { 24: '今日', 168: '近 7 天', 720: '近 30 天' };
+const DASH_USAGE_TTL = 60 * 1000;   // 用量窗口缓存：轮询 5 秒一次，但聚合值不必每 5 秒重算
+let dashHours = 24;
+let dashUsageBusy = false;
+const dashUsage = new Map();        // hours -> { at, data }
+
+function dashGet(hours) {
+  const hit = dashUsage.get(hours);
+  return hit && (Date.now() - hit.at) < DASH_USAGE_TTL ? hit.data : null;
+}
+// fmtInt 千分位。fmtTok 会把 3360 压成 3.4k —— 积分只有三四位数，压了就看不准。
+function fmtInt(n) {
+  const v = Number(n || 0);
+  return Number.isFinite(v) ? v.toLocaleString('en-US') : '—';
+}
+function dashLeft(iso) {
+  const ms = parseAPITime(iso);
+  if (!ms) return '—';
+  const s = Math.round((ms - Date.now()) / 1000);
+  return s <= 0 ? '已恢复' : dur(s);
+}
+
+async function loadDashUsage(force) {
+  if (dashUsageBusy) return;
+  const need = [];
+  for (const h of [dashHours, 24, 168]) {
+    if ((force || !dashGet(h)) && !need.includes(h)) need.push(h);
+  }
+  if (!need.length) { renderDashUsage(); return; }
+  dashUsageBusy = true;
+  try {
+    await Promise.all(need.map(async h => {
+      const d = await api('usage?hours=' + h);
+      dashUsage.set(h, { at: Date.now(), data: d });
+    }));
+    renderDashUsage();
+    // 积分卡的「今日 / 近 7 天消耗」也来自这里，拉回来要回去补一次
+    if (overviewData) renderDashboard(overviewData);
+  } catch (e) {
+    $('ovUseNote').textContent = '用量读取失败：' + e.message;
+  } finally { dashUsageBusy = false; }
+}
+
+function loadDashboard() { loadDashUsage(); }
+
+function renderDashUsage() {
+  const d = dashGet(dashHours);
+  const label = DASH_RANGES[dashHours] || '今日';
+  document.querySelectorAll('#ovRange .chip').forEach(b => {
+    b.classList.toggle('on', Number(b.dataset.h) === dashHours);
+  });
+  if (!d) return;
+  const t = d.totals || {};
+  const req = Number(t.requests || 0), err = Number(t.errors || 0);
+  $('ovReq').textContent = fmtInt(req);
+  $('ovTokIn').textContent = fmtTok(t.prompt_tokens || 0);
+  $('ovTokOut').textContent = fmtTok(t.completion_tokens || 0);
+  $('ovCreditUsed').textContent = fmtCredit(t.credits);
+  const okRate = req > 0 ? ((req - err) / req * 100).toFixed(1) : '—';
+  $('ovUseNote').textContent = '范围：' + label
+    + ' · 成功 ' + fmtInt(req - err) + ' / 失败 ' + fmtInt(err)
+    + '（成功率 ' + okRate + (okRate === '—' ? '' : '%') + '）'
+    + ' · 平均 ' + fmtMs(t.avg_latency_ms) + ' · ' + fmtRate(t.avg_tokens_per_second);
+
+  // 缓存命中率：上游前缀缓存。命中/未命中都按 token 计，不是按请求数。
+  const hit = Number(t.cache_hit_tokens || 0), miss = Number(t.cache_miss_tokens || 0);
+  const rate = Number(t.cache_hit_rate);
+  const p = Number.isFinite(rate) ? Math.max(0, Math.min(100, rate)) : (hit + miss > 0 ? hit / (hit + miss) * 100 : 0);
+  const donut = $('ovDonut');
+  donut.style.setProperty('--p', p.toFixed(1));
+  donut.style.setProperty('--ring', p >= 70 ? 'var(--ok)' : (p >= 40 ? 'var(--accent)' : 'var(--warn)'));
+  $('ovHitPct').textContent = (hit + miss) > 0 ? p.toFixed(0) + '%' : '—';
+  $('ovHitIn').textContent = fmtTok(hit);
+  $('ovHitMiss').textContent = fmtTok(miss);
+  $('ovHitOut').textContent = fmtTok(t.completion_tokens || 0);
+  $('ovLatency').textContent = fmtMs(t.avg_latency_ms) + ' / ' + fmtRate(t.avg_tokens_per_second);
+  $('ovCacheNote').textContent = (hit + miss) > 0
+    ? '统计范围：' + label + '。命中 ' + fmtInt(hit) + ' token，未命中 ' + fmtInt(miss)
+      + ' token；输出侧不参与缓存计费。'
+    : '统计范围：' + label + '。该窗口内没有可统计的输入 token。';
+}
+
+const OV_SVG_OK = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M5.2 8.3 7 10.1l3.8-4"/></svg>';
+
+function renderDashboard(ov) {
+  if (!ov) return;
+  const accs = ov.accounts || [];
+  const totN = Number(ov.total || 0);
+  const okN = Number(ov.healthy || 0);
+  const coolN = Number(ov.cooling || 0);
+  const pauseN = Number(ov.paused || 0);
+  const disN = Number(ov.disabled || 0);
+
+  /* 运行状态条 */
+  $('ovVer').textContent = 'v' + (ov.version || '—');
+  const up = Math.max(0, Math.floor(ov.uptime_sec || 0));
+  $('ovUptime').textContent = upHuman(up);
+  $('ovInflight').textContent = ov.in_flight_full || 0;
+  $('ovSticky').textContent = ov.sticky_sessions || 0;
+  $('ovUrl').textContent = location.origin + '/v1';
+  $('ovRefreshed').textContent = ov.balance_refreshed_at ? '余额刷新 ' + ago(ov.balance_refreshed_at) : '';
+  $('ovState').textContent = okN > 0 ? '运行中' : (totN ? '无可用账号' : '待添加账号');
+  $('ovBadge').className = 'badge' + (okN > 0 ? '' : (totN ? ' bad' : ' warn'));
+  $('ovPulse').className = 'pulse' + (okN > 0 ? '' : (totN ? ' warn' : ' bad'));
+
+  /* 告警横幅：只在真有异常时占位，正常时整条不渲染 */
+  const alerts = [];
+  if (coolN) alerts.push(coolN + ' 个账号冷却中');
+  if (disN) alerts.push(disN + ' 个已禁用');
+  if (pauseN) alerts.push(pauseN + ' 个已暂停选号');
+  if (!okN && totN) alerts.push('没有任何可用账号，请求会全部失败');
+  const al = $('ovAlert');
+  if (alerts.length) { $('ovAlertText').textContent = alerts.join(' · '); al.hidden = false; }
+  else al.hidden = true;
+
+  /* 剩余积分：企业版不计入（credits_total = -1 表示上游不限量，加进去会把"户均"算飞） */
+  let rem = 0, total = 0, unlimited = 0;
+  for (const s of accs) {
+    if (s.credits_total === -1) { unlimited++; continue; }
+    rem += Number(s.credits || 0);
+    total += Number(s.credits_total || 0);
+  }
+  const counted = Math.max(0, accs.length - unlimited);
+  const bigEl = $('ovCredits');
+  bigEl.className = counted > 0 ? 'bignum' : 'bignum empty';
+  bigEl.firstChild.nodeValue = counted > 0 ? fmtInt(rem) : '—';
+  $('ovCredTotal').textContent = total > 0 ? ' / ' + fmtInt(total) + ' 总额' : '';
+  $('ovAccTag').textContent = counted + ' 个账号';
+  const u24 = dashGet(24), u7 = dashGet(168);
+  $('ovCreditToday').textContent = u24 ? fmtCredit((u24.totals || {}).credits) : '—';
+  $('ovCredit7').textContent = u7 ? fmtCredit((u7.totals || {}).credits) : '—';
+  $('ovCreditAvg').textContent = counted > 0 ? fmtInt(Math.round(rem / counted)) : '—';
+  const pct = total > 0 ? Math.max(0, Math.min(100, Math.round(rem / total * 100))) : 0;
+  const bar = $('ovCreditBar');
+  bar.style.width = pct + '%';
+  bar.className = pct <= 10 ? 'bad' : (pct <= 30 ? 'warn' : '');
+  const notes = ['剩余 / 总额 = ' + pct + '%'];
+  if (unlimited) notes.push(unlimited + ' 个不限量账号不计入');
+  if (Math.max(coolN, pauseN, disN) > 0) notes.push(okN + ' 个账号在参与选号');
+  $('ovCreditNote').textContent = notes.join(' · ');
+
+  /* 模型额度 */
+  const locks = Array.isArray(ov.model_locks) ? ov.model_locks : [];
+  if (!locks.length) {
+    $('ovLocks').innerHTML = '<div class="lk-ok">' + OV_SVG_OK + '所有模型均可选 —— 当前没有模型级限流</div>';
+    $('ovLockNote').textContent = '';
+  } else {
+    $('ovLocks').innerHTML = locks.map(r => {
+      const st = r.state === 'locked' ? '<span class="tag bad">整池不可用</span>'
+        : (r.state === 'starved' ? '<span class="tag warn">没号可用</span>'
+          : '<span class="tag warn">部分限流</span>');
+      const realm = r.realm === 'global' ? '国际版' : '国内版';
+      const fu = parseAPITime(r.fully_unlock_at);
+      return '<div class="lk-row">'
+        + '<div class="mdl">' + esc(r.model || '—') + '<em>' + realm + '</em></div>'
+        + st
+        + '<div class="fig"><span class="k">可用账号</span><span class="v">' + (r.servable || 0) + ' / ' + (r.total || 0) + '</span></div>'
+        + '<div class="fig"><span class="k">被锁</span><span class="v">' + (r.locked || 0) + '</span></div>'
+        + '<div class="fig"><span class="k">首个恢复</span><span class="v">' + dashLeft(r.unlock_at || r.fully_unlock_at) + '</span></div>'
+        + '<div class="fig" title="' + esc(fu ? fmtLocalDateTime(fu) : '') + '"><span class="k">全池恢复</span><span class="v">' + dashLeft(r.fully_unlock_at) + '</span></div>'
+        + '<div class="rsn" title="' + esc(r.reason || '') + '">' + esc(r.reason || '—') + '</div>'
+        + '</div>';
+    }).join('');
+    const bad = locks.filter(r => r.state === 'locked' || r.state === 'starved').length;
+    $('ovLockNote').textContent = bad ? bad + ' 个模型整池不可用' : locks.length + ' 个模型部分限流';
+  }
+
+  /* 账号监测：四类严格互斥（后端 countsDetailed 的 switch 口径），合计恒等于总数 */
+  const seen = accs.filter(s => s.credits_total !== -1 && Number(s.credits || 0) <= 0).length;
+  const buckets = [
+    ['可用', okN, 'var(--ok)'],
+    ['冷却中', coolN, 'var(--warn)'],
+    ['已暂停', pauseN, 'var(--accent)'],
+    ['已禁用', disN, 'var(--bad)'],
+  ];
+  $('ovDist').innerHTML = buckets.map(([nm, n, color]) => {
+    const p = totN > 0 ? Math.round(n / totN * 100) : 0;
+    return '<div class="r"><span class="nm"><i class="dot" style="background:' + color + '"></i>' + nm + '</span>'
+      + '<span class="bar"><i style="width:' + p + '%;background:' + color + '"></i></span>'
+      + '<span class="n">' + n + '</span><span class="p">' + p + '%</span></div>';
+  }).join('');
+  $('ovDistLeft').textContent = '共 ' + totN + ' 个账号' + (seen ? ' · 积分见底 ' + seen + ' 个' : '');
+  $('ovDistRight').textContent = '加权随机选号 · 池快照 5 秒刷新';
+}
+
+// 总览页的事件只绑一次：脚本顶层执行时 DOM 已就位（脚本在 body 末尾）。
+$('ovRange').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-h]');
+  if (!b) return;
+  const h = Number(b.dataset.h);
+  if (!DASH_RANGES[h] || h === dashHours) return;
+  dashHours = h;
+  renderDashUsage();
+  loadDashUsage();
+});
+$('ovRefresh').onclick = () => { loadOverview(true); loadDashUsage(true); };
+$('ovCopy').onclick = async () => {
+  const u = location.origin + '/v1';
+  try { await navigator.clipboard.writeText(u); toast('已复制 ' + u, 'ok'); }
+  catch (e) { toast('复制失败，请手动选择地址', 'err'); }
+};
+$('ovAlertGo').onclick = () => { go('accounts'); history.replaceState(null, '', '#accounts'); };
+
 async function loadOverview(quiet) {
   try {
     const d = await api('overview');
@@ -523,9 +749,10 @@ async function loadOverview(quiet) {
     p.className = 'pulse' + (d.healthy > 0 ? '' : (d.total ? ' warn' : ' bad'));
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
     const up = Math.floor(d.uptime_sec);
-    $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
+    $('subMeta').textContent = '运行 ' + upHuman(up);
     renderAccounts(d.accounts || []);
     renderModelLocks(d.model_locks);
+    renderDashboard(d);
     // 到期卡片跟随首页统计同步刷新（用同一份响应里的按日批次，不额外发请求）。
     // 2 分钟内的实时明细最新且更全，保留；过期后由 state 快照接管，避免点过一次
     // 「检查」之后卡片永远停在那一刻的旧数据。
@@ -1553,7 +1780,8 @@ if ($('btnCompClaimAll')) $('btnCompClaimAll').onclick = async () => {
 
 /* ── 轮询 ─────────────────────────────────────────────────────────── */
 function refreshVisible() {
-  if (view === 'accounts') { loadOverview(true); renderCachedCompensation(); }
+  if (view === 'overview') { loadOverview(true); loadDashUsage(); }
+  else if (view === 'accounts') { loadOverview(true); renderCachedCompensation(); }
   else if (view === 'logs') loadLogs();
   else if (view === 'taskscenter') reattachQueueView();
 }

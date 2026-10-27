@@ -6,35 +6,51 @@
 <title>WorkBuddy2API · 控制台</title>
 <style>
 /* ── 设计令牌：明暗两套独立色板 ─────────────────────────────────────────
-   冷石墨基调（仪表盘语言，非营销页）：底色分层 + 单一靛蓝强调（仅交互），
-   语义色只给状态。等宽数字承载所有观测值，tabular-nums 对齐。 */
+   冷色基调（仪表盘语言，非营销页）：底色分层 + 单一蓝调强调（仅交互），
+   语义色只给状态。等宽数字承载所有观测值，tabular-nums 对齐。
+
+   为什么是冷色而不是暖金：这个面板 90% 的面积是数字和表格，暖色大面积铺底
+   在长时间盯盘时更容易累；而且明暗两态用**同一色相**（蓝）跨切换不刺眼 ——
+   浅色是蓝白，深色是深海蓝黑，切换只变明度不变色相。 */
 :root {
-  --bg: #0c0e14; --surface: #14171f; --surface-2: #1a1e28; --raise: #202531;
-  --line: #262c3a; --line-soft: #1e232e;
-  --ink: #e8ebf2; --ink-2: #a8b0c2; --ink-3: #6b7488;
-  --accent: #5b7cfa; --accent-ink: #ffffff; --accent-soft: rgba(91,124,250,.13);
+  --bg: #070910; --surface: #0e1219; --surface-2: #151a24; --raise: #1c2230;
+  --line: #232b3a; --line-soft: #191f2b;
+  --ink: #e7ebf5; --ink-2: #a3adc2; --ink-3: #69738a;
+  --accent: #6d8bff; --accent-ink: #ffffff; --accent-soft: rgba(109,139,255,.14);
   --ok: #3ddc97; --ok-soft: rgba(61,220,151,.12);
   --warn: #f5b544; --warn-soft: rgba(245,181,68,.12);
   --bad: #f0655f; --bad-soft: rgba(240,101,95,.12);
-  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.5);
+  --shadow: 0 1px 2px rgba(0,0,0,.5), 0 10px 30px -18px rgba(0,0,0,.75);
+  /* 顶部极淡的环境光：卡片浮起来的那层"空气感"，纯 CSS 无图片、离线可用 */
+  --ambient: radial-gradient(1200px 620px at 50% -12%, rgba(109,139,255,.10), transparent 72%);
+  --card-glow: 0 0 0 1px rgba(109,139,255,.20), 0 10px 30px -18px rgba(109,139,255,.45);
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 [data-theme="light"] {
-  --bg: #f4f5f8; --surface: #ffffff; --surface-2: #f8f9fb; --raise: #ffffff;
-  --line: #e2e5ec; --line-soft: #eceef3;
-  --ink: #14171f; --ink-2: #545c6e; --ink-3: #8b93a5;
-  --accent: #3d5fe0; --accent-ink: #ffffff; --accent-soft: rgba(61,95,224,.09);
+  --bg: #f5f8fd; --surface: #ffffff; --surface-2: #f2f6fc; --raise: #ffffff;
+  --line: #e0e7f2; --line-soft: #edf2f9;
+  --ink: #0f1626; --ink-2: #4d5a72; --ink-3: #8794ab;
+  --accent: #2f5be0; --accent-ink: #ffffff; --accent-soft: rgba(47,91,224,.08);
   --ok: #0f9d63; --ok-soft: rgba(15,157,99,.1);
   --warn: #b47611; --warn-soft: rgba(180,118,17,.11);
   --bad: #cf3b34; --bad-soft: rgba(207,59,52,.09);
-  --shadow: 0 1px 2px rgba(16,20,32,.06), 0 8px 24px -14px rgba(16,20,32,.14);
+  --shadow: 0 1px 2px rgba(16,20,32,.05), 0 10px 26px -20px rgba(16,20,32,.25);
+  --ambient: radial-gradient(1200px 620px at 50% -12%, rgba(47,91,224,.07), transparent 72%);
+  --card-glow: 0 0 0 1px rgba(47,91,224,.16), 0 10px 26px -20px rgba(47,91,224,.40);
+}
+/* 主题切换过渡：只挂在"会换色的壳"上。不写 * 全局 —— 那会让表格重排也带过渡，
+   滚动时明显发飘。带 @media(prefers-reduced-motion) 兜底见下方。 */
+body, .nav, .topbar, .box, .stat, .runbar, .donut, .meter, .meter i, .dist .bar i {
+  transition: background-color .28s ease, color .28s ease, border-color .28s ease,
+              box-shadow .28s ease, background-image .28s ease;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 [hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
-  background: var(--bg); color: var(--ink); font: 14px/1.55 var(--sans);
+  background-color: var(--bg); background-image: var(--ambient); background-attachment: fixed;
+  color: var(--ink); font: 14px/1.55 var(--sans);
   -webkit-font-smoothing: antialiased;
 }
 ::selection { background: var(--accent-soft); }
@@ -603,6 +619,130 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     color: var(--ink-2); font-size: 12.5px; }
   .rm-row input { flex: 1; }
 
+/* ── 总览仪表盘 ────────────────────────────────────────────────────────
+   设计目标：一屏之内回答"钱够不够 / 用得凶不凶 / 哪个模型卡住了 / 哪个号坏了"。
+   刻意不引图表库、不引图标字体、不引 CDN：CSP 是 style-src/script-src 'self'，
+   而且这台机器常年挂代理，外链资源一断整页就废——所有图形用 CSS 与内联 SVG 画。 */
+
+/* 运行状态条 */
+.runbar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 11px;
+  padding: 11px 15px; margin-bottom: 18px; box-shadow: var(--shadow);
+}
+.runbar .badge {
+  display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600;
+  color: var(--ok); background: var(--ok-soft); border: 1px solid rgba(61,220,151,.28);
+  padding: 3px 10px; border-radius: 999px;
+}
+.runbar .badge b { font-family: var(--mono); font-weight: 600; }
+.runbar .badge.warn { color: var(--warn); background: var(--warn-soft); border-color: rgba(245,181,68,.30); }
+.runbar .badge.bad { color: var(--bad); background: var(--bad-soft); border-color: rgba(240,101,95,.30); }
+.runbar .metric { font-size: 12px; color: var(--ink-3); white-space: nowrap; }
+.runbar .metric b { color: var(--ink); font-family: var(--mono); font-weight: 600; margin-left: 4px; }
+.runbar .url {
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink-2);
+  background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 6px; padding: 2px 8px;
+}
+/* .grow 在本文件里只对 .topbar / .box>header 等父级生效，runbar 与 alertbar 要单独给 */
+.runbar .grow, .alertbar .grow { flex: 1; }
+
+/* 卡片网格：两列，wide 独占一行。用 stretch 而不是 start：同一行的两张卡等高，
+   否则「剩余积分」（多一条进度槽 + 说明）会把右边「用量」衬得像掉了一截。 */
+.dash { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: stretch; }
+.dash .wide { grid-column: 1 / -1; }
+.dash .box { margin-bottom: 0; position: relative; }
+/* 顶边一道极窄的高光：卡片"浮起来"的那层边，比整卡描边更克制 */
+.dash .box::before {
+  content: ''; position: absolute; inset: 0 0 auto 0; height: 1px; pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(109,139,255,.38), transparent);
+}
+@media (max-width: 1080px) { .dash { grid-template-columns: 1fr; } }
+/* 卡片微光只在真有指针的设备上生效：触屏没有 hover，加过渡会留下"点过"的残影。 */
+@media (hover: hover) {
+  .dash .box:hover { border-color: rgba(109,139,255,.34); box-shadow: var(--card-glow); }
+  .dash .box { transition: box-shadow .22s ease, border-color .22s ease, transform .22s ease; }
+  .dash .box:hover { transform: translateY(-1px); }
+}
+
+/* 大数字：整页唯一允许用 800 字重的地方，视线第一落点 */
+.bignum {
+  font: 800 40px/1.06 var(--mono); font-variant-numeric: tabular-nums;
+  letter-spacing: -.03em; margin: 2px 0 14px;
+}
+.bignum small { font: 500 13.5px/1 var(--sans); color: var(--ink-3); letter-spacing: 0; margin-left: 7px; }
+/* 空值态：40px/800 的「—」会被看成一根进度条，所以空值时缩字号并退成弱色 */
+.bignum.empty { font-size: 30px; color: var(--ink-3); }
+
+/* 3/4 列小指标 */
+.kv3, .kv4 { display: grid; gap: 2px 18px; }
+.kv3 { grid-template-columns: repeat(3, 1fr); }
+.kv4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 640px) { .kv3 { grid-template-columns: 1fr; } .kv4 { grid-template-columns: repeat(2, 1fr); } }
+.kv3 > div, .kv4 > div { display: flex; flex-direction: column; gap: 3px; padding: 7px 0; }
+.kv3 .k, .kv4 .k { font-size: 11.5px; color: var(--ink-3); }
+.kv3 .v, .kv4 .v { font: 650 19px/1.2 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.dash .note { font-size: 11.5px; color: var(--ink-3); margin-top: 10px; line-height: 1.55; }
+
+/* 水平进度槽 */
+.meter { height: 6px; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--line-soft); overflow: hidden; margin-top: 14px; }
+.meter i { display: block; height: 100%; border-radius: 4px; background: var(--accent); transition: width .55s cubic-bezier(.4,0,.2,1); }
+.meter i.warn { background: var(--warn); }
+.meter i.bad { background: var(--bad); }
+
+/* 环形图：conic-gradient 画圈 + 同色内圆挖空。--p 是百分比，由 JS 写进 style。 */
+.donut {
+  --p: 0; --ring: var(--accent);
+  position: relative; width: 124px; height: 124px; border-radius: 50%; flex: none;
+  background: conic-gradient(var(--ring) calc(var(--p) * 1%), var(--surface-2) 0);
+  display: flex; align-items: center; justify-content: center;
+}
+.donut::after { content: ''; position: absolute; inset: 11px; border-radius: 50%; background: var(--surface); }
+.donut .in { position: relative; z-index: 1; text-align: center; }
+.donut .in b { font: 800 26px/1 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.donut .in span { display: block; font-size: 10.5px; color: var(--ink-3); margin-top: 4px; }
+.cache-wrap { display: flex; align-items: center; gap: 26px; flex-wrap: wrap; }
+.cache-list { flex: 1; min-width: 190px; }
+.cache-list .r { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 12.5px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); }
+.cache-list .r:last-child { border-bottom: none; }
+.cache-list .r .k { color: var(--ink-3); display: flex; align-items: center; gap: 7px; }
+.cache-list .r .v { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.cache-list .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+
+/* 账号分布 */
+.dist { display: flex; flex-direction: column; gap: 11px; }
+.dist .r { display: flex; align-items: center; gap: 11px; font-size: 12.5px; }
+.dist .r .nm { flex: 0 0 72px; display: flex; align-items: center; gap: 7px; color: var(--ink-2); }
+.dist .r .nm .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.dist .r .bar { flex: 1; height: 6px; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--line-soft); overflow: hidden; }
+.dist .r .bar i { display: block; height: 100%; border-radius: 4px; }
+.dist .r .n { flex: 0 0 28px; text-align: right; font: 650 13px/1 var(--mono); font-variant-numeric: tabular-nums; }
+.dist .r .p { flex: 0 0 38px; text-align: right; color: var(--ink-3); font-family: var(--mono); font-size: 11.5px; }
+.dist .foot { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--ink-3); border-top: 1px solid var(--line-soft); padding-top: 11px; margin-top: 3px; }
+
+/* 模型额度行 */
+.lk-ok { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--ink-2); padding: 3px 0 1px; }
+.lk-ok svg { width: 15px; height: 15px; color: var(--ok); flex: none; }
+.lk-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
+.lk-row:last-child { border-bottom: none; }
+.lk-row .mdl { min-width: 152px; font: 600 13.5px/1.3 var(--mono); }
+.lk-row .mdl em { display: block; font: 400 11px/1.4 var(--sans); font-style: normal; color: var(--ink-3); margin-top: 3px; }
+.lk-row .fig { display: flex; flex-direction: column; gap: 2px; }
+.lk-row .fig .k { font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.lk-row .fig .v { font: 650 15px/1.25 var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lk-row .rsn { flex: 1 1 180px; min-width: 0; font-size: 11.5px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 告警横幅 */
+.alertbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: var(--bad-soft); border: 1px solid rgba(240,101,95,.30); color: var(--bad);
+  border-radius: 11px; padding: 10px 15px; margin-bottom: 18px; font-size: 12.5px;
+}
+.alertbar svg { width: 15px; height: 15px; flex: none; }
+.alertbar .grow { flex: 1; }
+.alertbar button { color: var(--bad); border-color: rgba(240,101,95,.35); background: transparent; }
+.alertbar button:hover:not(:disabled) { border-color: var(--bad); }
+
 </style>
 <!-- 移动端适配：独立文件，必须在主 <style> 之后（@media 覆盖依赖层叠顺序） -->
 <link rel="stylesheet" href="mobile.css">
@@ -615,7 +755,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div class="sub" id="navSub">控制台</div>
     </div>
     <ul>
-      <li><a href="#accounts" data-view="accounts" class="on">
+      <li><a href="#overview" data-view="overview" class="on">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.2 2.6h4.6v4.6H2.2zM9.2 2.6h4.6v4.6H9.2zM2.2 9.2h4.6v4.2H2.2zM9.2 9.2h4.6v4.2H9.2z"/></svg>
+        总览</a></li>
+      <li><a href="#accounts" data-view="accounts">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
         账号池</a></li>
       <li><a href="#usage" data-view="usage">
@@ -660,8 +803,113 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button class="primary" id="btnAdd">添加账号</button>
     </div>
 
+    <!-- 总览：一屏回答「钱够不够 / 用得凶不凶 / 哪个模型卡住了 / 哪个号坏了」。
+         数据全部来自三个现成接口，不多发一个上游请求：
+           /panel/api/overview  → 积分、账号分布、model_locks、版本、uptime
+           /panel/api/usage     → 请求数 / token / 积分 / 缓存命中率（hours=24|168|720）
+         默认落地页就是这里，账号池退到第二项。 -->
+    <section class="view" id="view-overview">
+      <div class="runbar">
+        <span class="badge" id="ovBadge"><span class="pulse" id="ovPulse"></span><span id="ovState">连接中</span> <b id="ovVer">v—</b></span>
+        <span class="metric">运行<b id="ovUptime">—</b></span>
+        <span class="metric">在途<b id="ovInflight">0</b></span>
+        <span class="metric">粘性会话<b id="ovSticky">0</b></span>
+        <span class="url" id="ovUrl">—</span>
+        <button class="xs ghost" id="ovCopy" title="复制 API 地址">复制</button>
+        <span class="grow" style="flex:1"></span>
+        <span class="metric" id="ovRefreshed">—</span>
+        <button class="xs" id="ovRefresh">刷新</button>
+      </div>
+
+      <div class="alertbar" id="ovAlert" hidden>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 2.2 14.4 13.4H1.6z"/><path d="M8 6.2v3.1M8 11.4v.1"/></svg>
+        <span id="ovAlertText"></span>
+        <span class="grow"></span>
+        <button class="xs ghost" id="ovAlertGo">去账号池</button>
+      </div>
+
+      <div class="dash">
+        <!-- 剩余积分 -->
+        <div class="box">
+          <header>
+            <h3>剩余积分</h3>
+            <span class="grow"></span>
+            <span class="tag" id="ovAccTag">—</span>
+          </header>
+          <div class="pad">
+            <div class="bignum" id="ovCredits">—<small id="ovCredTotal"></small></div>
+            <div class="kv3">
+              <div><span class="k">今日消耗</span><span class="v" id="ovCreditToday">—</span></div>
+              <div><span class="k">近 7 天消耗</span><span class="v" id="ovCredit7">—</span></div>
+              <div><span class="k">户均剩余</span><span class="v" id="ovCreditAvg">—</span></div>
+            </div>
+            <div class="meter"><i id="ovCreditBar" style="width:0%"></i></div>
+            <div class="note" id="ovCreditNote">—</div>
+          </div>
+        </div>
+
+        <!-- 用量 -->
+        <div class="box">
+          <header>
+            <h3>用量</h3>
+            <span class="grow"></span>
+            <span class="chips" id="ovRange">
+              <button class="xs chip on" data-h="24">今日</button>
+              <button class="xs chip" data-h="168">7 天</button>
+              <button class="xs chip" data-h="720">30 天</button>
+            </span>
+          </header>
+          <div class="pad">
+            <div class="kv4">
+              <div><span class="k">请求次数</span><span class="v" id="ovReq">—</span></div>
+              <div><span class="k">Token 输入</span><span class="v" id="ovTokIn">—</span></div>
+              <div><span class="k">Token 输出</span><span class="v" id="ovTokOut">—</span></div>
+              <div><span class="k">积分消耗</span><span class="v" id="ovCreditUsed">—</span></div>
+            </div>
+            <div class="note" id="ovUseNote">—</div>
+          </div>
+        </div>
+
+        <!-- 模型额度（全宽）：哪些模型被上游额度挡住、挡了几个号、还要等多久 -->
+        <div class="box wide">
+          <header>
+            <h3>模型额度<span class="hint">上游按账号 × 模型计额度；「用尽」= 该模型在这个号上被上游拒绝（429 / 6004），不是账号积分耗尽</span></h3>
+            <span class="grow"></span>
+            <span class="note" id="ovLockNote"></span>
+          </header>
+          <div class="pad" id="ovLocks"><div class="lk-ok">—</div></div>
+        </div>
+
+        <!-- 缓存命中率 -->
+        <div class="box">
+          <header><h3>缓存命中率<span class="hint">上游前缀缓存命中比例，命中部分单价低得多</span></h3></header>
+          <div class="pad cache-wrap">
+            <div class="donut" id="ovDonut"><div class="in"><b id="ovHitPct">—</b><span>输入命中</span></div></div>
+            <div class="cache-list">
+              <div class="r"><span class="k"><i class="dot" style="background:var(--accent)"></i>输入命中</span><span class="v" id="ovHitIn">—</span></div>
+              <div class="r"><span class="k"><i class="dot" style="background:var(--surface-2);border:1px solid var(--line)"></i>输入未命中</span><span class="v" id="ovHitMiss">—</span></div>
+              <div class="r"><span class="k"><i class="dot" style="background:var(--ok)"></i>输出 token</span><span class="v" id="ovHitOut">—</span></div>
+              <div class="r"><span class="k">平均耗时 / 速率</span><span class="v" id="ovLatency">—</span></div>
+            </div>
+          </div>
+          <div class="pad" style="padding-top:0"><div class="note" id="ovCacheNote"></div></div>
+        </div>
+
+        <!-- 账号监测：四类状态严格互斥（后端 countsDetailed 的 switch 口径） -->
+        <div class="box">
+          <header><h3>账号监测<span class="hint">可用 / 冷却 / 暂停 / 禁用 四类互斥，合计 = 账号总数</span></h3></header>
+          <div class="pad">
+            <div class="dist" id="ovDist"><div class="lk-ok">—</div></div>
+            <div style="display:flex;justify-content:space-between;gap:12px;font-size:11.5px;color:var(--ink-3);border-top:1px solid var(--line-soft);padding-top:11px;margin-top:11px">
+              <span id="ovDistLeft">—</span><span id="ovDistRight">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- 账号池 -->
-    <section class="view" id="view-accounts">
+    <section class="view" id="view-accounts" hidden>
       <div class="stats">
         <div class="stat"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>
         <div class="stat good"><div class="v" id="sHealthy">-</div><div class="k">可用</div></div>
