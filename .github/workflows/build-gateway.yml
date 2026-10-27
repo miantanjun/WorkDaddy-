@@ -100,10 +100,17 @@ jobs:
           retention-days: 30
 
       # 只有打 gateway-v* 标签、或手动勾了 release 才发 Release。
+      # ⚠️ prerelease: true 是必须的，不是装饰。
+      # 本仓库同时发两种 Release：主程序 `v1.9.7` 和网关 sidecar `gateway-v…`。
+      # GitHub 的 `/releases/latest` 只跳过「草稿 + prerelease」，不标这个的话
+      # sidecar 会被当成"最新版"，daemon 的更新检查就会把面板上的最新版本显示成
+      # `gateway-v1.13.0-panel-wd1`（2026-10-27 实测中过一次）。
+      # daemon 侧也加了 tag 格式过滤，两层保险。
       - name: 发布到 GitHub Release
         if: startsWith(github.ref, 'refs/tags/gateway-v') || inputs.release
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: true
           tag_name: ${{ startsWith(github.ref, 'refs/tags/gateway-v') && github.ref_name || format('gateway-v{0}', steps.ver.outputs.app) }}
           name: 网关 wb2api ${{ steps.ver.outputs.app }}
           body: |

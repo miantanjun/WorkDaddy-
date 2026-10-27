@@ -306,7 +306,10 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		t.Errorf("200 response should carry nil body, got %q", respBody)
 	}
 	rc.Close()
-	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "WorkBuddy" {
+	// X-Product 是**部署形态**不是产品名：官方 app.asar 的兜底头表写死 `SaaS`
+	// （`[X-Product, SaaS]`），另一处也是 `deploymentType ?? 'SaaS'`。
+	// 这条断言原先守的是 "WorkBuddy" —— 那正是要被纠正的旧行为，不是回归。
+	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "SaaS" {
 		t.Errorf("headers: auth=%q uid=%q product=%q", gotAuth, gotUID, gotProduct)
 	}
 	if !bytes.Contains(gotBody, []byte(`"stream":true`)) {

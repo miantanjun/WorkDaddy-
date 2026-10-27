@@ -37,7 +37,7 @@ import (
 // 上游基线本身也叫 1.13.0-panel，如果我们编译出来的二进制用同一个版本号，
 // 面板上根本分不清装的是上游包还是我们改过的那份。
 // 每次在本仓改网关行为就 +1（wd1 → wd2 …），与 Release 的 gateway-v* 标签对应。
-const appVersion = "1.13.0-panel-wd1"
+const appVersion = "1.13.0-panel-wd2"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。

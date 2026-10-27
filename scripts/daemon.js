@@ -1620,7 +1620,22 @@ function checkUpdate(force) {
       }
       const rel = JSON.parse(body);
       const source = UPDATE_SOURCES[0]; // 单源：自建仓库（多源降级链未采纳）
-      const latest = String(rel.tag_name || '').replace(/^v/, '');
+      // ⚠️ 本仓库现在有两类 Release：主程序 `v1.9.7` 和网关 sidecar `gateway-v1.13.0-panel-wd1`。
+      //    GitHub 的 /releases/latest 只看「非草稿且非 prerelease」，会把 sidecar 也算成最新，
+      //    于是面板上「最新版本」会显示成 gateway-v…（实测 2026-10-27 就中过一次）。
+      //    这里只认纯版本标签；CI 侧也已把 sidecar Release 标成 prerelease（双保险）。
+      const rawTag = String(rel.tag_name || '');
+      if (!/^v?\d+\.\d+\.\d+$/.test(rawTag)) {
+        updateState.status = 'idle';
+        updateState.checkedAt = Date.now();
+        updateState.checkedVia = 'api';
+        updateState.latest = DAEMON_VERSION;
+        updateState.hasUpdate = false;
+        updateState.message = '已是最新版本';
+        log('[update] 最新标签不是主程序版本，已忽略: ' + rawTag);
+        return updateState;
+      }
+      const latest = rawTag.replace(/^v/, '');
       updateState.latest = latest;
       updateState.hasUpdate = semverCompare(latest, DAEMON_VERSION) > 0;
       updateState.source = source.id;

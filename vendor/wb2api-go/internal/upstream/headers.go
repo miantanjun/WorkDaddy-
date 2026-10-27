@@ -21,7 +21,14 @@ const (
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
 	defaultCliVersion = "2.137.1"
 
-	originRefererCN     = "https://www.codebuddy.cn"
+	// originRefererCN CN 账号的 Origin/Referer 基址。
+	//
+	// ⚠️ 2026-10-27 取证：官方 WorkBuddy 桌面端的 endpoint 是 `https://www.workbuddy.cn`
+	// （cli/product.json），而这里原先写的是 `www.codebuddy.cn` —— 与同一请求里的
+	// `X-Domain: www.workbuddy.cn` 自相矛盾。官方客户端从主进程发请求，asar 里也
+	// 找不到任何 Origin/Referer 设置，这两个头大概率本来就不该有；但直接删掉有未知
+	// 风险（可能有防盗链校验），先对齐域名，把「自相矛盾」这个最明显的特征消掉。
+	originRefererCN     = "https://www.workbuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
 )
 
@@ -135,12 +142,19 @@ func deriveAccountStableID(uid, purpose string) string {
 
 // injectAccountStableHeaders 在 req 注入 X-Machine-ID / X-Session-ID：按 uid 稳定
 // 派生，跨重启固定、账号间互异。uid 为空时不注入（匿名请求无设备标识，上游不要求）。
+// injectAccountStableHeaders 早期用于按 uid 派生的「账号级设备头」。
+//
+// ⚠️ 2026-10-27 取证后**停用**：官方客户端根本不发这两个头 —— `app.asar` 里搜
+// `X-Machine-ID` / `X-Session-ID` 零命中，官方那张兜底头表里也没有（只有
+// X-IDE-Type/Name/Version、X-Private-Data、X-Product 五项）。
+// 也就是说这两个头是我们自己造的，属于**比「缺什么」更危险的一类特征**：
+// 缺头可以解释成版本差异，多出来的头只会说明「这不是官方客户端」。
+//
+// 保留函数体为空是有意的：CommonHeaders / billing 两处都在调它，先摘掉行为而不是
+// 摘掉调用点，减少一次改动面；确认无副作用后再连调用一起删。
 func (c *Client) injectAccountStableHeaders(req *http.Request, a *auth.Auth) {
-	if a == nil || a.UID == "" {
-		return
-	}
-	req.Header.Set("X-Machine-ID", deriveAccountStableID(a.UID, "machine"))
-	req.Header.Set("X-Session-ID", deriveAccountStableID(a.UID, "session"))
+	_ = req
+	_ = a
 }
 
 // CommonHeaders 设置所有 API 共享的请求头。
@@ -329,21 +343,32 @@ func (c *Client) attributionClientName() string {
 // injectAttribution 注入用量归属头（X-Agent-Purpose / X-IDE-* / X-Product）。
 // 仅在 chat/completions 路径生效（ChatHeaders 调用）。
 //
-// 默认（ClientName 空）即对齐官方 WorkBuddy 桌面端指纹：X-Agent-Purpose="conversation"
-// + X-IDE-Name/Type/Product="WorkBuddy" + X-IDE-Version=client_version，上游用量归因
-// 不再出现 client/agentPurpose 为空的「网关特征」。显式 ClientName="SaaS" 还原旧行为
-// （仅 X-Product="SaaS"，不设 X-IDE-*）；配其他值则四头跟随该值。
+// ⚠️ X-Product 是**部署形态**，不是产品名。
+// 官方客户端 `app.asar` 里有一张兜底头表：
+//
+//	[`X-IDE-Type`,`WorkBuddy`] [`X-IDE-Name`,`WorkBuddy`] [`X-IDE-Version`,`0.0.0`]
+//	[`X-Private-Data`,`true`] [`X-Product`,`SaaS`]
+//
+// 以及一处显式赋值 `X-Product = deploymentType ?? 'SaaS'`（WorkBuddy 的 product.json
+// 里 deploymentType 就是 SaaS）。**填 "WorkBuddy" 是错的** —— 官方客户端不会那样发，
+// 本身就是一个可识别差异（这条初版注释写反了，2026-10-27 按 asar 取证纠正）。
+//
+// 官方一次 chat 实际发：X-IDE-Name/Type=WorkBuddy、X-IDE-Version=桌面版本、
+// X-Agent-Intent=craft、X-Agent-Purpose=conversation、X-Private-Data=true、
+// X-Product=SaaS、User-Agent=WorkBuddy/v WorkBuddy/v CLI/c。
+// 这里逐项对齐；ClientName 显式配成 "SaaS" 时保留旧语义（只发 X-Product，不装 IDE 指纹）。
 func (c *Client) injectAttribution(req *http.Request) {
+	req.Header.Set("X-Product", "SaaS")
 	name := c.attributionClientName()
 	if name == "SaaS" {
-		req.Header.Set("X-Product", "SaaS")
 		return
 	}
+	req.Header.Set("X-Agent-Intent", "craft")
 	req.Header.Set("X-Agent-Purpose", "conversation")
 	req.Header.Set("X-IDE-Name", name)
 	req.Header.Set("X-IDE-Type", name)
 	req.Header.Set("X-IDE-Version", c.clientVersion())
-	req.Header.Set("X-Product", name)
+	req.Header.Set("X-Private-Data", "true")
 }
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游（三等价头）。
