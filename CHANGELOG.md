@@ -59,7 +59,7 @@
 - **网关 CI 出包**：`.github/workflows/build-gateway.yml`，推 `gateway-v*` → 编译 + Release（`wb2api.exe` + `.sha256`）。该 tag 形状**不匹配** `build-win.yml` 的 `v*`，不会误触发主程序发版。
 - **网关自维护修订号**：`appVersion = "1.13.0-panel-wd<n>"`，每改一次网关行为 +1。上游基线也叫 `1.13.0-panel`，同号就分不清面板上报的是哪个包。
 - **新增 `docs/`**：`DONE-TODO.md`（已办 / 待办总清单）+ `gateway-audit-2026-10.md`（反代取证报告）。
-- **回归基线**：83 套件 / 4767 断言全通过；Go 17 个包全通过。
+- **回归基线**：82 套件 / 4760 断言全通过（另 `tools/updater-guard.js` 18 PASS）；Go 17 个包全通过。
 
 ### 判定不做
 
