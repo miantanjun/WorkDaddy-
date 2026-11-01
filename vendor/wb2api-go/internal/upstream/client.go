@@ -44,6 +44,7 @@ const (
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrUpstreamBusy                  // 6021「queue.full.title」渠道级容量满载（非账号问题）→ 不罚号、不轮转，末端 503 + upstream_busy
+	ErrUpstreamAuthAnomaly           // 401/403 但签名指向「请求本身不合法」（认证头不被接受/渠道校验 10085/请求头不合法）→ 零动作：不冷却、不熔断、不喂连败，换号无效
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -55,6 +56,8 @@ func (k ErrKind) String() string {
 		return "soft_rate"
 	case ErrSessionDead:
 		return "session_dead"
+	case ErrUpstreamAuthAnomaly:
+		return "upstream_auth_anomaly"
 	case ErrNotFound:
 		return "not_found"
 	case ErrServer:
@@ -253,6 +256,16 @@ func SoftRateResetLoc() *time.Location { return softRateResetLoc }
 // 而不是账号整体被限流——账号健康，只是这个模型此刻被限（issue #31）。
 const modelRateLimitCode = "6004"
 
+// requestRateLimitCode 14003 RateLimitError：同样是**模型级**，不是账号级。
+// 依据（官方口径，非逆向猜测）：官方客户端 app.asar 的
+// renderer/assets/contexts-*.js 里有一张「业务码 → 给用户什么按钮」表，
+// 14003 对应 actions=["switchModel","retry"] —— 官方让用户「换模型或稍后重试」，
+// 说明账号本身是健康的，只是这个模型此刻繁忙。
+// 线上实测同样吻合：同一账号对 deepseek-v4.1-flash 报 14003，换模型立刻可用。
+// 若不显式识别，14003 带 429 时会被 429 兜底归账号级软限流（误冷健康号），
+// 带 200/400 时会落 ErrClient（白轮一整池号仍失败）。
+const requestRateLimitCode = "14003"
+
 // softRateResetPatternCN/EN 匹配重置文案（CN「将在 … 重置」/ global 域英文
 // "reset at <固定格式时间>"），捕获中间的时间串。
 const softRateResetPatternCN = `将在 (.+?) 重置`
@@ -262,7 +275,7 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 // 分类、每个限流 body 上调用，函数体内 MustCompile 是纯浪费；错误风暴（429
 // 轰炸）时尤甚。模式串均为纯常量。regexp 并发安全（匹配只读），无需额外锁。
 var (
-	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
+	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?(` + modelRateLimitCode + `|` + requestRateLimitCode + `)"?`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -273,8 +286,67 @@ const softRateTimeLayout = "2006-01-02 15:04:05"
 // IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004）。
 // 用于区分"账号级软限流"（按账号冷却）与"模型级用量限流"（切模型即可用）。
 func IsModelRateLimit(body string) bool {
-	// `"code":6004` / `"code": 6004` / `"code":"6004"` 均可命中（JSON 空格容差）。
+	// `"code":6004` / `"code": 6004` / `"code":"6004"` 均可命中（JSON 空格容差）；
+	// 14003 同属模型级（见 requestRateLimitCode 注释）。
 	return reModelRateLimit.MatchString(body)
+}
+
+// ModelRateLimitReason 模型级限流的排查文案（写进 pool 的冷却 reason）。
+// 按实际命中的业务码区分，避免日志把 14003 误写成 6004 误导排查。
+func ModelRateLimitReason(body string) string {
+	if reRequestRateLimit.MatchString(body) {
+		return requestRateLimitCode + " model busy"
+	}
+	return modelRateLimitCode + " model rate limit"
+}
+
+// reRequestRateLimit 单独匹配 14003，供 ModelRateLimitReason 区分文案。
+var reRequestRateLimit = regexp.MustCompile(`"code"\s*:\s*"?` + requestRateLimitCode + `"?`)
+
+// upstreamAuthAnomalyMsgRe 401/403 响应体里「请求本身不合法」的 message 签名。
+// 上游在认证头不被接受时会回 401 {"message":"not_found"}——那**不是**账号被删，
+// 而是它不认我们这组认证头/这个请求形态。同理 code 10085 与
+// "request header is invalid" / "请求头不合法" / "illegal request header"
+// 都是渠道/请求级别的拒绝，换账号不会变好。
+var upstreamAuthAnomalyMsgRe = regexp.MustCompile(`"message"\s*:\s*"(not_found|not found)"`)
+
+// upstreamAuthAnomalyMarkers 渠道/请求级拒绝的文案签名（大小写不敏感匹配 lower）。
+var upstreamAuthAnomalyMarkers = []string{
+	"request header is invalid",
+	"illegal request header",
+	"请求头不合法",
+	"请求头非法",
+}
+
+// IsUpstreamAuthAnomaly 报告 401/403 是否属于「请求不合法」而非「账号失效」。
+//
+// 为什么必须与 ErrSessionDead 分开：账号失效要禁用/轮换，请求不合法换多少号都
+// 一样，只会把整池健康号按连败推出池。上游真实形态（此前的误判根因）：
+//
+//	401 {"message":"not_found"}   ← 认证头不被接受，不是账号没了
+//	403 + code 10085              ← 渠道校验
+//	403 + "request header is invalid" / "请求头不合法"
+//
+// 判定前置于 ErrClient 兜底，且**后置**于 sessionDeadMarkers：401 同时带
+// "12153"/"Offline user session not found" 时仍然是真·账号失效（精确词优先）。
+func IsUpstreamAuthAnomaly(status int, body string) bool {
+	if status != http.StatusUnauthorized && status != http.StatusForbidden {
+		return false
+	}
+	if upstreamAuthAnomalyMsgRe.MatchString(body) {
+		return true
+	}
+	// 10085 按结构化 code 判，避免数字子串误伤（如某 id 含 10085）。
+	if hasBusinessCode(body, "10085") {
+		return true
+	}
+	lower := strings.ToLower(body)
+	for _, m := range upstreamAuthAnomalyMarkers {
+		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。
@@ -583,6 +655,13 @@ func Classify(status int, body string) ErrKind {
 			return ErrSessionDead
 		}
 	}
+	// 401/403 但不含 sessionDead 精确词：先判「请求本身不合法」。
+	// 判在此处而不是 4xx 兜底，是因为兜底 ErrClient 会给健康号喂连败计数
+	// （issue #114：连续 N 次未知 4xx → 临时出池），而这类错误换号完全无效，
+	// 会把整池号按连败推出池，表现成「所有号忽然集体失效」。
+	if IsUpstreamAuthAnomaly(status, body) {
+		return ErrUpstreamAuthAnomaly
+	}
 	// WorkBuddy 11128 / 11140 的 msg 同为 "request illegal"，必须按业务码分流：
 	//   - 11128 = 通道校验失败（displayTips: 可能不是官方客户端发送）→ 账号健康，
 	//     不罚号。误判成 account_fault 会硬禁用正常账号（issue 1849 同款误伤）。
@@ -614,6 +693,12 @@ func Classify(status int, body string) ErrKind {
 	// key 原文，语义唯一，非 429 状态码出现同样归本类（防上游换状态码）。
 	if (status == http.StatusTooManyRequests && hasBusinessCode(body, "6021")) || isQueueFullBody(lower) {
 		return ErrUpstreamBusy
+	}
+	// 14003 RateLimitError：**模型**繁忙，账号健康（官方 action = switchModel+retry）。
+	// 必须显式判在 status==429 兜底之前：429 兜底只给账号级软限流语义，会把这个
+	// 模型的一次抖动放大成「整账号冷却」，而其它模型其实都好好的。
+	if hasBusinessCode(body, requestRateLimitCode) {
+		return ErrSoftRate
 	}
 	// status==429 先于 hardMarkers：限流响应 body 高频携带 "quota exceeded"/
 	// "额度不足" 等跨计费/限流两界的措辞，hardMarkers 先判会把限流误归
@@ -1294,6 +1379,11 @@ type ModelInfo struct {
 	SupportsToolCall   bool     // supportsToolCall 是否支持工具调用
 	OnlyReasoning      bool     // onlyReasoning 是否纯推理模型
 	SupportsImages     bool     // 顶层 supportsImages（多模态能力，透出到 /v1/models）
+	// ImageGen 生成类模型（tags 含 text-to-image / image-to-image）：**不能当对话模型
+	// 用**（选上去报 11102），但必须能出现在 /v1/models 里——否则用户无从知道哪个
+	// 模型能生图（这正是接入 /v1/images/* 时的原始诉求）。server 层按本标记分流，
+	// chat 列表跳过、生图区段（type:"image"）列出。
+	ImageGen           bool
 	MaxAllowedSize     int64    // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
 	CanDisableThinking bool     // reasoning.canDisableThinking：思考可关（off 档可用）
 	ReasoningEffort    string   // reasoning.effort 推理模式（与 supportedEfforts 数组不同源）
@@ -1357,6 +1447,7 @@ func (m dynModelEntry) modelInfo() ModelInfo {
 		Efforts:            m.Reasoning.SupportedEfforts,
 		DefaultEffort:      def,
 		SupportsImages:     m.SupportsImages,
+		ImageGen:           isImageGenTags(m.Tags),
 		Description:        m.Description,
 		Credits:            m.Credits,
 		Tags:               m.Tags,
@@ -1370,6 +1461,23 @@ func (m dynModelEntry) modelInfo() ModelInfo {
 		ReasoningEffort:    m.Reasoning.Effort,
 		ReasoningSummary:   m.Reasoning.Summary,
 	}
+}
+
+// isImageGenTags 判定生成类模型（可生图）：tags 含 text-to-image / image-to-image。
+//
+// 与 nonChatModel 的关系：这类模型**不是对话模型**（选进 chat 会 11102），但**是**
+// /v1/images/* 的目标模型。过滤点写成 `nonChatModel(...) && !isImageGenTags(...)`，
+// 即「非对话但能生图」的条目保留在目录里，由 server 层分流到 /v1/models 的
+// type:"image" 区段。视频类（text-to-video / image-to-video）不在此列——
+// 网关没有视频端点，列出来只会让客户端选到不可用的模型。
+func isImageGenTags(tags []string) bool {
+	for _, t := range tags {
+		switch t {
+		case "text-to-image", "image-to-image":
+			return true
+		}
+	}
+	return false
 }
 
 // nonChatModel 判定是否非对话模型（应从模型列表过滤掉）。
@@ -1563,7 +1671,8 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	// tags 含 text-to-image）根本不进返回列表（来源：harness buddy.ts:547-555）。
 	dynMap := make(map[string]dynModelEntry, len(env.Data.Models))
 	for _, m := range env.Data.Models {
-		if nonChatModel(m.ID, m.MaxOutputTokens, m.Tags) {
+		// 生图类模型保留（ImageGen 标记，server 层分流到 /v1/models 的 image 区段）。
+		if nonChatModel(m.ID, m.MaxOutputTokens, m.Tags) && !isImageGenTags(m.Tags) {
 			continue
 		}
 		dynMap[m.ID] = m
@@ -1591,7 +1700,7 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	}
 	out := make([]ModelInfo, 0, len(byID))
 	for _, mi := range byID {
-		if nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) {
+		if nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) && !mi.ImageGen {
 			continue
 		}
 		out = append(out, mi)

@@ -80,6 +80,10 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)
+	// 项目规则（AGENTS.md / CLAUDE.md）：只收敛标题行里的本地绝对路径，正文原样
+	// 保留（见 project_rules.go 头部"有意不做的事"）。放在 sanitize 之前——路径
+	// 脱敏与脱敏开关无关，用户关掉指纹脱敏时也不该把 C:\Users\... 发出去。
+	StripProjectRulePaths(obj)
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs)

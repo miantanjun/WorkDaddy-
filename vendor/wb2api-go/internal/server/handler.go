@@ -144,6 +144,10 @@ func NewHandler(cfg Config) *Handler {
 	// 联网搜索（Anthropic Messages 兼容形态，见 messages.go）。路径刻意不占用
 	// /v1/messages——那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发。
 	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
+	// OpenAI Images API 兼容端点（生图 / 图生图）。上游是 /v2/images/*。
+	// 与 chat 不同：出图即计费，5xx 不重试（见 images.go 头部三条红线）。
+	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(h.images))
+	h.mux.HandleFunc("POST /v1/images/edits", h.withAuth(h.images))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -391,7 +395,11 @@ func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
 	// models.hidden 黑名单：快照外提，避免逐条目重复 Load。
 	hidden := h.loadLive().HiddenModels
-	for _, mi := range h.fetchDynamicModels() {
+	dynamic := h.fetchDynamicModels()
+	for _, mi := range dynamic {
+		if mi.ImageGen {
+			continue // 生图模型不进对话列表，统一由下方 image 区段列出
+		}
 		if _, ok := hidden["cn:"+mi.ID]; ok {
 			continue
 		}
@@ -423,6 +431,30 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		out = append(out, entry)
 	}
+	// 生图模型区段（type:"image"）：这些条目被 nonChatModel 判为非对话（选进 chat 会
+	// 11102），但正是 /v1/images/generations|edits 的目标模型。单独列出并显式标
+	// type/capabilities，客户端（以及人）一眼能看出「哪个模型能生图」。
+	// 不写 context_length / max_output_tokens：生图模型没有对话上下文概念，
+	// 写一个 1M 兜底会让客户端误以为能塞长对话。
+	for _, mi := range dynamic {
+		if !mi.ImageGen {
+			continue
+		}
+		if _, ok := hidden["cn:"+mi.ID]; ok {
+			continue
+		}
+		entry := map[string]any{
+			"id":           "cn:" + mi.ID,
+			"object":       "model",
+			"type":         "image",
+			"created":      1753600000,
+			"owned_by":     "workbuddy",
+			"capabilities": []string{"image_generation"},
+		}
+		entry = applyModelInfoFields(entry, mi)
+		out = append(out, entry)
+	}
+
 	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。
 	// 名单 = 纯动态探测结果（fetchGlobalModels，失败/无号 → 空）。
 	if h.cfg.GlobalEnabled {
@@ -551,6 +583,26 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 	return dynamicModelsCache.ids
 }
 
+// WarmModelCatalog 启动期预热 CN 模型目录缓存（不阻塞监听）。
+//
+// 为什么需要：cachedModelsSnapshot 是「只读快照」，供 isImageGenModel 这类
+// 请求热路径判定用（不能在请求线程拉上游）。缓存只在 /v1/models 被访问时才填充，
+// 所以「进程刚起 + 客户端直接开聊」的窗口里快照是空的 ⇒ 生图模型识别不出来，
+// 又退回 400/11103 连换 7 号那条老路。启动时先拉一次，把这个窗口关掉。
+//
+// 失败不致命：fetchDynamicModels 自带 5min 负缓存，后续 /v1/models 懒触发会补上。
+func (h *Handler) WarmModelCatalog() {
+	if h.cfg.Upstream == nil {
+		return
+	}
+	n := len(h.fetchDynamicModels())
+	if n == 0 {
+		log.Printf("WARN: [server] 启动预热模型目录为空（生图模型识别暂不可用，/v1/models 访问后会补上）")
+		return
+	}
+	log.Printf("INFO: [server] 启动预热模型目录成功：%d 个模型", n)
+}
+
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
@@ -608,6 +660,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			"model is hidden by gateway configuration, try another model", "")
 		st.status = http.StatusBadRequest
 		st.outcome = reqlog.OutcomeHTTPError
+		return
+	}
+
+	// 生图模型走对话端点：客户端没有生图入口，选中 cn:hunyuan-image-alpha 这类模型
+	// 之后仍然发 POST /v1/chat/completions + stream:true。上游对这种请求一律回
+	//
+	//	400 {"code":11103,"msg":"Backend [hunyuan-stream] is not supported"}
+	//
+	// 而网关把它归为可重试错误 ⇒ 连换 7 个号、每次 4~5s 全白跑，最后 503 甩给用户。
+	// 就地转到真生图链路，把出图结果以 markdown 贴回对话（详见 chat_image.go）。
+	// 放在 hidden 黑名单之后：被配置藏起来的模型仍应直接拒绝，不能借生图链路绕过去。
+	if h.isImageGenModel(bareModel) {
+		st.status = h.chatImageBridge(w, r, body, peek.Stream, realm, bareModel, st)
 		return
 	}
 
@@ -1451,7 +1516,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		modelRateLimited := upstream.IsModelRateLimit(body)
 		if resetAt, ok := upstream.ParseRateReset(body); ok {
 			if modelRateLimited {
-				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, "6004 model rate limit")
+				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, upstream.ModelRateLimitReason(body))
 				return
 			}
 			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), resetAt, "429 rate limit")
@@ -1462,7 +1527,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		if uerr != nil && uerr.RetryAfter > 0 {
 			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Now().Add(uerr.RetryAfter), "429 rate limit (retry-after)")
 			if modelRateLimited {
-				h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
+				h.cfg.Pool.RecordModelRateLimitAudit(uid, model, upstream.ModelRateLimitReason(body)+" (reset unknown)")
 			}
 			return
 		}
@@ -1471,7 +1536,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// （热改优先），管理面板改 soft_rate 后立即生效。
 		h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Time{}, "429 rate limit")
 		if modelRateLimited {
-			h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
+			h.cfg.Pool.RecordModelRateLimitAudit(uid, model, upstream.ModelRateLimitReason(body)+" (reset unknown)")
 		}
 	case upstream.ErrWafBlock:
 		// WAF 403（无业务信封拦截形态）。软冷却复用 CooldownSoftRate 家族：基数
@@ -1484,7 +1549,20 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		}
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
-		h.cfg.Pool.Disable(uid, "12153 session dead")
+		// 走 NoteSessionDead 的**连续计数**语义，不再一次即 Disable。
+		// pool 已重构为 sessionDeadThreshold(=3) 次连续才判死（P0-1 实案：13 个
+		// disabled 号全是「一次 12153 即禁用」的误杀受害者，事后 refresh 全部成功）。
+		// scheduler 的保活路径已改用 NoteSessionDead，此处是当时漏改的一处——
+		// 同一个错误在保活路径和真实请求路径得到两种判定，会让误杀的号在
+		// 面板上显示为「已禁用」却仍有请求在打它。
+		if h.cfg.Pool.NoteSessionDead(uid) {
+			log.Printf("chat %s: 连续 %d 次 12153 session dead — 禁用", uid, pool.SessionDeadThreshold())
+		}
+	case upstream.ErrUpstreamAuthAnomaly:
+		// 401/403 但签名是「请求本身不合法」（见 upstream.IsUpstreamAuthAnomaly）。
+		// 零动作：不冷却、不熔断、不 NoteError、不 NoteFailures —— 换号解决不了，
+		// 罚号只会把整池健康号按连败推出池。由轮转继续尝试；若全池同错，上游原文
+		// 会透传给客户端，提示去查认证头/渠道指纹。
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。

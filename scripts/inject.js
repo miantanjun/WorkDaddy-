@@ -12057,6 +12057,27 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '</div>' +
         '<div id="wbs-dshops-body"></div>' +
         '</div>' +
+        '<div class="wbs-pcard" id="wbs-update-card">' +
+        '<div class="wbs-pcard-title">客户端更新<span class="wbs-pcard-sub" id="wbs-update-status"></span></div>' +
+        '<div class="wbs-nd-row">' +
+        '<span class="wbs-nd-title">彻底静音</span>' +
+        '<span class="wbs-nd-hint">不检测、不下载、不弹「重启更新」</span>' +
+        '<label class="wbs-switch" title="开启：客户端拿不到任何新版本信息（不检查、不下载、不弹窗、不会被被动升级），想升级自己去官网下载。关闭：恢复官方更新行为（每小时检查一次，发现新版自动下载并提示重启）。两条都要重启客户端才生效。"><input type="checkbox" id="wbs-update-mute"><span class="wbs-switch-slider"></span></label>' +
+        '</div>' +
+        '<div class="wbs-nd-row" id="wbs-update-restart-row" style="display:none">' +
+        '<span class="wbs-nd-title">改完要重启</span>' +
+        '<span class="wbs-nd-hint">更新源是进程级环境变量，重启客户端才换过来</span>' +
+        '<button type="button" class="wbs-sess-bbtn" id="wbs-update-restart">重启客户端</button>' +
+        '</div>' +
+        '</div>' +
+        '<div class="wbs-pcard" id="wbs-msguard-card">' +
+        '<div class="wbs-pcard-title">模型切换<span class="wbs-pcard-sub" id="wbs-msguard-status"></span></div>' +
+        '<div class="wbs-nd-row">' +
+        '<span class="wbs-nd-title">切换没生效时提醒</span>' +
+        '<span class="wbs-nd-hint">报错后换模型重发，客户端会忽略新模型、仍用旧的</span>' +
+        '<label class="wbs-switch" title="客户端「报错后重新发送」这条路径不带模型参数，会回落到报错时那个旧模型，于是切了也没用（要新建会话或重启才生效）。开启后检测到这种情况会弹一句提醒，告诉你是谁在拦着；只提醒，不改任何请求。"><input type="checkbox" id="wbs-msguard-toggle"><span class="wbs-switch-slider"></span></label>' +
+        '</div>' +
+        '</div>' +
         '<div class="wbs-pcard" id="wbs-no-disturb-card">' +
         '<div class="wbs-pcard-title wbs-nd-head">' +
         '<span>免打扰</span>' +
@@ -13526,10 +13547,58 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       });
     }
 
+    /**
+     * 公网隧道（frpc）那一行。
+     * ⚠️ 状态单独拉、单独渲染：隧道坏了不该让整个网关卡变灰，反之亦然 ——
+     *    这正是「两个进程分开托管」的意义（面板上一眼看出是哪一段断了）。
+     */
+    function gwRenderTunnel(t) {
+      gwState.tunnel = t || null;
+      var meta = gwEl('wbs-gw-tunnel-meta');
+      var box = gwEl('wbs-gw-tunnel-actions');
+      if (!meta || !box) return;
+      meta.setAttribute('data-wbs-i18n-skip', '');
+      if (!t || !t.installed) {
+        meta.textContent = '未安装（需要 %APPDATA%\\WorkDaddy\\tunnel\\ 下的 frpc.exe 与 frpc.toml）';
+        box.innerHTML = '';
+        return;
+      }
+      var text;
+      if (!t.running) {
+        text = '已安装 · 未运行';
+      } else if (t.connected) {
+        text = '已连接 · ' + (t.serverAddr || '') + ':' + (t.remotePort || '') + ' → 本机网关';
+      } else {
+        var why = (t.proxies && t.proxies[0] && t.proxies[0].err) ? t.proxies[0].err : '等待服务器';
+        text = '进程在 · 未连上（' + why + '）';
+      }
+      if (Number(t.restartAttempts) > 0) text += ' · 重连 ' + t.restartAttempts + ' 次';
+      meta.textContent = text;
+      box.innerHTML = '';
+      var mk = function (label, act, cls, title, enabled) {
+        var b = gwBtnEl(label, act, cls, title);
+        if (enabled === false) b.disabled = true;
+        box.appendChild(b);
+        return b;
+      };
+      mk(t.running ? '断开隧道' : '连接隧道', t.running ? 'tunnel-stop' : 'tunnel-start',
+        t.running ? '' : 'primary',
+        t.running
+          ? '断开公网隧道。本机 127.0.0.1:7863 照旧可用，只是外面进不来；断开后不会再自动重拉'
+          : '连上公网隧道，外地即可用 ' + (t.publicUrl || '') + '。开启后进程挂了会自动重连（退避到 60s 一次）',
+        true);
+      mk('复制公网地址', 'tunnel-copy', '', t.publicUrl || '（还没读到远端地址）', !!(t.publicUrl));
+      mk('隧道日志', 'tunnel-log', '', '看 frpc 日志尾部：能区分 token 错 / 服务器不可达 / 证书问题');
+    }
+
     function gwRefresh() {
-      return api('/api/gateway').then(function (d) {
+      var p1 = api('/api/gateway').then(function (d) {
         if (d && d.ok) gwRender(d.gateway);
       }).catch(function () { /* 静默：面板其它部分不该被网关拖累 */ });
+      var p2 = api('/api/gateway/tunnel/status').then(function (d) {
+        if (d && d.ok) gwRenderTunnel(d.tunnel);
+      }).catch(function () { /* 静默：隧道状态不影响网关面板 */ });
+      return Promise.all([p1, p2]);
     }
 
     function gwCopyUsage() {
@@ -13833,6 +13902,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           '<label class="wbs-switch" title="WorkDaddy 启动时自动拉起网关"><input type="checkbox" id="wbs-gw-auto"><span class="wbs-switch-slider"></span></label>' +
           '</div>' +
           '<div id="wbs-gw-alert"></div>' +
+          '<div class="wbs-nd-row" id="wbs-gw-tunnel-row">' +
+          '<span class="wbs-nd-title">公网隧道</span>' +
+          '<span class="wbs-gw-meta" id="wbs-gw-tunnel-meta"></span>' +
+          '<span class="wbs-gw-actions" id="wbs-gw-tunnel-actions"></span>' +
+          '</div>' +
           '<div id="wbs-gw-pool" class="wbs-gw-pool"></div>' +
           '<pre class="wbs-gw-usage" id="wbs-gw-usage" style="display:none"></pre>' +
           '<div class="wbs-nd-row"><span class="wbs-gw-actions" id="wbs-gw-actions"></span></div>' +
@@ -13934,6 +14008,26 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           });
         } else if (act === 'log') {
           gwToggleLog();
+        } else if (act === 'tunnel-start') {
+          gwAction('/api/gateway/tunnel/start', '连接隧道', { body: {} });
+        } else if (act === 'tunnel-stop') {
+          gwAction('/api/gateway/tunnel/stop', '断开隧道', { body: {} });
+        } else if (act === 'tunnel-copy') {
+          var pu = (gwState.tunnel && gwState.tunnel.publicUrl) || '';
+          if (!pu) { toast('还没读到公网地址', true, root); return; }
+          if (typeof copyPlainText !== 'function') { toast('复制功能未就绪，请重开面板', true, root); return; }
+          copyPlainText(pu).then(function () { toast('已复制：' + pu, false, root); })
+            .catch(function (e2) { toast('复制失败: ' + ((e2 && e2.message) || e2), true, root); });
+        } else if (act === 'tunnel-log') {
+          var tlBox = gwEl('wbs-gw-log');
+          if (!tlBox) return;
+          tlBox.style.display = '';
+          tlBox.textContent = '读取中…';
+          gwState.logShown = true;
+          api('/api/gateway/tunnel/log').then(function (d) {
+            var ls = (d && d.lines) || [];
+            tlBox.textContent = ls.length ? ls.join('\n') : '(隧道日志为空)';
+          }).catch(function () { tlBox.textContent = '隧道日志读取失败'; });
         } else if (act === 'probe') {
           gwAction('/api/gateway/probe', '探活', { body: {} });
         } else if (act === 'panel') {
@@ -13944,8 +14038,120 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       gwRefresh();
     }
 
+    /* ===== 客户端更新策略（增强页「彻底静音」开关）===== */
+    // 开关本身只写 DATA_DIR/client-update-policy.json；客户端进程启动时由
+    // workbuddy-launch-env.js 读它决定 WORKBUDDY_UPDATE_URL 走官方域还是本机 204。
+    // 所以改完必须重启客户端 —— 这里用两步确认（Electron 不实现 window.confirm，
+    // 弹原生确认会静默返回 false，等于按钮永远点不动）。
+    function wireUpdatePolicy() {
+      if (!enhancePane) return;
+      var sw = enhancePane.querySelector('#wbs-update-mute');
+      var statusEl = enhancePane.querySelector('#wbs-update-status');
+      var restartRow = enhancePane.querySelector('#wbs-update-restart-row');
+      var restartBtn = enhancePane.querySelector('#wbs-update-restart');
+      if (!sw) return;
+
+      function paint(d) {
+        sw.checked = !!(d && d.mute);
+        sw.disabled = !!(d && d.supported === false);
+        if (!statusEl) return;
+        if (d && d.supported === false) statusEl.textContent = '当前客户端不支持';
+        else if (!d) statusEl.textContent = '读取失败';
+        else statusEl.textContent = d.mute ? '已静音' : '随官方更新';
+      }
+
+      function sync() {
+        api('/api/client-update-policy').then(paint).catch(function () { paint(null); });
+      }
+
+      sw.addEventListener('change', function () {
+        var mute = sw.checked;
+        sw.disabled = true;
+        api('/api/client-update-policy-set', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ mute: mute }),
+        })
+          .then(function (d) {
+            paint(d);
+            if (restartRow) restartRow.style.display = '';
+            toast(mute
+              ? '已开启彻底静音：不再检测/下载/提示更新（重启客户端后生效）'
+              : '已恢复正常更新：每小时检查、自动下载并提示重启（重启客户端后生效）', false, root);
+          })
+          .catch(function (e) {
+            sw.checked = !mute;
+            toast('设置失败: ' + (e.message || e), true, root);
+          })
+          .then(function () { sw.disabled = false; });
+      });
+
+      if (restartBtn) {
+        var armed = false;
+        var armTimer = null;
+        restartBtn.addEventListener('click', function () {
+          if (!armed) {
+            armed = true;
+            restartBtn.textContent = '确认重启（会中断当前会话）';
+            armTimer = setTimeout(function () {
+              armed = false;
+              restartBtn.textContent = '重启客户端';
+            }, 5000);
+            return;
+          }
+          clearTimeout(armTimer);
+          armed = false;
+          restartBtn.disabled = true;
+          restartBtn.textContent = '正在重启…';
+          api('/api/client/relaunch', { method: 'POST' })
+            .then(function () { toast('正在重启客户端…', false, root); })
+            .catch(function (e) {
+              restartBtn.disabled = false;
+              restartBtn.textContent = '重启客户端';
+              toast('重启失败: ' + (e.message || e), true, root);
+            });
+        });
+      }
+
+      sync();
+    }
+
+    function wireModelSwitchGuard() {
+      if (!enhancePane) return;
+      var sw = enhancePane.querySelector('#wbs-msguard-toggle');
+      var statusEl = enhancePane.querySelector('#wbs-msguard-status');
+      if (!sw) return;
+      function paint(d) {
+        sw.checked = !!(d && d.enabled);
+        if (statusEl) statusEl.textContent = (d && d.enabled) ? '开着' : '已关闭';
+      }
+      function sync() {
+        api('/api/model-switch-check').then(paint).catch(function () { paint(null); });
+      }
+      sw.addEventListener('change', function () {
+        var enabled = sw.checked;
+        sw.disabled = true;
+        api('/api/model-switch-guard-set', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ enabled: enabled }),
+        })
+          .then(function (d) {
+            paint({ enabled: !!(d && d.enabled) });
+            toast(enabled ? '已开启：切换没生效时会提醒你' : '已关闭切换提醒', false, root);
+          })
+          .catch(function (e) {
+            sw.checked = !enabled;
+            toast('设置失败: ' + (e.message || e), true, root);
+          })
+          .then(function () { sw.disabled = false; });
+      });
+      sync();
+    }
     function wireEnhancePane() {
       try { buildGatewayCard(); } catch (e) { /* 卡片失败不影响既有面板 */ }
+      try { wireUpdatePolicy(); } catch (e) { /* 卡片失败不影响既有面板 */ }
+      try { wireModelSwitchGuard(); } catch (e) { /* 卡片失败不影响既有面板 */ }
       // 决策弹窗开关
       askSwitch = enhancePane.querySelector('#wbs-ask-switch');
       if (askSwitch) {
@@ -21182,6 +21388,94 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     return guardApi;
   }
 
+  /* ---------------- 模型切换守卫（只读提醒，2026-10-29） ----------------
+     客户端在「报错后重新发送」这条路径上不带模型参数（日志里 requestOptions.model=<none>），
+     于是回落到会话默认模型 —— 也就是报错时那个旧模型。结果：界面上模型已经换到别家，
+     重发却还打到原来那家，拿回一模一样的报错，观感就是「切换无效」。新建会话、或重启
+     客户端（CLI 用持久化设置重起）才会真正用上新模型。
+
+     客户端本体不能改（会被官方更新覆盖），所以这里只提醒、不补救：定时问 daemon 的
+     /api/model-switch-check（那边从客户端自己的日志取证），命中就弹一次 toast。
+     ⚠️ 判据「SET → REQ 模型不一致 → 紧随一次失败」在 4 天真实日志上回放：
+        SET=118 / REQ=3567，只命中 5 次且全部带错误码，276 次正常切换零误报。
+
+     ⚠️ 跨注入重建：inject 是全量重建式热更，闭包会重来。已提醒过的键必须挂 window，
+        否则每次热更都会把同一条旧命中再弹一遍（DETAIL 附 J 同源坑）。 */
+  var MODEL_SWITCH_GUARD_MS = 4000;
+
+  function modelSwitchGuardHost(url) {
+    var m = /^https?:\/\/([^/:]+)/i.exec(String(url || ''));
+    return m ? m[1] : String(url || '');
+  }
+
+  function modelSwitchGuardMessage(hit) {
+    var wanted = String(hit.wanted || '').slice(0, 60);
+    var used = String(hit.used || '').slice(0, 60);
+    var host = modelSwitchGuardHost(hit.url);
+    if (WBS_LANGUAGE === 'en') {
+      return 'This switch did not take effect: the picker shows ' + wanted + ' but the request still went to ' +
+        used + ' (' + host + ') and failed. Start a new conversation and the new model will be used.';
+    }
+    return '本次切换没生效：界面已切到「' + wanted + '」，但请求还是发往「' + used + '」（' + host +
+      '）并报错。新建一个会话再发，就会用上新模型。';
+  }
+
+  function modelSwitchGuardNotify(hit) {
+    var runtime = window.__wbsToastRuntime;
+    if (!runtime || typeof runtime.show !== 'function') return false;
+    try {
+      runtime.show({
+        id: 'wbs-model-switch-guard',
+        message: modelSwitchGuardMessage(hit),
+        level: 'warning',
+        // 12 秒：够把模型名和域名读完，又不至于一直压在屏幕上。
+        duration: 12000,
+      });
+      return true;
+    } catch (_) { return false; }
+  }
+
+  function pollModelSwitchGuard() {
+    api('/api/model-switch-check').then(function (d) {
+      if (!d || d.ok !== true || !d.hit) return;
+      var hit = d.hit;
+      // 去重键＝切换时刻 + 实际用的模型：同一次切换只提醒一次；用户换另一个模型再犯，
+      // 那是另一条新命中，应该再提醒。
+      var key = String(hit.at || '') + '|' + String(hit.used || '');
+      var seen = '';
+      try { seen = String(window.__wbsModelSwitchGuardSeen || ''); } catch (_) { seen = ''; }
+      if (!key || key === seen) return;
+      if (!modelSwitchGuardNotify(hit)) return;
+      try { window.__wbsModelSwitchGuardSeen = key; } catch (_) {}
+    }).catch(function () { /* daemon 没起来就下一轮再说 */ });
+  }
+
+  function startModelSwitchGuard() {
+    var existing = window.__wbsModelSwitchGuard;
+    if (existing && typeof existing.stop === 'function') existing.stop();
+    var stopped = false;
+    var timer = null;
+    // 5 秒后才开第一轮：注入发生在页面加载期，daemon 可能还没就绪。
+    var boot = setTimeout(function () {
+      if (stopped) return;
+      pollModelSwitchGuard();
+      timer = setInterval(function () { if (!stopped) pollModelSwitchGuard(); }, MODEL_SWITCH_GUARD_MS);
+    }, 5000);
+    var guardApi = {
+      stop: function () {
+        stopped = true;
+        try { clearTimeout(boot); } catch (_) {}
+        if (timer !== null) { clearInterval(timer); timer = null; }
+        if (window.__wbsModelSwitchGuard === guardApi) {
+          try { delete window.__wbsModelSwitchGuard; } catch (_) { window.__wbsModelSwitchGuard = null; }
+        }
+      },
+      poll: pollModelSwitchGuard,
+    };
+    window.__wbsModelSwitchGuard = guardApi;
+  }
+
+  startModelSwitchGuard();
   startSidebarAdGuard();
 
   function start() {

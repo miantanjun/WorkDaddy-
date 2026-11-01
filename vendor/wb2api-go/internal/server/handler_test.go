@@ -850,21 +850,71 @@ func TestChatAllUnavailableReturns503(t *testing.T) {
 	}
 }
 
+// TestChatSessionDeadDisables 连续 12153 达阈值才禁用（**不再是**一次即禁用）。
+//
+// 为什么改：pool 层已按 P0-1 实案把 12153 改为连续计数——旧行为「一次 12153 即
+// Disable」曾误杀 13 个健康号（事后 refresh 全部成功），根因是 12153 会被网络抖动
+// /上游闪断/refreshToken 竞态临时触发。scheduler 的保活路径早已改用
+// NoteSessionDead，只有 chat 路径漏改；本测试同时守住「handler 与 scheduler 判定
+// 口径必须一致」这条不变量。
 func TestChatSessionDeadDisables(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 401, `{"code":12153,"msg":"Offline user session not found"}`, false
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != 503 {
-		t.Errorf("code=%d", rec.Code)
+
+	do := func() int {
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	threshold := pool.SessionDeadThreshold()
+	// 前 threshold-1 次：只累计计数，不禁用（容忍临时性 12153）。
+	for i := 1; i < threshold; i++ {
+		if code := do(); code != 503 {
+			t.Fatalf("第 %d 次: code=%d", i, code)
+		}
+		if st, _ := p.Status("u1"); st.Disabled {
+			t.Fatalf("第 %d 次 12153 就禁用了（应连续 %d 次才禁）：reason=%q", i, threshold, st.DisabledReason)
+		}
+	}
+	// 第 threshold 次：达阈值 → 禁用。
+	if code := do(); code != 503 {
+		t.Fatalf("第 %d 次: code=%d", threshold, code)
 	}
 	st, _ := p.Status("u1")
 	if !st.Disabled {
-		t.Errorf("account should be disabled: %+v", st)
+		t.Fatalf("连续 %d 次 12153 后应禁用：%+v", threshold, st)
+	}
+}
+
+// TestChatAuthAnomalyDoesNotPenalize 401/403 的「请求不合法」签名不罚账号。
+//
+// 上游不接受某组认证头时回 401 {"message":"not_found"}——换任何号都一样，
+// 罚号只会把整池健康号推出池。断言：不禁用、不冷却、不喂连败、不计错误总数。
+func TestChatAuthAnomalyDoesNotPenalize(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 401, `{"message":"not_found"}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 503 {
+		t.Fatalf("code=%d", rec.Code)
+	}
+	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatalf("请求异常不得禁用账号：%+v", st)
+	}
+	if st.Cooling {
+		t.Fatalf("请求异常不得冷却账号：%+v", st)
+	}
+	if st.ConsecutiveFails != 0 {
+		t.Fatalf("请求异常不得喂连败计数（换号无效，会把整池号推出池）：ConsecutiveFails=%d", st.ConsecutiveFails)
 	}
 }
 

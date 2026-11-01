@@ -86,6 +86,9 @@ func (p *Pool) SetCreditsSnapshot(uid string, s CreditsSnapshot) {
 	if !ok {
 		return
 	}
+	// 刷新成功 = 余额新鲜：上一次的失败记录必须清掉，否则面板会一直挂着
+	// 一个早就不成立的错误提示。
+	e.creditsErr, e.creditsErrAt = "", time.Time{}
 	credits := s.Remain
 	if credits < 0 {
 		credits = 0
@@ -560,3 +563,26 @@ func nextDay4AM(now time.Time) time.Time {
 // 任务每 5 分钟到达这里，全清会把限流冷却实际寿命压到一个刷新周期内）。
 // 注意：不碰熔断器——熔断到期（breakerUntil 过期）或下次 chat 成功（NoteSuccess）才恢复。
 // reviveCoolingLocked 已迁至 transition.go（状态机迁移唯一权威实现）。
+
+// SetCreditsError 记录/清除最近一次余额刷新失败。
+// reason 为空 = 清除（供调用方在成功路径统一调用，避免两处口径漂移）。
+// 只做观测，不改变选号：余额查不到 ≠ 账号不能用（chat 路径会独立判定 401/12153），
+// 在这里罚号会把「上游 bill 端点偶发 5xx」放大成账号不可用。
+func (p *Pool) SetCreditsError(uid, reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	if reason == "" {
+		if e.creditsErr == "" {
+			return
+		}
+		e.creditsErr, e.creditsErrAt = "", time.Time{}
+	} else {
+		e.creditsErr, e.creditsErrAt = reason, time.Now()
+	}
+	// 有意不置 dirty：这是运行态观测量（与 lastUsed / inFlight 同口径），落盘
+	// 会让一次上游 5xx 触发整个 state.json 重写，收益为零。
+}

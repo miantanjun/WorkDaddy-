@@ -26,15 +26,28 @@ const crypto = require('crypto');
 const zlib = require('zlib');
 
 /**
- * 钉死的上游版本。换版本前**必须**先对比新旧 `config.example.json`（见 2026-10-15 记录）：
- * v1.11.9 → v1.13.0 是**纯增量**（新增 server.read_timeout / logging.* 三项 / schedule.include_disabled_in_tasks /
- * pool.credit_floor，**零删除**）⇒ 模板驱动的 buildGatewayConfig 无需改逻辑。
+ * 网关二进制的**自报版本**（= `vendor/wb2api-go/cmd/server/main.go` 的 `appVersion`）。
+ * ⚠️ 它**不是** GitHub tag：tag 是主程序版本（`v1.9.8`），网关只是主 Release 里的一个资产。
+ *    2026-11-02 之前这里钉的是上游 tag `v1.13.0` + 上游仓库，导致面板「更新网关」下载的是
+ *    **上游原版**，把本仓 wd1~wd8 的改动全部覆盖 —— 现已改为指向自家仓库。
+ * 换版本前**必须**先对比新旧 `config.example.json`（见 2026-10-15 记录）：
+ * v1.11.9 → v1.13.0 是**纯增量**（新增 server.read_timeout / logging.* 三项 /
+ * schedule.include_disabled_in_tasks / pool.credit_floor，**零删除**）⇒ 模板驱动无需改逻辑。
  */
-const GATEWAY_VERSION = 'v1.13.0';
-const GATEWAY_REPO = 'linguo2625469/workbuddy2api-panel';
-/** 发布资产名（Windows；mac/Linux 有对应 tar.gz，本模块当前只处理 Windows 部署路径）。 */
-const ASSET_NAME = 'wb2api-panel-' + GATEWAY_VERSION + '-windows-amd64.zip';
+const GATEWAY_VERSION = '1.13.1-panel-wd8';
+/** 自家仓库：网关跟主程序一起发，对外只有一个版本号。 */
+const GATEWAY_REPO = 'miantanjun/WorkDaddy-';
+/** 主 Release 里的固定资产名（不带版本号 —— 版本看 Release tag）。 */
+const ASSET_NAME = 'wb2api-windows-amd64.zip';
 const CHECKSUMS_NAME = 'checksums.txt';
+
+/**
+ * 兜底源：主 Release 里没有网关资产时（v1.9.8 之前的老版本、或回滚到旧 tag）退回上游官方包。
+ * ⚠️ 它会把本仓对网关的所有改动覆盖回上游原版，只在「自己的拿不到」时用，且必须打进日志。
+ */
+const LEGACY_GATEWAY_REPO = 'linguo2625469/workbuddy2api-panel';
+const LEGACY_GATEWAY_VERSION = 'v1.13.0';
+const LEGACY_ASSET_NAME = 'wb2api-panel-' + LEGACY_GATEWAY_VERSION + '-windows-amd64.zip';
 
 /** 默认端口：官方默认 7863；与 WorkDaddy 自己的 UI 端口（47832 起）不冲突。 */
 const DEFAULT_PORT = 7863;
@@ -54,6 +67,36 @@ const MAX_UNPACKED_BYTES = 256 * 1024 * 1024;
  *     ├─ gateway.json       WorkDaddy 侧状态（版本/端口/启用开关；**不含 api_key 明文**）
  *     └─ wb2api.log         网关 stdout/stderr
  */
+/**
+ * 网关下载候选源（按优先级）。`mainTag` 是主程序版本标签（如 `v1.9.8`）。
+ * 返回 `[{ repo, tag, asset, checksums, legacy }]`，调用方依次尝试，用第一个拿得到的。
+ *
+ * ⭐ 为什么是数组而不是单个 URL：主 Release 的资产是**跟着主程序一起发**的，
+ *    万一某次 CI 只出了安装包、漏挂网关 zip（或用户回滚到 v1.9.7），
+ *    还能退回上游官方包，不至于让「安装网关」按钮直接失败。
+ */
+function gatewayDownloadCandidates(mainTag) {
+  const tag = String(mainTag || '').trim();
+  const out = [];
+  if (tag) {
+    out.push({ repo: GATEWAY_REPO, tag: tag, asset: ASSET_NAME, checksums: CHECKSUMS_NAME, legacy: false });
+  }
+  out.push({
+    repo: LEGACY_GATEWAY_REPO,
+    tag: LEGACY_GATEWAY_VERSION,
+    asset: LEGACY_ASSET_NAME,
+    checksums: CHECKSUMS_NAME,
+    legacy: true,
+  });
+  return out;
+}
+
+/** 把候选源拼成 `gh-proxy` 前置的真实下载前缀（镜像只改传输不改字节，靠 SHA-256 兜底）。 */
+function gatewayDownloadBase(cand) {
+  return 'https://gh-proxy.com/https://github.com/' + cand.repo
+    + '/releases/download/' + cand.tag + '/';
+}
+
 function gatewayPaths(dataDir) {
   const root = path.join(String(dataDir || ''), 'gateway');
   return {
@@ -671,6 +714,11 @@ module.exports = {
   GATEWAY_REPO,
   ASSET_NAME,
   CHECKSUMS_NAME,
+  LEGACY_GATEWAY_REPO,
+  LEGACY_GATEWAY_VERSION,
+  LEGACY_ASSET_NAME,
+  gatewayDownloadCandidates,
+  gatewayDownloadBase,
   DEFAULT_PORT,
   gatewayPaths,
   parseChecksums,

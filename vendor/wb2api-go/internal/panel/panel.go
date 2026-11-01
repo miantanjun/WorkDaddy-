@@ -190,6 +190,8 @@ p.mux.HandleFunc("POST /panel/api/accounts/{uid}/health", p.withAuth(p.accountHe
 	p.mux.HandleFunc("POST /panel/api/balance_all", p.withAuth(p.balanceAll))
 	p.mux.HandleFunc("GET /panel/api/packages", p.withAuth(p.packages))
 	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
+	// 容量与调度：全量模型三态容量 + 模型锁明细 + 调度参数（一个请求渲染整页）。
+	p.mux.HandleFunc("GET /panel/api/capacity", p.withAuth(p.capacity))
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))

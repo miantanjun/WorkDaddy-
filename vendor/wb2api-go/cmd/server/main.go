@@ -37,7 +37,7 @@ import (
 // 上游基线本身也叫 1.13.0-panel，如果我们编译出来的二进制用同一个版本号，
 // 面板上根本分不清装的是上游包还是我们改过的那份。
 // 每次在本仓改网关行为就 +1（wd1 → wd2 …），与 Release 的 gateway-v* 标签对应。
-const appVersion = "1.13.1-panel-wd4"
+const appVersion = "1.13.1-panel-wd8"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -369,6 +369,10 @@ func main() {
 	// 模型归零；倍率表当时尚未建立）。
 	// 异步执行：不阻塞监听启动；失败仅记日志（下一轮懒触发或本轮重试仍可补上）。
 	go warmModelRates(ctx, up, p)
+
+	// 预热门户模型目录：chat 热路径上的「生图模型识别」只读这份快照
+	// （isImageGenModel 里不能在请求线程拉上游），冷缓存会让生图模型识别失明。
+	go h.WarmModelCatalog()
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

@@ -83,6 +83,10 @@ type Status struct {
 	// 面板首页「积分到期提醒」快照直接用它渲染，与「检查」的逐包按日汇总同口径；
 	// 只有最早一批的旧字段无法表达「同一天多个包」「后续批次」「7 天内合计」。
 	CreditsExpiryBuckets []ExpiryBucket `json:"credits_expiry_buckets,omitempty"`
+	// CreditsError / CreditsErrorAt 最近一次余额刷新失败的原因与时刻。
+	// 非空即表示面板上的积分是**陈旧值**（不是当前值），前端据此提示。
+	CreditsError   string    `json:"credits_error,omitempty"`
+	CreditsErrorAt time.Time `json:"credits_error_at,omitempty"`
 	Cooling              bool           `json:"cooling"`
 	CoolKind                 string    `json:"cool_kind,omitempty"`
 	CoolRemaining            int64     `json:"cool_remaining_sec,omitempty"`
@@ -195,6 +199,12 @@ type entry struct {
 	a            *auth.Auth
 	credits      int64
 	creditsTotal int64 // 积分总额度（UserResource 聚合；0 = 未知）
+	// creditsErr / creditsErrAt 最近一次余额刷新失败的原因与时刻（运行态，不持久化）。
+	// 为什么需要：RunBalanceRefreshNow 失败时只打一行 stdout，credits 保持旧值，
+	// 面板照常显示"上次刷新 X 分钟前"——一个 token 已死的账号会长期顶着几万旧积分，
+	// 看起来完全正常。这两个字段让"余额是陈旧的"变成可渲染的事实。
+	creditsErr   string
+	creditsErrAt time.Time
 	// creditsExpiring 配置窗口内即将过期的可用积分子集，是 credits 的一部分。
 	// creditsEarliestExpiry / creditsEarliestRemaining 是全部未来到期批次中的最早一批；
 	// 两者均由签到/余额刷新更新，供 earliest-expiry 路由和状态观测使用。

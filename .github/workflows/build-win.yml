@@ -199,6 +199,51 @@ jobs:
           $lines | Out-File -FilePath release\notes-sha.txt -Encoding ascii
           Get-Content release\notes-sha.txt
 
+      # ⭐ 网关 sidecar 跟主程序一起发（2026-11-02 起不再单独发 gateway-v* Release）。
+      #    对外只有一个版本号；面板「更新网关」拉的是本 Release 里的 wb2api-windows-amd64.zip。
+      #    放在本 job 而不是独立 job：Go 工具链上面已装好，且 Release 只被创建一次，顺序天然确定
+      #    （两个 job 各自往同一个 Release 传资产会有竞态，正文可能被覆盖成空）。
+      - name: 编译网关 sidecar（wb2api.exe）
+        shell: bash
+        working-directory: vendor/wb2api-go
+        run: |
+          set -e
+          go build -trimpath -ldflags "-s -w" -o dist/wb2api.exe ./cmd/server
+          ls -lh dist/wb2api.exe
+
+      - name: 校验网关版本串（源码 == 二进制 == 集成层期望值）
+        shell: bash
+        run: |
+          set -e
+          APP=$(grep -oE 'appVersion[[:space:]]*=[[:space:]]*"[^"]+"' vendor/wb2api-go/cmd/server/main.go | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          WANT=$(grep -oE "GATEWAY_VERSION = '[^']+'" scripts/api-gateway.js | head -1 | sed -E "s/.*'([^']+)'.*/\1/")
+          echo "二进制自报 appVersion = $APP"
+          echo "集成层 GATEWAY_VERSION = $WANT"
+          if [ -z "$APP" ]; then echo "::error::cmd/server/main.go 里找不到 appVersion"; exit 1; fi
+          if [ "$APP" != "$WANT" ]; then
+            echo "::error::scripts/api-gateway.js 的 GATEWAY_VERSION 与二进制 appVersion 不一致 —— 面板会一直报「版本漂移」"
+            exit 1
+          fi
+          grep -aq "$APP" vendor/wb2api-go/dist/wb2api.exe || { echo "::error::二进制里搜不到版本串 $APP"; exit 1; }
+
+      # zip 内必须是扁平的 wb2api.exe + config.example.json：
+      # daemon 侧用自己的 zlib 解压（只支持 store/deflate，不支持 zip64），并按文件名白名单挑。
+      - name: 打包网关资产（zip + checksums）
+        shell: python
+        run: |
+          import hashlib, pathlib, zipfile
+          stage = pathlib.Path('vendor/wb2api-go')
+          out = pathlib.Path('release/wb2api-windows-amd64.zip')
+          out.parent.mkdir(parents=True, exist_ok=True)
+          with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
+              z.write(stage / 'dist' / 'wb2api.exe', 'wb2api.exe')
+              z.write(stage / 'config.example.json', 'config.example.json')
+          h = hashlib.sha256(out.read_bytes()).hexdigest()
+          pathlib.Path('release/checksums.txt').write_text(
+              f'{h}  wb2api-windows-amd64.zip\n', encoding='ascii')
+          print('zip bytes:', out.stat().st_size)
+          print('sha256:', h)
+
       - name: 上传产物（Setup.exe + 便携版 ZIP）
         uses: actions/upload-artifact@v4
         with:
@@ -208,6 +253,8 @@ jobs:
             release/windows/WorkDaddy-AI-Setup-*.exe
             release/windows/WorkDaddy-Portable-*.zip
             release/windows/WorkDaddy-AI-Portable-*.zip
+            release/wb2api-windows-amd64.zip
+            release/checksums.txt
 
       # 内置更新器只认 GitHub Release（不认 Actions artifact），因此打 tag 或手动触发都会挂 Release
       - name: 发布到 GitHub Release
@@ -221,6 +268,8 @@ jobs:
             release/windows/WorkDaddy-AI-Setup-*.exe
             release/windows/WorkDaddy-Portable-*.zip
             release/windows/WorkDaddy-AI-Portable-*.zip
+            release/wb2api-windows-amd64.zip
+            release/checksums.txt
           generate_release_notes: true
 
       # ⚠️ action-gh-release 在更新**已存在**的 Release 时，实测出现过「资产换新了、正文却停在上一版」

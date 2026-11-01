@@ -350,7 +350,7 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { overview: '总览', accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { overview: '总览', capacity: '容量与调度', accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -360,6 +360,7 @@ function go(v) {
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
+  if (v === 'capacity') loadCapacity();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
@@ -407,8 +408,14 @@ function renderAccounts(list) {
     // 企业版不限量：上游 limitNum == -1，网关以 credits_total=-1 透出（见 upstream
     // enterpriseUnlimitedTotal）。此时剩余额度不参与展示，直接标「不限」。
     const unlimited = s.credits_total === -1;
-    const cred = unlimited ? '不限'
-      : (s.credits == null ? '—' : (s.credits_total > 0 ? s.credits + '<span class="of">/' + s.credits_total + '</span>' : String(s.credits)));
+    // 余额刷新失败标记：此时 credits 是**上次成功刷新**的旧值，不是当前值。
+    // 不提示的话，一个 token 已死的账号会长期顶着几万积分，看起来完全正常——
+    // 这正是「余额初始化失败静默」在 Go 版的实际形态（失败只打 stdout）。
+    const credErr = s.credits_error
+      ? '<span class="cred-err" title="' + esc('余额刷新失败：' + s.credits_error) + '">陈旧</span>'
+      : '';
+    const cred = (unlimited ? '不限'
+      : (s.credits == null ? '—' : (s.credits_total > 0 ? s.credits + '<span class="of">/' + s.credits_total + '</span>' : String(s.credits)))) + credErr;
     const pct = unlimited ? 100
       : (s.credits_total > 0
         ? Math.min(100, Math.round((s.credits || 0) / s.credits_total * 100))
@@ -421,6 +428,9 @@ function renderAccounts(list) {
       credTip = (s.enterprise ? '企业版剩余额度 ' : '剩余 ')
         + s.credits + ' / ' + (s.enterprise ? '分配 ' : '总额 ') + s.credits_total + '（' + pct + '%）';
     } else credTip = '积分（相对池内最高）';
+    if (s.credits_error) {
+      credTip += '\n⚠ 余额刷新失败：' + s.credits_error + '（显示的是上次成功刷新的旧值）';
+    }
     const costs = (s.model_costs || []).filter(c => c.model);
     if (costs.length) {
       credTip += '\n实测单价（credits/1K）：\n' + costs.map(c =>
@@ -3663,3 +3673,94 @@ if ($('btnExpFold')) {
   };
 }
 applyExpFold();
+
+/* ══ 容量与调度 ═══════════════════════════════════════════════════════════
+   数据源 /panel/api/capacity：后端一次算好三态与判定依据（与选号同一套
+   healthyForModel / inFlightFull），前端只做展示与筛选，不自己推导状态——
+   否则面板口径与真实选号会漂移。15s 缓存：这是盯盘页，切来切去不必每次都打。 */
+const CAP_TTL = 15000;
+let capData = null, capAt = 0, capOnlyProblem = false;
+
+const CAP_STATE = { idle: ['空闲', 'ok'], busy: ['拥堵', 'warn'], unavailable: ['不可用', 'bad'] };
+const CAP_BLOCK = {
+  model_lock: '模型级限流：等上游重置，或换一个模型',
+  account_cooling: '账号冷却/熔断：等号恢复（换号可绕）',
+  in_flight: '在途打满：把并发降下来',
+  no_account: '该域没有可选账号',
+};
+const CAP_STRATEGY = { weighted_random: '加权随机', round_robin: '轮询', sequential_exhaust: '顺序耗尽' };
+
+function capTime(iso) {
+  if (!iso) return '—';
+  const t = new Date(iso);
+  if (isNaN(t.getTime())) return '—';
+  return t.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function capSchedItem(k, v) {
+  return '<div><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + '</span></div>';
+}
+
+async function loadCapacity(force) {
+  if (!force && capData && Date.now() - capAt < CAP_TTL) { renderCapacity(capData); return; }
+  try {
+    const d = await api('capacity');
+    capData = d; capAt = Date.now();
+    renderCapacity(d);
+  } catch (e) {
+    if ($('capRefreshed')) $('capRefreshed').textContent = '读取失败：' + (e && e.message ? e.message : e);
+  }
+}
+
+function renderCapacity(d) {
+  const c = (d && d.counts) || {};
+  $('capIdle').textContent = c.idle || 0;
+  $('capBusy').textContent = c.busy || 0;
+  $('capDown').textContent = c.unavailable || 0;
+  const rows = (d && Array.isArray(d.rows)) ? d.rows : [];
+  const locks = (d && Array.isArray(d.locks)) ? d.locks : [];
+  $('capTotal').textContent = rows.length;
+  $('capLockCount').textContent = locks.length;
+  $('capRefreshed').textContent = rows.length ? ('更新于 ' + new Date(capAt).toLocaleTimeString('zh-CN', { hour12: false })) : '—';
+  $('capLockNote').textContent = locks.length ? (locks.length + ' 个模型被上游限流') : '当前无模型级限流';
+
+  const s = (d && d.scheduling) || {};
+  $('capSched').innerHTML =
+    capSchedItem('国内策略', CAP_STRATEGY[s.domestic] || s.domestic || '—') +
+    capSchedItem('国际策略', CAP_STRATEGY[s.international] || s.international || '—') +
+    capSchedItem('单号在途上限', s.max_in_flight > 0
+      ? (s.max_in_flight + (s.max_in_flight_global > 0 ? '（国际 ' + s.max_in_flight_global + '）' : ''))
+      : '不限') +
+    capSchedItem('积分保底', s.credit_floor > 0 ? (s.credit_floor + ' 分以下不再选号') : '关闭');
+  $('capSchedNote').textContent = '跨域回退：' + (s.cross_domain_fallback ? '开（裸模型名选不到号时改用另一域）' : '关')
+    + ' · 最早到期优先：' + (s.prefer_expiring ? '开' : '关');
+
+  const list = capOnlyProblem ? rows.filter(r => r.state !== 'idle') : rows;
+  $('capBody').innerHTML = list.length ? list.map(r => {
+    const st = CAP_STATE[r.state] || [r.state, ''];
+    const why = r.blocked_by
+      ? esc(CAP_BLOCK[r.blocked_by] || r.blocked_by) + (r.reason ? '<span class="hint"> · ' + esc(r.reason) + '</span>' : '')
+      : '';
+    return '<tr>'
+      + '<td class="mono">' + esc((r.realm === 'global' ? 'global:' : 'cn:') + r.model) + '</td>'
+      + '<td><span class="cap-st ' + st[1] + '">' + st[0] + '</span></td>'
+      + '<td class="num">' + (r.servable || 0) + ' / ' + (r.total || 0) + '</td>'
+      + '<td class="num">' + (r.locked || 0) + '</td>'
+      + '<td class="num">' + (r.cooling || 0) + '</td>'
+      + '<td class="num">' + (r.in_flight || 0) + '</td>'
+      + '<td>' + capTime(r.unlock_at) + '</td>'
+      + '<td class="cap-why">' + why + '</td>'
+      + '</tr>';
+  }).join('') : '<tr><td colspan="8" class="cap-empty">'
+    + (rows.length ? '当前筛选下没有异常模型' : '暂无模型数据（上游目录未拉到，或池内没有可用账号）')
+    + '</td></tr>';
+}
+
+if ($('capRefresh')) $('capRefresh').onclick = () => loadCapacity(true);
+document.querySelectorAll('#capFilter .chip').forEach(btn => {
+  btn.onclick = () => {
+    capOnlyProblem = btn.dataset.f === 'problem';
+    document.querySelectorAll('#capFilter .chip').forEach(b => b.classList.toggle('on', b === btn));
+    if (capData) renderCapacity(capData);
+  };
+});

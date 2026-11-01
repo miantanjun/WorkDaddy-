@@ -596,6 +596,8 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Enterprise:               e.a.IsEnterprise(),
 		Nickname:                 e.a.Nickname,
 		Credits:                  e.credits,
+		CreditsError:             e.creditsErr,
+		CreditsErrorAt:           e.creditsErrAt,
 		CreditsTotal:             e.creditsTotal,
 		CreditsExpiring:          e.creditsExpiring,
 		CreditsEarliestExpiry:    e.creditsEarliestExpiry,

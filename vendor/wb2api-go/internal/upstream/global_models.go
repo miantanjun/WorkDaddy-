@@ -190,7 +190,7 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 			ids := make([]string, 0, len(byID))
 			outInfos := make([]ModelInfo, 0, len(byID))
 			for _, mi := range byID {
-				if nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) {
+				if nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) && !mi.ImageGen {
 					continue
 				}
 				ids = append(ids, mi.ID)

@@ -27,6 +27,13 @@ func TestClassify(t *testing.T) {
 		{200, `{"code":10001,"msg":"积分不足，请充值"}`, ErrHardCredit},
 		{400, `{"code":1,"msg":"额度用尽"}`, ErrHardCredit},
 		{429, ``, ErrSoftRate},
+		// 14003 RateLimitError：**模型**繁忙，不是账号被限流。
+		// 依据：官方客户端 app.asar 的错误码→按钮表给 14003 的动作是
+		// switchModel + retry（换模型或稍后重试），账号本身健康。
+		// 必须显式判在 429 兜底之前，否则 429+14003 会被当成账号级软限流，
+		// 把一个模型的抖动放大成整账号冷却，而其它模型其实都好好的。
+		{429, `{"code":14003,"msg":"当前模型请求繁忙"}`, ErrSoftRate},
+		{200, `{"code":14003,"msg":"当前模型请求繁忙"}`, ErrSoftRate},
 		// 限流文案（issue #28）：状态码不是 429 时也必须识别为软限流，
 		// 否则账号不会被冷却，下次请求仍会被选中。
 		{200, `{"code":11140,"msg":"The model provider is rate-limiting requests. Please wait a moment and try again."}`, ErrSoftRate},
@@ -75,6 +82,19 @@ func TestClassify(t *testing.T) {
 		{401, `Offline user session not found`, ErrSessionDead},
 		{401, `{"code":12153,"msg":"Offline user session not found"}`, ErrSessionDead},
 		{401, `{"code":9999,"msg":"bad token"}`, ErrClient},
+		// 401/403 但签名指向「请求本身不合法」：渠道/认证头问题，不是账号失效。
+		// 换号解决不了——判成 ErrSessionDead 会禁用健康号，判成 ErrClient 会给
+		// 健康号喂连败计数（issue #114）把整池号推出池，表现成「所有号忽然集体失效」。
+		// 真实形态：上游不接受某组认证头时回 401 {"message":"not_found"}。
+		{401, `{"message":"not_found"}`, ErrUpstreamAuthAnomaly},
+		{401, `{"message": "not_found"}`, ErrUpstreamAuthAnomaly},
+		{403, `{"code":10085,"msg":"forbidden"}`, ErrUpstreamAuthAnomaly},
+		{403, `request header is invalid`, ErrUpstreamAuthAnomaly},
+		{403, `{"msg":"请求头不合法"}`, ErrUpstreamAuthAnomaly},
+		// 顺序守卫：401 + 12153 仍是真·账号失效，精确词优先于上面的异常判定。
+		{401, `{"code":12153,"msg":"Offline user session not found"}`, ErrSessionDead},
+		// 非 401/403 不做请求异常判定（防 400 + not_found 被误吞）。
+		{400, `{"message":"not_found"}`, ErrClient},
 		{500, `boom`, ErrServer},
 		{503, `unavailable`, ErrServer},
 		{200, ``, ErrNone},
@@ -145,7 +165,7 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// TestIsModelRateLimit 判断 429 body 是否明确指向模型级限流（code 6004）。
+// TestIsModelRateLimit 判断 429 body 是否明确指向模型级限流（code 6004 / 14003）。
 func TestIsModelRateLimit(t *testing.T) {
 	cases := []struct {
 		body string
@@ -154,6 +174,9 @@ func TestIsModelRateLimit(t *testing.T) {
 		// 6004：模型级限流（issue #31 的核心场景）。
 		{`{"code":6004,"msg":"将在 2026-09-11 18:33:27 UTC+8 重置"}`, true},
 		{`{"code": 6004,"msg":"x"}`, true},
+		// 14003：同为模型级（模型繁忙），账号健康，切模型即豁免。
+		{`{"code":14003,"msg":"当前模型请求繁忙"}`, true},
+		{`{"code": 14003,"msg":"x"}`, true},
 		// 其他 code（非模型级限流）→ 不算。
 		{`{"code":11140,"msg":"The model provider is rate-limiting requests."}`, false},
 		{`{"code":1,"msg":"429 rate limit"}`, false},
@@ -162,6 +185,17 @@ func TestIsModelRateLimit(t *testing.T) {
 		if got := IsModelRateLimit(c.body); got != c.want {
 			t.Errorf("IsModelRateLimit(%q)=%v want %v", c.body, got, c.want)
 		}
+	}
+}
+
+// TestModelRateLimitReason 日志/审计文案按实际命中码区分：6004 与 14003
+// 语义不同（额度用量超限 vs 模型繁忙），混写会把排查引到错误方向。
+func TestModelRateLimitReason(t *testing.T) {
+	if got := ModelRateLimitReason(`{"code":6004,"msg":"x"}`); got != "6004 model rate limit" {
+		t.Errorf("6004 reason=%q", got)
+	}
+	if got := ModelRateLimitReason(`{"code":14003,"msg":"x"}`); got != "14003 model busy" {
+		t.Errorf("14003 reason=%q", got)
 	}
 }
 

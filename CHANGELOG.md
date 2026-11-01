@@ -17,16 +17,34 @@
 > ⚠️ **版本断层**：v1.9.2 – v1.9.7 的条目尚未回填（那几版只打了 tag 未补文档）。
 > 需要时用 `git log v1.9.1..v1.9.7 --oneline` 还原。**跨版本的完整清单以 [`docs/DONE-TODO.md`](docs/DONE-TODO.md) 为准**，本文件只管「某一版改了什么」。
 
-## 未发版（Unreleased，基线 2026-10-27）
+## v1.9.8 —— 2026-11-02
 
-**主题**：**吸纳上游 1.2.16 + 1.2.18** + **反代网关转为自维护**（源码入库 / CI 出包 / 出站指纹对齐）。
+**主题**：**吸纳上游 1.2.16 + 1.2.18** + **反代网关转为自维护**（源码入库 / CI 出包 / 出站指纹对齐）
++ **发布链路收口为单一版本号**（网关不再单独发 Release，改当主 Release 的资产）。
 
 > 完整台账（含判定不做的理由、待办优先级）见 [`docs/DONE-TODO.md`](docs/DONE-TODO.md)；
 > 反代取证过程见 [`docs/gateway-audit-2026-10.md`](docs/gateway-audit-2026-10.md)。
 
 ### 新增功能
 
-- **启动环境隔离 —— 根治「一重启就静默升级」**（上游 1.2.16，提交 `3e3e329`）：把客户端子进程的 `TEMP`/`TMP` 隔离到 `<dataDir>/client-tmp/<profileId>`，并钉住 `WORKBUDDY_UPDATE_URL`。
+- **「模型切换没生效」提醒**（2026-10-29）：查清了「报错后换个提供方重发，还是报一模一样的错，必须重启客户端才好」的原因 —— **客户端在「报错后重新发送」这条路径上不带模型参数**：日志里正常发送 99/99 都是 `requestOptions.model=deepseek-v4.1-flash`，而报错后重发是 `requestOptions.model=<none>`，于是回落到会话默认模型，也就是报错时那个旧模型。界面上模型已经换到别家，请求还打在原来那家上，自然原样失败。
+  - 判据是**三段式**（都在客户端自己的日志里，逐字节可验证）：`unstable_setSessionModel`（想用的）→ `Sending request`（实际发的，模型不一致）→ 紧随一次 `refusal classified`（确实失败了）。三者齐全才提醒；不一致但请求成功**不提醒**（用户没受影响）。
+  - **精度**：拿 4 天真实日志回放，SET=118 / REQ=3567，只命中 5 次且全部带错误码，276 次正常切换**零误报**；命中的 5 次正是报障现场（10-29 09:06:41 / 09:07:00 / 09:07:53、10-28 15:11:15 / 15:12:51）。
+  - 为什么读日志而不看 DOM：错误块用 constructable stylesheet + CSS Modules hash，类名不可枚举（实测遍历 `cssRules` 筛不出任何带 hash 的 error 类）。
+  - **只提醒、不补救**是刻意的：自动把切换指令补发到真正的运行时会话 id 需要拦客户端内部的 ACP 调用，属于「站调度层」，与插件既定的「配置层 + 指令层 + 观测层」边界冲突，且客户端内部 id 映射一变就静默失效。
+  - 链路：`scripts/model-switch-guard.js`（只读日志尾部 + 策略落盘）→ `GET /api/model-switch-check`（1.5 秒节流，开关关掉直接短路、不解析任何日志）→ inject 4 秒轮询 → 左下角 warning toast（12 秒，含「想用的模型 / 实际用的模型 / 域名」）。
+  - 增强页新增「模型切换」卡片（默认开）。去重键 `切换时刻|实际模型` 挂 `window` —— inject 是全量重建式热更，闭包会重来，挂闭包里同一条旧命中会反复弹。
+  - 性能：384KB 尾部解析 2.66ms、整轮扫描 1.9ms，4 秒一 poll 无压力。
+  - 守卫 `test-model-switch-guard.js`（28 条，含「守卫块里不许出现发消息/改模型的调用」这条只读红线）。
+- **增强页「客户端更新」开关**（2026-10-28）：把上一条里硬编码的更新静音做成可切换策略 —— 想升级时关掉它就能恢复官方更新，不用改代码。
+  开关写 `<dataDir>/client-update-policy.json`（`{mute, updatedAt}`，先写临时文件再 `rename` 原子替换），客户端进程启动时由 `workbuddy-launch-env.js` 读它决定 `WORKBUDDY_UPDATE_URL`：
+  **静音档** → 本机 daemon 的 `GET /v2/update`（永远 204）+ `app-config.json` 的 `startupForceAutoUpdate=false`；**正常档** → 还原官方域（`workbuddy.cn` / `workbuddy.ai`），并把那个键**删掉**（不留「关过一次就永久关」的暗坑）。
+  缺文件 / 坏 JSON / `mute` 不是布尔，一律按**静音**处理 —— 两种失败模式的代价不对称：漏更新只是「没发现有新版」，不静音可能直接装机。
+  面板侧用**两步确认**再重启（Electron 不实现 `window.confirm`，用它按钮会静默点不动），改完点「重启客户端」即生效。
+  接口 `GET /api/client-update-policy` / `POST /api/client-update-policy-set`；daemon 启动时也会重新套用一次（防止用户在客户端里手动改过配置后状态漂移）。
+  守卫 `test-workbuddy-launch-env.js`（33 → 43 断言，新增 G 组：默认静音 / 关掉恢复官方域 / 坏文件退静音 / `mute` 非布尔不认 / 恢复时删键 / 原子写形状 / 接口与启动套用 / **漏导出守卫** / 面板开关与两步重启 / 禁用原生 confirm）。
+- **启动环境隔离 —— 解决「一重启就静默升级」**（上游 1.2.16，提交 `3e3e329`）：把客户端子进程的 `TEMP`/`TMP` 隔离到 `<dataDir>/client-tmp/<profileId>`，并钉住 `WORKBUDDY_UPDATE_URL`。
+  ⚠️ **后来的判定修正见「缺陷修复 · 被动不更新只挡了装」**：TEMP 隔离确实堵住了 #424 的「复用旧安装包」，但「钉官方域」并不能阻止它自动检测并下载新版本 —— 2026-10-28 已追加为「指到本机 204 端点 + 关掉开机静默装」。
   为什么只钉 URL 不够：官方 Windows updater 会在检查 feed **之前**恢复缓存的 `Setup.exe`（上游 #424），所以必须换 TEMP 让它在缓存目录里找不到包。官方状态机在 `ready` 时会先 `quitAndInstallForStartup()` —— 找不到包返回 false，才走 `continuing normal startup`，此时窗口照常打开。
   接线两处：`win-launcher.launchWorkBuddy` 与 `daemon.relaunchWorkBuddy`（**双路都要改，只改一路等于没改**）。守卫 `test-workbuddy-launch-env.js`（28 断言）。
 - **client-tmp 定时回收**（自研配套，上游没做）：启动跑一次 + 每 24h 一次；只删超过 7 天的条目；单轮上限 2000 条；**不跟符号链接**；`EBUSY` 计入 failed 不抛；路径必须落在 `client-tmp` 之内。守卫 `test-client-tmp-cleanup.js`（25 断言）。
@@ -36,9 +54,44 @@
   视觉层：深色改「深海蓝黑 + 靛蓝」（**不用暖金**）、浅色「蓝白」；卡片网格、大数字排版、`conic-gradient` 缓存命中环、账号状态分布条。
   三个坑值得记：① 参考稿是**纯静态设计稿**（`fetch` 命中 0），照抄等于零接线；② 我们的 CSP 是 `script-src 'self'` + `style-src 'self'` + **无 `font-src`** ⇒ CDN 图标字体必被拦，图标统一内联 SVG；③ 初始 `hidden` 必须跟默认落地页对齐，否则冷加载会闪一下账号表。
   守卫 `overview_panel_test.go`（6 条：默认视图 / 无外链资源 / 空态不崩 / 额度三态 / 不限量账号不计入户均 / 除零保护）。
+- **AI 生图接入网关**（网关，`1.13.1-panel-wd5`）：`POST /v1/images/generations` + `/v1/images/edits`（JSON / multipart），上游 `/v2/images/*`。
+  **顺带修好了「不知道哪个模型能生图」**：`nonChatModel` 原来把 tags 含 `text-to-image` 的模型整个过滤掉，客户端永远看不到它们；现在保留并按 `type:"image"` + `capabilities:["image_generation"]` 单独列进 `/v1/models`（实测 `cn:hunyuan-image-alpha`，22 个模型里 1 个生图）。
+  三条红线照抄 Python 版实测结论：**5xx / 传输错误绝不重试**（可能已出图已扣费，重试=双倍付费，只对 `session_dead / hard_credit / soft_rate / model_blocked / account_fault` 换号）· **出图即 `Pool.Release`**（后续转码不占上游名额）· 出站强制 `response_format=url`，客户端要 b64 由网关下载转码且**只允许 `*.myqcloud.com`**（防 SSRF）。
+  踩到一个只有实测才会发现的坑：**上游生图不认 `cn:` 前缀**（`14401 route config not found`），出站必须用裸模型名——chat 路径的 `prepareBody` 有重写，生图走独立端点没经那层。
+  实测：文生图 13.6s / 5.71 积分，b64_json 走通（3.4MB base64），用量按 `hunyuan-image-alpha` 正常入账。
+  守卫 `images_test.go`（9 条，含「5xx 只调一次上游」这条红线）。
+- **新增「容量与调度」面板板块**（网关 `1.13.1-panel-wd5`）：`#capacity` 视图 + `GET /panel/api/capacity`。
+  每个模型三态 —— **空闲 / 拥堵 / 不可用** —— 并给出**判定依据**（模型锁 / 账号冷却 / 在途打满 / 无号）+ 最早恢复时刻 + 调度参数（策略 / 单号在途上限 / 积分保底 / 跨域回退 / 最早到期优先）。
+  与账号池的分工：账号池回答「哪个号不能用」，本页回答「哪个模型此刻还能用、为什么不能用、还要等多久」。
+  口径与选号**同一个** `healthyForModel + inFlightFull`（不是另起一套健康定义），所以面板说可用就真选得到号；禁用 / 暂停号不进分母。
+  两个渲染坑：① `time.Time` 零值不受 `omitempty` 约束，会冒出 `0001-01-01` ⇒ 前端显示「01/01 08:05」，必须用 `*time.Time`；② 模型目录里的 `auto` 是「让上游自己选」的占位项，列进来只会虚增总数。
+  守卫 `capacity_test.go`（10 条）+ `capacity_panel_test.go`（4 条）。
+- **DSH / Claude Code 项目规则标题去路径**（网关 `1.13.1-panel-wd5`）：客户端注入的 `<system-reminder># Instructions from: C:\Users\…\AGENTS.md` 只把**标题行的本地路径**收敛成文件名，正文逐字保留；只动 `system`/`developer`（user 消息里是用户输入，改它就是篡改）。
+  Go 版没有 Python 的「运行时摘要 / 历史截断」两条会伤正文的路径，所以正文天然完整，不需要搬整套提取逻辑；脱敏仍照常作用于规则正文（含上游已拒收的固定身份句时整条会 11128，归一比保留原文更有用）。
+  守卫 `project_rules_test.go`（7 条，含「多份规则顺序不乱」「二次处理幂等」）。
+- **余额刷新失败显式留痕（B11）**（网关 `1.13.1-panel-wd5`）：探测结论 —— Go 版**确实有这个坑**，形态是「静默」而不是崩溃：`RunBalanceRefreshNow` 失败只打一行 stdout，`credits` 保持上次成功刷新的旧值，面板照常显示「余额刷新 X 分钟前」，一个 token 已死的账号会长期顶着几万旧积分看起来完全正常。
+  修法：`Pool.SetCreditsError` 留痕 + `Status.credits_error` 透出 + 面板积分后挂「陈旧」标记（hover 看原因），刷新成功自动清除（幂等，成功路径无条件调用）。
+  守卫 `credits_error_test.go`（3 条）。
+
 
 ### 缺陷修复
 
+- **生图模型在对话里根本用不了**（网关 `1.13.1-panel-wd7`）：客户端**没有生图入口**，所以选中 `cn:hunyuan-image-alpha` 之后走的还是 `POST /v1/chat/completions` + `stream:true`，上游对话端点直接回 `400 {"code":11103,"msg":"Backend [hunyuan-stream] is not supported"}`；网关又把 11103 归为可重试错误 ⇒ **连换 7 个号、每次 4~5s 全白跑**，最后 503（日志实测 `10:01:51` 之前 3 个号各一条 11103，`total=5.5s` → 503）。
+  修法：chat 入站处识别生图模型，**就地转走真生图链路**，再把图片以 markdown 贴回对话。于是「在对话里选生图模型」从「一定失败」变成「真的能出图」，并且复用 `/v1/images/*` 的选号 / 在途租约 / 计费记录，两条入口同一套口径（把选号轮转抽成了 `generateImage`，`images()` 只负责格式化）。
+  - `stream=true` 时**先发响应头 + 一个空 role delta 开流**，再出图：真实出图 10~20s，不发头会被客户端当超时掐掉（实测 TTFB 38~47ms、总耗时 11~18.5s）。
+  - HTTP 200 一旦发出就改不回来 ⇒ **失败以正文回给对话**（`⚠️ <原因>`），non-stream 仍回真正的 4xx/5xx。
+  - `hidden` 黑名单**先于**分流判定：被配置藏起来的模型仍直接拒绝，不能借生图链路绕过去。
+  - 只取**最后一条 user 消息**（历史里的旧图/旧提示词不混进这一轮）；`content` 支持字符串与 part 数组，图优先 data URL（走 `/v2/images/edits`）、其次 https；prompt 超 4000 **字符**按 rune 截断，不切坏 UTF-8。
+  - ⚠️ 判定**只读模型目录缓存快照**，不在请求线程发起 `FetchModels`：早期写法给每个对话请求平白加了一次上游调用，把 `cross_domain_fallback` 的「一次 chat = 一次上游调用」计数直接打乱（测试当场抓到）。为此新增启动预热 `WarmModelCatalog()`（日志实测「启动预热模型目录成功：22 个模型」），关掉「刚重启 + 直接开聊」那段识别失明的窗口。
+  - 流水行现在带账号：`imageGenResult` 多了 `uid/nick`，否则生图请求在日志里只剩 `-`，事后查不了「哪个号画的」。
+  - 有意不做：不伪造 token 用量（生图按张计费，硬编 `prompt_tokens` 只会污染统计）；失败不假装成功。
+  - 守卫 `chat_image_test.go`（13 条）：转端点 / 剥 `cn:` 前缀 / 强制 `response_format=url` / 首帧开流 / 非流式形状 / 只取最后一条 user / part 数组与 edits / 空 prompt 400 且不打上游 / rune 截断 / 失败原因进正文 / 5xx 不换号 / 普通模型不被误拦 / **热路径不拉目录**。
+- **「被动不更新」只挡了装，没挡「查 + 下」**（对上游 1.2.16 那次判定的修正）：`WORKBUDDY_UPDATE_URL` 当时钉的是**官方域** `https://www.workbuddy.cn`，而它是客户端 `buildUpdateFeedUrl()` 的唯一入口（`process.env.WORKBUDDY_UPDATE_URL || provider || copilot.tencent.com`）——钉官方域等于让它照常去问有没有新版。实测 2026-10-28 02:21 它拿到 `5.9.3.42398134`，**45 秒自动下完 429MB**，状态 `ready`，左下角弹出「新版本 5.9.3 / 重启更新」。
+  TEMP 隔离本身没问题（包确实落在 `client-tmp/workbuddy-cn/workbuddy-update-x64/`，不在系统 TEMP），但它只解决「复用系统 TEMP 里的旧安装包」（#424），对「自己下一份新的」完全无效 —— **钉 URL ≠ 禁止更新**。
+  修法三层：① `WORKBUDDY_UPDATE_URL` 改指本机 daemon 新增的 `GET /v2/update`（**永远 204** = 官方语义里的「没有新版本」），读不到 `ui-port.json` 时退到 `127.0.0.1:9`（连接被拒 ⇒ 检查失败 ⇒ 同样不下）；② 启动前把 `app-config.json` 的 `startupForceAutoUpdate` 写成 `false`，掐掉 `early-silent-startup-update` 的 `quitAndInstallForStartup()`；③ 清掉已下载的 429MB 包。
+  ⚠️ 这三层随后被做成了增强页开关（见上条「增强页『客户端更新』开关」），不再是硬编码 —— 关掉开关即可恢复官方更新行为。
+  另确认 win32 **没有**「退出即装」和「启动扫描即装」：无 `pending-update.json`（那是 macOS 的 zip 快更路径，要求 `extractedAppPath`/`zipPath`/`stagedAppPath`）、无 `autoInstallOnAppQuit`、`ready` 态不落盘 ⇒ **不点按钮不会自己装**，只会反复弹横幅。
+  守卫 `test-workbuddy-launch-env.js`（28→33 断言：静音到 loopback / 读 `ui-port.json` 取端口 / 文件缺失或损坏退兜底 / `app-config` 写入且保留其它键 / 重复启动不反复写盘 / daemon 真有 204 路由）。
 - **加密态账号的 token 刷新存不下来**（上游 1.2.18）：此前只把刷新结果丢进内存缓存（`persisted:false`），**daemon 一重启就退回旧 token**。现在 `lib.wdCompatEncryptAuthJson` 按原备份信封重新加密，`daemon.persistRefreshedAccount` 做**双 CAS**（签名 + 全文）后 `renameSync` 原子写回。
   ⚠️ 配套加了**刷新前可写性预检**（失败返回 `encrypt-account-unavailable`）—— refresh token 一旦被上游轮换就**无法回滚**，不能等刷完才发现存不下。守卫 `test-token-persist-encrypted.js`（22 断言）。
 - **会话列表被后台刷新冲掉勾选**（上游 1.2.18）：自动复制收尾时会整块重渲染，勾选与批量模式丢失。现在加 `readSerial` 竞态防护 + 快照比对，数据没变就不重渲染，并保留 `selected` / 滚动位置 / 批量模式。守卫 `test-session-silent-refresh.js`（18 断言）。
@@ -46,7 +99,111 @@
 - **重启后只剩托盘、看不见窗口**（上游 1.2.18）：`relaunchWorkBuddy` 的 `windowsHide` 由 `true` 改 `false`。
 - **`gateway.json` 账号快照长期不同步**（自研）：面板读到 3 个账号、实际 4 个。现在同步时写回快照，三条保护 —— 完整性前置 · 内容比对（无变化不写盘）· 失败不影响主同步流程。守卫 `test-gateway-account-sync.js`。
 - **自动化选模型会静默选错**（自研）：官方模型与自定义模型可能同名（`custom-local:` 前缀之差），旧逻辑会静默命中错的那个。改成精确匹配，**只有**调用方漏了前缀时才回退。
-- **自维护网关的 Release 污染主程序更新检查**（自研）：`gateway-v1.13.0-panel-wd1` 被当成"新版本主程序"。两层防御 —— daemon 侧要求 tag 匹配 `^v?\d+\.\d+\.\d+$`；CI 侧该 Release 标 `prerelease: true`。
+- **自维护网关的 Release 污染主程序更新检查**（自研）：`gateway-v1.13.0-panel-wd1` 被当成"新版本主程序"。两层防御 —— daemon 侧要求 tag 匹配 `^v?\d+\.\d+\.\d+# 更新日志
+
+本分支（[miantanjun/WorkDaddy-](https://github.com/miantanjun/WorkDaddy-)）是上游 [babygoton/WorkDaddy](https://github.com/babygoton/WorkDaddy) 的个人维护分支。
+本文件按**版本倒序**记录本分支**自有**的全部改动；上游原版历史不在此列。
+
+**读法**
+
+- 版本号与 `scripts/package.json` 的 `version`、面板「关于」页显示的值一致。
+- 每条改动都标注**落地提交**（短哈希）—— `git show <hash>` 可直接看到完整 diff。
+- 分类口径：
+  - **新增功能** —— 用户可见的新能力（新面板入口 / 新 API / 新自动化行为）
+  - **缺陷修复** —— 修掉「本该工作却没工作」或「表现与事实不符」的问题
+  - **优化调整** —— 行为不变但更快、更省、更不易误判（含刻意做到「零行为变化」的改造）
+  - **工程与文档** —— 回归套件、探针、索引、构建与版本口径
+  - **判定不做** —— 评估过、有明确判据、**故意不做**的项（留档，避免以后重复评估）
+
+> ⚠️ **版本断层**：v1.9.2 – v1.9.7 的条目尚未回填（那几版只打了 tag 未补文档）。
+> 需要时用 `git log v1.9.1..v1.9.7 --oneline` 还原。**跨版本的完整清单以 [`docs/DONE-TODO.md`](docs/DONE-TODO.md) 为准**，本文件只管「某一版改了什么」。
+
+## v1.9.8 —— 2026-11-02
+
+**主题**：**吸纳上游 1.2.16 + 1.2.18** + **反代网关转为自维护**（源码入库 / CI 出包 / 出站指纹对齐）
++ **发布链路收口为单一版本号**（网关不再单独发 Release，改当主 Release 的资产）。
+
+> 完整台账（含判定不做的理由、待办优先级）见 [`docs/DONE-TODO.md`](docs/DONE-TODO.md)；
+> 反代取证过程见 [`docs/gateway-audit-2026-10.md`](docs/gateway-audit-2026-10.md)。
+
+### 新增功能
+
+- **「模型切换没生效」提醒**（2026-10-29）：查清了「报错后换个提供方重发，还是报一模一样的错，必须重启客户端才好」的原因 —— **客户端在「报错后重新发送」这条路径上不带模型参数**：日志里正常发送 99/99 都是 `requestOptions.model=deepseek-v4.1-flash`，而报错后重发是 `requestOptions.model=<none>`，于是回落到会话默认模型，也就是报错时那个旧模型。界面上模型已经换到别家，请求还打在原来那家上，自然原样失败。
+  - 判据是**三段式**（都在客户端自己的日志里，逐字节可验证）：`unstable_setSessionModel`（想用的）→ `Sending request`（实际发的，模型不一致）→ 紧随一次 `refusal classified`（确实失败了）。三者齐全才提醒；不一致但请求成功**不提醒**（用户没受影响）。
+  - **精度**：拿 4 天真实日志回放，SET=118 / REQ=3567，只命中 5 次且全部带错误码，276 次正常切换**零误报**；命中的 5 次正是报障现场（10-29 09:06:41 / 09:07:00 / 09:07:53、10-28 15:11:15 / 15:12:51）。
+  - 为什么读日志而不看 DOM：错误块用 constructable stylesheet + CSS Modules hash，类名不可枚举（实测遍历 `cssRules` 筛不出任何带 hash 的 error 类）。
+  - **只提醒、不补救**是刻意的：自动把切换指令补发到真正的运行时会话 id 需要拦客户端内部的 ACP 调用，属于「站调度层」，与插件既定的「配置层 + 指令层 + 观测层」边界冲突，且客户端内部 id 映射一变就静默失效。
+  - 链路：`scripts/model-switch-guard.js`（只读日志尾部 + 策略落盘）→ `GET /api/model-switch-check`（1.5 秒节流，开关关掉直接短路、不解析任何日志）→ inject 4 秒轮询 → 左下角 warning toast（12 秒，含「想用的模型 / 实际用的模型 / 域名」）。
+  - 增强页新增「模型切换」卡片（默认开）。去重键 `切换时刻|实际模型` 挂 `window` —— inject 是全量重建式热更，闭包会重来，挂闭包里同一条旧命中会反复弹。
+  - 性能：384KB 尾部解析 2.66ms、整轮扫描 1.9ms，4 秒一 poll 无压力。
+  - 守卫 `test-model-switch-guard.js`（28 条，含「守卫块里不许出现发消息/改模型的调用」这条只读红线）。
+- **增强页「客户端更新」开关**（2026-10-28）：把上一条里硬编码的更新静音做成可切换策略 —— 想升级时关掉它就能恢复官方更新，不用改代码。
+  开关写 `<dataDir>/client-update-policy.json`（`{mute, updatedAt}`，先写临时文件再 `rename` 原子替换），客户端进程启动时由 `workbuddy-launch-env.js` 读它决定 `WORKBUDDY_UPDATE_URL`：
+  **静音档** → 本机 daemon 的 `GET /v2/update`（永远 204）+ `app-config.json` 的 `startupForceAutoUpdate=false`；**正常档** → 还原官方域（`workbuddy.cn` / `workbuddy.ai`），并把那个键**删掉**（不留「关过一次就永久关」的暗坑）。
+  缺文件 / 坏 JSON / `mute` 不是布尔，一律按**静音**处理 —— 两种失败模式的代价不对称：漏更新只是「没发现有新版」，不静音可能直接装机。
+  面板侧用**两步确认**再重启（Electron 不实现 `window.confirm`，用它按钮会静默点不动），改完点「重启客户端」即生效。
+  接口 `GET /api/client-update-policy` / `POST /api/client-update-policy-set`；daemon 启动时也会重新套用一次（防止用户在客户端里手动改过配置后状态漂移）。
+  守卫 `test-workbuddy-launch-env.js`（33 → 43 断言，新增 G 组：默认静音 / 关掉恢复官方域 / 坏文件退静音 / `mute` 非布尔不认 / 恢复时删键 / 原子写形状 / 接口与启动套用 / **漏导出守卫** / 面板开关与两步重启 / 禁用原生 confirm）。
+- **启动环境隔离 —— 解决「一重启就静默升级」**（上游 1.2.16，提交 `3e3e329`）：把客户端子进程的 `TEMP`/`TMP` 隔离到 `<dataDir>/client-tmp/<profileId>`，并钉住 `WORKBUDDY_UPDATE_URL`。
+  ⚠️ **后来的判定修正见「缺陷修复 · 被动不更新只挡了装」**：TEMP 隔离确实堵住了 #424 的「复用旧安装包」，但「钉官方域」并不能阻止它自动检测并下载新版本 —— 2026-10-28 已追加为「指到本机 204 端点 + 关掉开机静默装」。
+  为什么只钉 URL 不够：官方 Windows updater 会在检查 feed **之前**恢复缓存的 `Setup.exe`（上游 #424），所以必须换 TEMP 让它在缓存目录里找不到包。官方状态机在 `ready` 时会先 `quitAndInstallForStartup()` —— 找不到包返回 false，才走 `continuing normal startup`，此时窗口照常打开。
+  接线两处：`win-launcher.launchWorkBuddy` 与 `daemon.relaunchWorkBuddy`（**双路都要改，只改一路等于没改**）。守卫 `test-workbuddy-launch-env.js`（28 断言）。
+- **client-tmp 定时回收**（自研配套，上游没做）：启动跑一次 + 每 24h 一次；只删超过 7 天的条目；单轮上限 2000 条；**不跟符号链接**；`EBUSY` 计入 failed 不抛；路径必须落在 `client-tmp` 之内。守卫 `test-client-tmp-cleanup.js`（25 断言）。
+- **账号健康检查**（网关）：`POST /panel/api/accounts/{uid}/health`，三步诊断（积分 → 模型目录 → 真实对话），**只诊断不改状态**，`?chat=0` 只读。实测 4 账号 / 3 健康。
+- **网关面板新增「总览」页 + 整体换肤**（网关，`1.13.1-panel-wd4`）：新开 `#overview` 并设为默认落地页，一屏回答四件事 —— 钱够不够 / 用得凶不凶 / 哪个模型被额度卡住 / 哪个号坏了。
+  **后端零改动**：只接两个现成接口（`overview`、`usage?hours=24/168/720`，后者原生就返回 `series` / `by_model` / `credit_by_model`）。
+  视觉层：深色改「深海蓝黑 + 靛蓝」（**不用暖金**）、浅色「蓝白」；卡片网格、大数字排版、`conic-gradient` 缓存命中环、账号状态分布条。
+  三个坑值得记：① 参考稿是**纯静态设计稿**（`fetch` 命中 0），照抄等于零接线；② 我们的 CSP 是 `script-src 'self'` + `style-src 'self'` + **无 `font-src`** ⇒ CDN 图标字体必被拦，图标统一内联 SVG；③ 初始 `hidden` 必须跟默认落地页对齐，否则冷加载会闪一下账号表。
+  守卫 `overview_panel_test.go`（6 条：默认视图 / 无外链资源 / 空态不崩 / 额度三态 / 不限量账号不计入户均 / 除零保护）。
+- **AI 生图接入网关**（网关，`1.13.1-panel-wd5`）：`POST /v1/images/generations` + `/v1/images/edits`（JSON / multipart），上游 `/v2/images/*`。
+  **顺带修好了「不知道哪个模型能生图」**：`nonChatModel` 原来把 tags 含 `text-to-image` 的模型整个过滤掉，客户端永远看不到它们；现在保留并按 `type:"image"` + `capabilities:["image_generation"]` 单独列进 `/v1/models`（实测 `cn:hunyuan-image-alpha`，22 个模型里 1 个生图）。
+  三条红线照抄 Python 版实测结论：**5xx / 传输错误绝不重试**（可能已出图已扣费，重试=双倍付费，只对 `session_dead / hard_credit / soft_rate / model_blocked / account_fault` 换号）· **出图即 `Pool.Release`**（后续转码不占上游名额）· 出站强制 `response_format=url`，客户端要 b64 由网关下载转码且**只允许 `*.myqcloud.com`**（防 SSRF）。
+  踩到一个只有实测才会发现的坑：**上游生图不认 `cn:` 前缀**（`14401 route config not found`），出站必须用裸模型名——chat 路径的 `prepareBody` 有重写，生图走独立端点没经那层。
+  实测：文生图 13.6s / 5.71 积分，b64_json 走通（3.4MB base64），用量按 `hunyuan-image-alpha` 正常入账。
+  守卫 `images_test.go`（9 条，含「5xx 只调一次上游」这条红线）。
+- **新增「容量与调度」面板板块**（网关 `1.13.1-panel-wd5`）：`#capacity` 视图 + `GET /panel/api/capacity`。
+  每个模型三态 —— **空闲 / 拥堵 / 不可用** —— 并给出**判定依据**（模型锁 / 账号冷却 / 在途打满 / 无号）+ 最早恢复时刻 + 调度参数（策略 / 单号在途上限 / 积分保底 / 跨域回退 / 最早到期优先）。
+  与账号池的分工：账号池回答「哪个号不能用」，本页回答「哪个模型此刻还能用、为什么不能用、还要等多久」。
+  口径与选号**同一个** `healthyForModel + inFlightFull`（不是另起一套健康定义），所以面板说可用就真选得到号；禁用 / 暂停号不进分母。
+  两个渲染坑：① `time.Time` 零值不受 `omitempty` 约束，会冒出 `0001-01-01` ⇒ 前端显示「01/01 08:05」，必须用 `*time.Time`；② 模型目录里的 `auto` 是「让上游自己选」的占位项，列进来只会虚增总数。
+  守卫 `capacity_test.go`（10 条）+ `capacity_panel_test.go`（4 条）。
+- **DSH / Claude Code 项目规则标题去路径**（网关 `1.13.1-panel-wd5`）：客户端注入的 `<system-reminder># Instructions from: C:\Users\…\AGENTS.md` 只把**标题行的本地路径**收敛成文件名，正文逐字保留；只动 `system`/`developer`（user 消息里是用户输入，改它就是篡改）。
+  Go 版没有 Python 的「运行时摘要 / 历史截断」两条会伤正文的路径，所以正文天然完整，不需要搬整套提取逻辑；脱敏仍照常作用于规则正文（含上游已拒收的固定身份句时整条会 11128，归一比保留原文更有用）。
+  守卫 `project_rules_test.go`（7 条，含「多份规则顺序不乱」「二次处理幂等」）。
+- **余额刷新失败显式留痕（B11）**（网关 `1.13.1-panel-wd5`）：探测结论 —— Go 版**确实有这个坑**，形态是「静默」而不是崩溃：`RunBalanceRefreshNow` 失败只打一行 stdout，`credits` 保持上次成功刷新的旧值，面板照常显示「余额刷新 X 分钟前」，一个 token 已死的账号会长期顶着几万旧积分看起来完全正常。
+  修法：`Pool.SetCreditsError` 留痕 + `Status.credits_error` 透出 + 面板积分后挂「陈旧」标记（hover 看原因），刷新成功自动清除（幂等，成功路径无条件调用）。
+  守卫 `credits_error_test.go`（3 条）。
+
+
+### 缺陷修复
+
+- **生图模型在对话里根本用不了**（网关 `1.13.1-panel-wd7`）：客户端**没有生图入口**，所以选中 `cn:hunyuan-image-alpha` 之后走的还是 `POST /v1/chat/completions` + `stream:true`，上游对话端点直接回 `400 {"code":11103,"msg":"Backend [hunyuan-stream] is not supported"}`；网关又把 11103 归为可重试错误 ⇒ **连换 7 个号、每次 4~5s 全白跑**，最后 503（日志实测 `10:01:51` 之前 3 个号各一条 11103，`total=5.5s` → 503）。
+  修法：chat 入站处识别生图模型，**就地转走真生图链路**，再把图片以 markdown 贴回对话。于是「在对话里选生图模型」从「一定失败」变成「真的能出图」，并且复用 `/v1/images/*` 的选号 / 在途租约 / 计费记录，两条入口同一套口径（把选号轮转抽成了 `generateImage`，`images()` 只负责格式化）。
+  - `stream=true` 时**先发响应头 + 一个空 role delta 开流**，再出图：真实出图 10~20s，不发头会被客户端当超时掐掉（实测 TTFB 38~47ms、总耗时 11~18.5s）。
+  - HTTP 200 一旦发出就改不回来 ⇒ **失败以正文回给对话**（`⚠️ <原因>`），non-stream 仍回真正的 4xx/5xx。
+  - `hidden` 黑名单**先于**分流判定：被配置藏起来的模型仍直接拒绝，不能借生图链路绕过去。
+  - 只取**最后一条 user 消息**（历史里的旧图/旧提示词不混进这一轮）；`content` 支持字符串与 part 数组，图优先 data URL（走 `/v2/images/edits`）、其次 https；prompt 超 4000 **字符**按 rune 截断，不切坏 UTF-8。
+  - ⚠️ 判定**只读模型目录缓存快照**，不在请求线程发起 `FetchModels`：早期写法给每个对话请求平白加了一次上游调用，把 `cross_domain_fallback` 的「一次 chat = 一次上游调用」计数直接打乱（测试当场抓到）。为此新增启动预热 `WarmModelCatalog()`（日志实测「启动预热模型目录成功：22 个模型」），关掉「刚重启 + 直接开聊」那段识别失明的窗口。
+  - 流水行现在带账号：`imageGenResult` 多了 `uid/nick`，否则生图请求在日志里只剩 `-`，事后查不了「哪个号画的」。
+  - 有意不做：不伪造 token 用量（生图按张计费，硬编 `prompt_tokens` 只会污染统计）；失败不假装成功。
+  - 守卫 `chat_image_test.go`（13 条）：转端点 / 剥 `cn:` 前缀 / 强制 `response_format=url` / 首帧开流 / 非流式形状 / 只取最后一条 user / part 数组与 edits / 空 prompt 400 且不打上游 / rune 截断 / 失败原因进正文 / 5xx 不换号 / 普通模型不被误拦 / **热路径不拉目录**。
+- **「被动不更新」只挡了装，没挡「查 + 下」**（对上游 1.2.16 那次判定的修正）：`WORKBUDDY_UPDATE_URL` 当时钉的是**官方域** `https://www.workbuddy.cn`，而它是客户端 `buildUpdateFeedUrl()` 的唯一入口（`process.env.WORKBUDDY_UPDATE_URL || provider || copilot.tencent.com`）——钉官方域等于让它照常去问有没有新版。实测 2026-10-28 02:21 它拿到 `5.9.3.42398134`，**45 秒自动下完 429MB**，状态 `ready`，左下角弹出「新版本 5.9.3 / 重启更新」。
+  TEMP 隔离本身没问题（包确实落在 `client-tmp/workbuddy-cn/workbuddy-update-x64/`，不在系统 TEMP），但它只解决「复用系统 TEMP 里的旧安装包」（#424），对「自己下一份新的」完全无效 —— **钉 URL ≠ 禁止更新**。
+  修法三层：① `WORKBUDDY_UPDATE_URL` 改指本机 daemon 新增的 `GET /v2/update`（**永远 204** = 官方语义里的「没有新版本」），读不到 `ui-port.json` 时退到 `127.0.0.1:9`（连接被拒 ⇒ 检查失败 ⇒ 同样不下）；② 启动前把 `app-config.json` 的 `startupForceAutoUpdate` 写成 `false`，掐掉 `early-silent-startup-update` 的 `quitAndInstallForStartup()`；③ 清掉已下载的 429MB 包。
+  ⚠️ 这三层随后被做成了增强页开关（见上条「增强页『客户端更新』开关」），不再是硬编码 —— 关掉开关即可恢复官方更新行为。
+  另确认 win32 **没有**「退出即装」和「启动扫描即装」：无 `pending-update.json`（那是 macOS 的 zip 快更路径，要求 `extractedAppPath`/`zipPath`/`stagedAppPath`）、无 `autoInstallOnAppQuit`、`ready` 态不落盘 ⇒ **不点按钮不会自己装**，只会反复弹横幅。
+  守卫 `test-workbuddy-launch-env.js`（28→33 断言：静音到 loopback / 读 `ui-port.json` 取端口 / 文件缺失或损坏退兜底 / `app-config` 写入且保留其它键 / 重复启动不反复写盘 / daemon 真有 204 路由）。
+- **加密态账号的 token 刷新存不下来**（上游 1.2.18）：此前只把刷新结果丢进内存缓存（`persisted:false`），**daemon 一重启就退回旧 token**。现在 `lib.wdCompatEncryptAuthJson` 按原备份信封重新加密，`daemon.persistRefreshedAccount` 做**双 CAS**（签名 + 全文）后 `renameSync` 原子写回。
+  ⚠️ 配套加了**刷新前可写性预检**（失败返回 `encrypt-account-unavailable`）—— refresh token 一旦被上游轮换就**无法回滚**，不能等刷完才发现存不下。守卫 `test-token-persist-encrypted.js`（22 断言）。
+- **会话列表被后台刷新冲掉勾选**（上游 1.2.18）：自动复制收尾时会整块重渲染，勾选与批量模式丢失。现在加 `readSerial` 竞态防护 + 快照比对，数据没变就不重渲染，并保留 `selected` / 滚动位置 / 批量模式。守卫 `test-session-silent-refresh.js`（18 断言）。
+- **session cwd 修复无限快重试 + 日志泄漏路径**（上游 1.2.18）：失败退避 30s 起翻倍、封顶 5 分钟；日志**只记错误码**，不再写完整工作区路径与异常原文。
+- **重启后只剩托盘、看不见窗口**（上游 1.2.18）：`relaunchWorkBuddy` 的 `windowsHide` 由 `true` 改 `false`。
+- **`gateway.json` 账号快照长期不同步**（自研）：面板读到 3 个账号、实际 4 个。现在同步时写回快照，三条保护 —— 完整性前置 · 内容比对（无变化不写盘）· 失败不影响主同步流程。守卫 `test-gateway-account-sync.js`。
+- **自动化选模型会静默选错**（自研）：官方模型与自定义模型可能同名（`custom-local:` 前缀之差），旧逻辑会静默命中错的那个。改成精确匹配，**只有**调用方漏了前缀时才回退。
+；CI 侧该 Release 标 `prerelease: true`。
+- **⭐ 面板「更新网关」下载的是上游原版，把本仓改动全盖掉**（2026-11-02，自研）：`scripts/api-gateway.js` 三个常量一直指着上游作者的仓库 —— `GATEWAY_REPO = 'linguo2625469/workbuddy2api-panel'`、`GATEWAY_VERSION = 'v1.13.0'`、资产名 `wb2api-panel-v1.13.0-windows-amd64.zip`。也就是说 **wd1–wd7 从来没有通过这个按钮生效过**，用户点一次"更新"就退回上游原版。现改为指向自家仓库 + 主 Release 的资产；保留上游源作**兜底**（主 Release 拿不到时才用，且必须打日志注明"本仓改动会被覆盖"）。
+  - 起因：老叶发现 Releases 列表里全是 `gateway-v1.13.1-panel-wd4` 这类标签，本体 `v1.9.7` 反而不显眼，问「网关没必要单独发吧」。查下去才发现这条下载链路根本没接上自家产物。
+- **两个网关 Release 没标 prerelease，污染 `/releases/latest`**（2026-11-02，自研）：`gateway-v1.13.0-panel` 与 `-wd1` 是 `prerelease: false`。GitHub 的 latest 只看「非草稿 + 非 prerelease」，于是 `releases/latest` 指向网关而不是主程序。已删除这 4 个孤儿 Release（没有任何代码在下载它们）。
 
 ### 优化调整
 
@@ -57,14 +214,22 @@
   `Origin`/`Referer` 域名由 `www.codebuddy.cn` 改 `www.workbuddy.cn`（原值与同一请求的 `X-Domain` 自相矛盾）。
   取证细节见 [`docs/gateway-audit-2026-10.md`](docs/gateway-audit-2026-10.md)。
 
+- **网关发布并入主 Release，对外只留一个版本号**（2026-11-02）：CI 在 `build-win.yml` 里顺带编网关、打成 `wb2api-windows-amd64.zip`（内含 `wb2api.exe` + `config.example.json`）+`checksums.txt`，和 4 个安装包一起挂到同一个 `v1.9.8` Release。
+  - **为什么不是独立 job**：两个 job 各自往同一个 Release 传资产会有竞态（正文可能被覆成空）；放在同一个 job 里顺序天然确定，且 Go 工具链上面已装好。
+  - **面板仍能「只更新网关」**：`/api/gateway/install` 现在是拉主 Release 的 zip（8.9 MB），换 exe 不重装主程序。安装前会停网关、装完按原状态拉回。
+  - 校验三点：`main.go` 的 `appVersion` == `api-gateway.js` 的 `GATEWAY_VERSION` == 二进制内可搜到的版本串，任一处不一致 CI 直接失败（否则面板永久显示「版本漂移」）。
+  - `build-gateway.yml` 退化为「只编不发」的手动 workflow（不动主程序单独验证网关能不能编过）。
+
 ### 工程与文档
 
 - **Go 网关源码入库**：`vendor/wb2api-go/`（182 个 `.go` / 54,799 行）。`bash vendor/wb2api-go/build.sh` 32 秒出包（便携 Go 在 `%APPDATA%\WorkDaddy\golang\go`）。
   ⚠️ 入库时**必须删掉上游的 `.github/` 与 `.gitignore`** —— 前者会被 GitHub 当成本仓 CI 跑起来，后者（`*.md` + `!README.md`）会**静默排除** `internal/prompt/defaultprompt.md` 这类源码必需文件。
-- **网关 CI 出包**：`.github/workflows/build-gateway.yml`，推 `gateway-v*` → 编译 + Release（`wb2api.exe` + `.sha256`）。该 tag 形状**不匹配** `build-win.yml` 的 `v*`，不会误触发主程序发版。
-- **网关自维护修订号**：`appVersion = "1.13.0-panel-wd<n>"`，每改一次网关行为 +1。上游基线也叫 `1.13.0-panel`，同号就分不清面板上报的是哪个包。
+- **网关 CI 出包**：已并入 `.github/workflows/build-win.yml`（见上）。`build-gateway.yml` 只剩 `workflow_dispatch`，只出 artifact。**不再推 `gateway-v*` 标签** —— 那会再造出孤儿 Release。
+- **网关自维护修订号**：`appVersion = "1.13.1-panel-wd<n>"`（当前 **wd8**），每改一次网关行为 +1。上游基线也叫 `1.13.x-panel`，同号就分不清面板上报的是哪个包。
+  ⚠️ 这个值**不是** GitHub tag：tag 是主程序版本（`v1.9.8`）。2026-11-02 之前两者混在一起，才出现 `gateway-v1.13.1-panel-wd4` 这种怪 tag。
 - **新增 `docs/`**：`DONE-TODO.md`（已办 / 待办总清单）+ `gateway-audit-2026-10.md`（反代取证报告）。
-- **回归基线**：82 套件 / 4760 断言全通过（另 `tools/updater-guard.js` 18 PASS）；Go 17 个包全通过。
+- **回归基线**：83 套件 / 4812 断言全通过（另 `tools/updater-guard.js` 18 PASS）；Go 17 个包全通过。
+- **新增守门 `test-api-gateway.js` [I] 组**（9 条）：`GATEWAY_REPO` 必须指向自家仓库、资产名固定、主源优先/兜底顺序、`GATEWAY_VERSION` 必须等于 `cmd/server/main.go` 的 `appVersion` —— 再有人把源改回上游或版本号脱节，立刻红。
 
 ### 判定不做
 

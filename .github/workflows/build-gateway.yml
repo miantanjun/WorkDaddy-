@@ -2,24 +2,15 @@ name: Build Gateway (Go sidecar)
 
 # 编译 WorkDaddy 的反代网关 sidecar（vendor/wb2api-go）。
 #
-# 为什么单独一个 workflow：
-#   - 它的发布节奏和主程序不同（网关改得比面板勤）
-#   - 产物只有一个 exe，不需要 Inno Setup 那一整套
-#   - 主程序的 build-win.yml 已经装了 Go，但只用来编译 windows-native，不碰网关
+# ⚠️ 2026-11-02 起：**网关不再单独发 Release**。
+#   正式发版走 `v*` 标签 → build-win.yml 会把网关一起编译、打进主 Release 的
+#   `wb2api-windows-amd64.zip` 资产（面板「更新网关」就拉这个）。
+#   历史遗留的 `gateway-v*` Release 已作废（它们是孤儿资产，没有任何代码在下载）。
 #
-# 触发：
-#   - 推 gateway-v* 标签 → 编译并挂到 Release（用户可直接下载替换）
-#   - 手动触发 → 只编译 + 上传 artifact，不发 Release（除非勾选 release）
+# 这个 workflow 现在只剩一个用途：**手动触发**，在不动主程序的前提下单独验证
+# 网关能不能编过（只出 artifact，不发任何 Release）。
 on:
-  push:
-    tags:
-      - 'gateway-v*'
   workflow_dispatch:
-    inputs:
-      release:
-        description: '是否发布到 GitHub Release'
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -99,31 +90,5 @@ jobs:
             vendor/wb2api-go/dist/wb2api.exe.sha256
           retention-days: 30
 
-      # 只有打 gateway-v* 标签、或手动勾了 release 才发 Release。
-      # ⚠️ prerelease: true 是必须的，不是装饰。
-      # 本仓库同时发两种 Release：主程序 `v1.9.7` 和网关 sidecar `gateway-v…`。
-      # GitHub 的 `/releases/latest` 只跳过「草稿 + prerelease」，不标这个的话
-      # sidecar 会被当成"最新版"，daemon 的更新检查就会把面板上的最新版本显示成
-      # `gateway-v1.13.0-panel-wd1`（2026-10-27 实测中过一次）。
-      # daemon 侧也加了 tag 格式过滤，两层保险。
-      - name: 发布到 GitHub Release
-        if: startsWith(github.ref, 'refs/tags/gateway-v') || inputs.release
-        uses: softprops/action-gh-release@v2
-        with:
-          prerelease: true
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/gateway-v') && github.ref_name || format('gateway-v{0}', steps.ver.outputs.app) }}
-          name: 网关 wb2api ${{ steps.ver.outputs.app }}
-          body: |
-            反代网关 sidecar（Go，源码基线 ${{ steps.ver.outputs.app }}）。
-
-            安装：把 `wb2api.exe` 覆盖到 `%APPDATA%\WorkDaddy\gateway\wb2api.exe`，
-            然后在面板「反代网关」卡片里重启网关。**不要停 daemon**，它跟网关是两个进程。
-
-            校验：`wb2api.exe.sha256` 是本文件的 SHA-256。
-
-            本分支由 WorkDaddy 自行维护，基线来自上游 `linguo2625469/workbuddy2api-panel`
-            的 `1.13.0-panel`，改动见仓库 `vendor/wb2api-go/README-WORKDADDY.md`。
-          files: |
-            vendor/wb2api-go/dist/wb2api.exe
-            vendor/wb2api-go/dist/wb2api.exe.sha256
-          generate_release_notes: true
+      # 不发 Release：正式发版由 build-win.yml 把网关资产挂到主 Release。
+      # 需要发布时请发主版本标签（v*），不要再产生 gateway-v* Release。

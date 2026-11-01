@@ -668,8 +668,12 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			remain, total, expiring, earliestAt, earliestRemaining, buckets, err := s.cfg.Upstream.UserResourceSnapshot(a, expiringSoon)
 			if err != nil {
 				log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)
+				// 显式留痕：面板据此把"陈旧积分"标出来。此前只打 stdout，
+				// 一个 token 已死的账号会无限期显示旧余额，看起来完全正常。
+				s.cfg.Pool.SetCreditsError(uid, err.Error())
 				return
 			}
+			s.cfg.Pool.SetCreditsError(uid, "")
 			s.cfg.Pool.ReenableIfCredits(uid, remain, total)
 			s.cfg.Pool.SetCreditsSnapshot(uid, pool.CreditsSnapshot{
 				Remain:            remain,

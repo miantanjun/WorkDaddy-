@@ -26,8 +26,13 @@ const ok = (cond, label, extra) => {
 };
 
 // ── A. 集成层：版本 + preserve（升级不丢配置）──
-ok(gw.GATEWAY_VERSION === 'v1.13.0', 'A1 钉死版本 = v1.13.0（v1.11.9 → v1.13.0）', gw.GATEWAY_VERSION);
-ok(gw.ASSET_NAME === 'wb2api-panel-v1.13.0-windows-amd64.zip', 'A2 资产名自动跟随版本', gw.ASSET_NAME);
+// 2026-11-02：网关不再单独发 Release，语义改了两处 ——
+//   · GATEWAY_VERSION 从「上游 tag v1.13.0」变成「二进制自报的 appVersion」
+//   · ASSET_NAME 从「跟着版本拼名」变成「固定名」（版本看主 Release 的 tag）
+ok(/^\d+\.\d+\.\d+-panel-wd\d+$/.test(gw.GATEWAY_VERSION),
+  'A1 版本 = 本仓自维护的 appVersion（x.y.z-panel-wdN）', gw.GATEWAY_VERSION);
+ok(gw.ASSET_NAME === 'wb2api-windows-amd64.zip',
+  'A2 资产名固定不随版本变（版本看主 Release tag）', gw.ASSET_NAME);
 
 const TEMPLATE = {
   listen: ':7863',

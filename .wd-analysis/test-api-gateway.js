@@ -418,6 +418,39 @@ console.log('\n== E. 模型闭环：注册进 models.json（只增删自己的�
 }
 
 /* ==================================================================== */
+console.log('\n== I. 网关发布源：单一版本号（主 Release 资产）==');
+{
+  // 2026-11-02 事故：GATEWAY_REPO 指着上游 linguo2625469，面板「更新网关」下载的是**上游原版**，
+  // 把本仓 wd1~wd8 的改动全盖掉了；同时 CI 还在发 gateway-v* 孤儿 Release 污染 /releases/latest。
+  // 这一组是守门：再有人把源改回上游、或版本号与二进制脱节，立刻红。
+  ok(GW.GATEWAY_REPO === 'miantanjun/WorkDaddy-',
+    'I1 ⭐ 网关源必须指向自家仓库（不是上游 linguo2625469）', GW.GATEWAY_REPO);
+  ok(GW.ASSET_NAME === 'wb2api-windows-amd64.zip',
+    'I2 资产名固定不带版本号（版本看 Release tag）', GW.ASSET_NAME);
+
+  const cands = GW.gatewayDownloadCandidates('v1.9.8');
+  ok(cands.length === 2, 'I3 主源 + 兜底共 2 项', cands.map((c) => c.repo));
+  ok(cands[0].repo === 'miantanjun/WorkDaddy-' && cands[0].tag === 'v1.9.8' && cands[0].asset === GW.ASSET_NAME && cands[0].legacy === false,
+    'I4 ⭐ 第一优先 = 自家主 Release 的该 tag', cands[0]);
+  ok(cands[1].repo === 'linguo2625469/workbuddy2api-panel' && cands[1].legacy === true,
+    'I5 兜底 = 上游官方包（且标 legacy，调用方必须打日志）', cands[1]);
+
+  ok(GW.gatewayDownloadCandidates('').length === 1 && GW.gatewayDownloadCandidates('')[0].legacy === true,
+    'I6 没给主 tag ⇒ 只剩兜底（不拼出 download// 这种坏 URL）');
+  ok(GW.gatewayDownloadCandidates(undefined).length === 1, 'I7 undefined 也不炸');
+
+  const base = GW.gatewayDownloadBase(cands[0]);
+  ok(base.endsWith('/releases/download/v1.9.8/') && base.startsWith('https://gh-proxy.com/https://github.com/'),
+    'I8 下载前缀 = gh-proxy 镜像 + 标准 release 路径', base);
+
+  // 集成层的 GATEWAY_VERSION 必须等于二进制自报的 appVersion，否则面板永久「版本漂移」。
+  const mainGo = fs.readFileSync('D:/WorkDaddy/vendor/wb2api-go/cmd/server/main.go', 'utf8');
+  const m = /appVersion\s*=\s*"([^"]+)"/.exec(mainGo);
+  ok(!!m && m[1] === GW.GATEWAY_VERSION,
+    'I9 ⭐ GATEWAY_VERSION 必须等于 cmd/server/main.go 的 appVersion', { binary: m && m[1], integration: GW.GATEWAY_VERSION });
+}
+
+/* ==================================================================== */
 try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (_) {}
 
 if (failures.length) {

@@ -217,8 +217,16 @@ const {
 } = require('./sentry-report.js');
 const { createUsageReporter } = require('./usage-report.js');
 const { getProfile, profileDataDir, listInstalledModelSources } = require('./profiles.js');
-const { getWorkBuddyLaunchEnv } = require('./workbuddy-launch-env.js');
+const {
+  getWorkBuddyLaunchEnv,
+  readUpdatePolicy,
+  writeUpdateMute,
+  applyStartupForceAutoUpdate,
+  SUPPORTED_PROFILE_IDS: UPDATE_POLICY_PROFILES,
+} = require('./workbuddy-launch-env.js');
 const { clientTmpRoot, runClientTmpCleanup } = require('./client-tmp-cleanup.js');
+// 模型切换守卫：只读客户端日志，判断「切了模型但请求还发往旧模型」。纯提醒，不参与发请求。
+const { readGuardPolicy, writeGuardEnabled, scanModelSwitch } = require('./model-switch-guard.js');
 const plat = require('./platform.js');
 const { readWorkBuddyTarget } = require('./workbuddy-target.js');
 // CodeBuddy 渲染层受 CSP 限制，fetch http://127.0.0.1 会被直接拦掉；面板的 api() 改走
@@ -850,7 +858,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         CIM 查询加 -Filter 服务端过滤、周期性刷新 5s→15s）与 **1.2.41 失效卷保护**（会话工作目录巡检
 //         跳过卷已不存在的 cwd，同卷根只提示一次）；1.2.42–1.2.46 的「同步个性化」（persona 共享）
 //         **明确不吸纳**（用户判定对自己没用）。
-const DAEMON_VERSION = '1.9.7';
+const DAEMON_VERSION = '1.9.8';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 //
@@ -902,7 +910,7 @@ const UPSTREAM_VERSION = '1.2.18';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.9.7-20261014-upstream-1214-probe-recursion-r1';
+const DAEMON_BUILD_ID = 'release-1.9.8-20261102-unify-release-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -929,6 +937,8 @@ const IS_PORTABLE_WIN = IS_WIN && fs.existsSync(path.join(WORKDADDY_DIR_WIN, 'Wo
 const UI_PORT_BASE = parseInt(process.env.WBSWITCH_PORT || String(profileUiPortCandidates(PROFILE.id)[0]), 10);
 const ALLOW_UI_PORT_FALLBACK = !process.env.WBSWITCH_PORT;
 let ACTUAL_PORT = UI_PORT_BASE; // 实际监听端口（可能回退到当前 profile 的备用端口）
+// 模型切换守卫的接口级节流缓存（见 /api/model-switch-check）。
+let switchGuardCache = { at: 0, hit: null, key: 0 };
 const PROFILE_CDP_PORT = { 'workbuddy-cn': 9222, 'workbuddy-ai': 9223, 'codebuddy-cn': 9224, 'codebuddy-intl': 9225 };
 const CDP_PORT_HINT = process.env.WBSWITCH_CDP_PORT
   ? parseInt(process.env.WBSWITCH_CDP_PORT, 10)
@@ -12713,6 +12723,12 @@ function accountBackupFile(uid) {
 let gatewayChild = null;
 let gatewayInstallInFlight = null;
 
+/* 隧道（frpc）托管：与网关同构，见下方「隧道托管」整段注释 */
+let tunnelChild = null;
+let tunnelRestartTimer = null;
+let tunnelRestartAttempts = 0;
+let tunnelLastExit = null;
+
 
 function gatewayStatus() {
   const paths = apiGateway.gatewayPaths(DATA_DIR);
@@ -13027,17 +13043,44 @@ async function gatewayInstall() {
     fs.mkdirSync(paths.authDir, { recursive: true });
     fs.mkdirSync(paths.stateDir, { recursive: true });
     // ⚠️ GitHub release 直连极慢（本机实测 ~0.06MB/s）⇒ 走公共镜像；镜像只改传输不改字节，靠 SHA-256 兜底。
-    const base = 'https://gh-proxy.com/https://github.com/' + apiGateway.GATEWAY_REPO
-      + '/releases/download/' + apiGateway.GATEWAY_VERSION + '/';
-    const zipRes = await fetch(base + apiGateway.ASSET_NAME);
-    if (!zipRes.ok) throw new Error('下载网关失败：HTTP ' + zipRes.status);
-    const zip = Buffer.from(await zipRes.arrayBuffer());
-    if (!zip.length) throw new Error('下载内容为空');
-    const sumRes = await fetch(base + apiGateway.CHECKSUMS_NAME);
-    const expected = sumRes.ok ? apiGateway.parseChecksums(await sumRes.text(), apiGateway.ASSET_NAME) : '';
-    if (!expected) throw new Error('拿不到官方 checksums.txt —— 拒绝在无校验的情况下安装');
-    const actual = apiGateway.sha256(zip);
-    if (actual !== expected) throw new Error('SHA-256 不匹配（期望 ' + expected.slice(0, 12) + '…，实际 ' + actual.slice(0, 12) + '…）—— 已中止');
+    // ⭐ 2026-11-02：网关不再单独发 Release，而是挂在**主程序 Release** 下当资产。
+    //    候选源按优先级试（自家 → 上游兜底），任一环节失败都换下一个，全部失败才报错。
+    const candidates = apiGateway.gatewayDownloadCandidates('v' + DAEMON_VERSION);
+    const failures = [];
+    let zip = null;
+    let actual = '';
+    let usedLegacy = false;
+    let usedSource = '';
+    for (const cand of candidates) {
+      const base = apiGateway.gatewayDownloadBase(cand);
+      try {
+        const zipRes = await fetch(base + cand.asset);
+        if (!zipRes.ok) throw new Error('HTTP ' + zipRes.status);
+        const buf = Buffer.from(await zipRes.arrayBuffer());
+        if (!buf.length) throw new Error('下载内容为空');
+        const sumRes = await fetch(base + cand.checksums);
+        const expected = sumRes.ok ? apiGateway.parseChecksums(await sumRes.text(), cand.asset) : '';
+        if (!expected) throw new Error('拿不到 checksums.txt —— 拒绝在无校验的情况下安装');
+        const got = apiGateway.sha256(buf);
+        if (got !== expected) {
+          throw new Error('SHA-256 不匹配（期望 ' + expected.slice(0, 12) + '…，实际 ' + got.slice(0, 12) + '…）');
+        }
+        zip = buf;
+        actual = got;
+        usedLegacy = cand.legacy;
+        usedSource = cand.repo + '@' + cand.tag;
+        break;
+      } catch (e) {
+        failures.push(cand.repo + '@' + cand.tag + '：' + String((e && e.message) || e));
+      }
+    }
+    if (!zip) throw new Error('下载网关失败（所有源都不可用）：' + failures.join('；'));
+    if (usedLegacy) {
+      // 走到这里说明主 Release 没挂网关资产 —— 装完会把本仓对网关的改动覆盖回上游原版，必须留痕。
+      log('[gateway] ⚠️ 主 Release 无网关资产，已回退上游官方包 ' + usedSource + '（本仓改动会被覆盖）');
+    } else {
+      log('[gateway] 网关来源 ' + usedSource);
+    }
     const written = apiGateway.extractZipToDir(zip, paths.root, {
       pick: (name) => name === 'wb2api.exe' || name === 'config.example.json',
     });
@@ -13320,6 +13363,271 @@ function refreshGatewayIfEnabled() {
     gatewayStart();
   }).catch((error) => {
     log('[gateway] 启动自动拉起失败: ' + String((error && error.message) || error));
+  });
+}
+
+/* ================= 隧道（frpc）托管 =================
+ * 为什么不编进 wb2api-go：两者只靠 127.0.0.1:7863 这条 HTTP 关系相连，编在一起会
+ *   (a) 网关版本被 frp 版本绑架（升一个要重编另一个）；
+ *   (b) 故障域耦合（一个崩带崩另一个，面板上只显示「全挂」，分不清哪段坏了）。
+ * 分工：daemon 管进程生命周期，网关完全不感知隧道。
+ *
+ * 链路：公网 https://api.lyonn.fun:17443 → 家宽 frps:17000/17443
+ *        → 本机 frpc（https2http 插件在此终结 TLS）→ 网关 127.0.0.1:7863
+ *
+ * ⚠️ 2026-10-30 的教训：frpc 原来靠**手动**起（文件还放在 .wd-tmp 临时目录），
+ *    凌晨 02:31 进程没了以后整整一天没人知道，公网地址全是死的。本段就是补这个洞：
+ *    托管 + 退避重拉 + 面板状态，三件一起才有意义。
+ * ⚠️ frpc 是**纯出站**进程、不监听业务端口 ⇒ 不能像网关那样按端口反查 pid。
+ *    改用它自带的 admin API（webServer，只回环 7400）看 proxy 的 status === 'running'。
+ *    这样「进程在、但 proxy 没起来」（服务器拒了 / token 错 / 证书坏）也能如实暴露，
+ *    而不是显示「运行中」骗自己。
+ */
+const TUNNEL_RESTART_MAX = 20;
+const TUNNEL_RESTART_CAP_MS = 60000;
+
+function tunnelPaths() {
+  const root = path.join(DATA_DIR, 'tunnel');
+  return {
+    root: root,
+    exe: path.join(root, IS_WIN ? 'frpc.exe' : 'frpc'),
+    config: path.join(root, 'frpc.toml'),
+    log: path.join(root, 'frpc.log'),
+  };
+}
+
+function tunnelReadEnabled() {
+  try {
+    const settings = readWorkbuddySettings();
+    return !!(settings.wbs && settings.wbs.tunnel && settings.wbs.tunnel.enabled);
+  } catch (_) { return false; }
+}
+
+function tunnelSetEnabled(enabled) {
+  const settings = readWorkbuddySettings();
+  if (!settings.wbs) settings.wbs = {};
+  if (!settings.wbs.tunnel) settings.wbs.tunnel = {};
+  settings.wbs.tunnel.enabled = !!enabled;
+  writeWorkbuddySettings(settings);
+  return !!enabled;
+}
+
+/** 从 frpc.toml 取 admin API 口子与远端映射（配置是用户可改的，所以每次都读盘，不缓存）。 */
+function tunnelConfigInfo() {
+  const paths = tunnelPaths();
+  let text = '';
+  try { text = fs.readFileSync(paths.config, 'utf8'); } catch (_) { return null; }
+  const num = (re) => { const m = re.exec(text); return m ? Number(m[1]) : 0; };
+  const str = (re) => { const m = re.exec(text); return m ? m[1] : ''; };
+  return {
+    adminPort: num(/webServer\.port\s*=\s*(\d+)/),
+    adminUser: str(/webServer\.user\s*=\s*"([^"]*)"/),
+    adminPass: str(/webServer\.password\s*=\s*"([^"]*)"/),
+    remotePort: num(/remotePort\s*=\s*(\d+)/),
+    serverAddr: str(/serverAddr\s*=\s*"([^"]*)"/),
+    proxyName: str(/name\s*=\s*"([^"]*)"/),
+  };
+}
+
+/**
+ * 探 frpc 的 admin API（4s 缓存；force 用于启停后立即刷新）。
+ * 返回 { alive, proxies:[{name,status,err}], reason }。
+ * ⚠️ 401 也算 alive —— 那说明进程在、只是密码对不上，比误判「没运行」然后重复拉起好。
+ */
+async function tunnelProbe(force) {
+  const info = tunnelConfigInfo();
+  if (!info || !info.adminPort) return { alive: false, proxies: [], reason: 'no-config' };
+  const now = Date.now();
+  if (!force && tunnelProbe.cache && (now - tunnelProbe.cache.at) < 4000) return tunnelProbe.cache.value;
+  const headers = info.adminUser
+    ? { Authorization: 'Basic ' + Buffer.from(info.adminUser + ':' + info.adminPass).toString('base64') }
+    : {};
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2500);
+  let value = { alive: false, proxies: [], reason: 'unreachable' };
+  try {
+    const res = await fetch('http://127.0.0.1:' + info.adminPort + '/api/status', { signal: ctrl.signal, headers: headers });
+    if (res.ok) {
+      const j = await res.json();
+      const proxies = [];
+      for (const type of ['tcp', 'udp', 'http', 'https']) {
+        for (const p of (Array.isArray(j[type]) ? j[type] : [])) {
+          proxies.push({ name: String(p.name || ''), status: String(p.status || ''), err: String(p.err || '') });
+        }
+      }
+      value = { alive: true, proxies: proxies, reason: '' };
+    } else {
+      value = { alive: res.status === 401, proxies: [], reason: 'http-' + res.status };
+    }
+  } catch (_) {
+    value = { alive: false, proxies: [], reason: 'unreachable' };
+  } finally {
+    clearTimeout(timer);
+  }
+  tunnelProbe.cache = { at: Date.now(), value: value };
+  return value;
+}
+
+function tunnelStatus() {
+  const paths = tunnelPaths();
+  const info = tunnelConfigInfo();
+  const installed = fs.existsSync(paths.exe) && fs.existsSync(paths.config);
+  const ownRunning = !!(tunnelChild && tunnelChild.pid && tunnelChild.exitCode === null);
+  const cache = tunnelProbe.cache && tunnelProbe.cache.value;
+  const alive = !!(cache && cache.alive);
+  const proxies = (cache && cache.proxies) || [];
+  const up = proxies.filter((p) => p.status === 'running');
+  return {
+    installed: installed,
+    running: ownRunning || alive,
+    ownsProcess: ownRunning,
+    pid: ownRunning ? tunnelChild.pid : 0,
+    // ⭐ connected 才是「隧道真通了」；running 只代表进程在
+    connected: up.length > 0,
+    proxyCount: proxies.length,
+    upCount: up.length,
+    proxies: proxies,
+    autoStart: tunnelReadEnabled(),
+    restartAttempts: tunnelRestartAttempts,
+    lastExit: tunnelLastExit,
+    serverAddr: info ? info.serverAddr : '',
+    remotePort: info ? info.remotePort : 0,
+    publicUrl: (info && info.remotePort && info.serverAddr)
+      ? 'https://' + info.serverAddr + ':' + info.remotePort + '/v1' : '',
+    logSize: (() => { try { return fs.statSync(paths.log).size; } catch (_) { return 0; } })(),
+  };
+}
+
+/** 启动隧道子进程（stdio 用 ['ignore','pipe','pipe']：本环境给子进程建 stdin 管道会 EBUSY）。 */
+function tunnelStart(options) {
+  const opts = options || {};
+  const paths = tunnelPaths();
+  if (tunnelChild && tunnelChild.exitCode === null) {
+    return { started: false, reason: 'already-running', pid: tunnelChild.pid };
+  }
+  if (!fs.existsSync(paths.exe) || !fs.existsSync(paths.config)) {
+    throw new Error('隧道未安装：缺少 ' + paths.exe + ' 或 ' + paths.config);
+  }
+  // 外部实例兜底：daemon 重启后上一个 frpc 往往还活着。重复 spawn 会因 admin 端口占用而立刻退出，
+  // 留下一个起不来的僵尸子进程 ⇒ 有响应就直接认作「已在运行」。
+  const cached = tunnelProbe.cache && tunnelProbe.cache.value;
+  if (!opts.force && cached && cached.alive) {
+    log('[tunnel] 检测到已有实例在运行（admin API 有响应），跳过启动');
+    return { started: false, reason: 'already-running-external' };
+  }
+  // ⚠️ stdio 全 ignore，**不接管道**：frpc 自己按 frpc.toml 的 log.to 写文件日志，
+  //    接了 pipe 反而会让 daemon 一重启就把隧道一起带走（父进程死 → 管道断开 → 子进程退出），
+  //    那样「daemon 重启后接管已有实例」的逻辑永远走不到，等于每次改代码都白断一次隧道。
+  const child = spawn(paths.exe, ['-c', paths.config], {
+    cwd: paths.root,
+    detached: false,
+    stdio: ['ignore', 'ignore', 'ignore'],
+    windowsHide: true,
+  });
+  tunnelChild = child;
+  child.on('exit', (code) => {
+    tunnelLastExit = { at: Date.now(), code: code };
+    log('[tunnel] 进程退出 code=' + code);
+    if (tunnelChild === child) tunnelChild = null;
+    tunnelProbe.cache = null;
+    // ⭐ 用户主动停止（enabled=false）不重拉；否则退避重拉 —— 这就是「死了没人知道」的补丁。
+    if (tunnelReadEnabled()) tunnelScheduleRestart('exit code=' + code);
+  });
+  child.on('error', (e) => { log('[tunnel] 启动失败: ' + String((e && e.message) || e)); });
+  tunnelProbe.cache = null;
+  if (!opts.auto) tunnelRestartAttempts = 0;
+  log('[tunnel] 已启动 pid=' + child.pid);
+  return { started: true, pid: child.pid };
+}
+
+/** 退避重拉：3s 起，每次 ×1.6，封顶 60s；连续 20 次仍失败就停手等人工。 */
+function tunnelScheduleRestart(reason) {
+  if (tunnelRestartTimer) return;
+  if (!tunnelReadEnabled()) return;
+  tunnelRestartAttempts += 1;
+  if (tunnelRestartAttempts > TUNNEL_RESTART_MAX) {
+    log('[tunnel] 连续失败 ' + TUNNEL_RESTART_MAX + ' 次，停止重拉（' + reason + '）。请在面板手动重试。');
+    tunnelRestartAttempts = 0;
+    return;
+  }
+  const delay = Math.min(3000 * Math.pow(1.6, tunnelRestartAttempts - 1), TUNNEL_RESTART_CAP_MS);
+  log('[tunnel] ' + Math.round(delay / 1000) + 's 后重拉（第 ' + tunnelRestartAttempts + ' 次，' + reason + '）');
+  tunnelRestartTimer = setTimeout(() => {
+    tunnelRestartTimer = null;
+    tunnelProbe(true).then((probe) => {
+      if (probe.alive) { tunnelRestartAttempts = 0; return; }
+      try { tunnelStart({ auto: true }); }
+      catch (e) {
+        log('[tunnel] 重拉失败: ' + String((e && e.message) || e));
+        tunnelScheduleRestart('relaunch-failed');
+      }
+    }).catch(() => { tunnelScheduleRestart('probe-failed'); });
+  }, delay);
+  if (tunnelRestartTimer.unref) tunnelRestartTimer.unref();
+}
+
+function tunnelStop() {
+  if (tunnelRestartTimer) { clearTimeout(tunnelRestartTimer); tunnelRestartTimer = null; }
+  tunnelRestartAttempts = 0;
+  const child = tunnelChild;
+  if (child && child.exitCode === null) {
+    try {
+      if (IS_WIN) spawnSync('taskkill', ['/PID', String(child.pid), '/F'], { timeout: 8000, windowsHide: true });
+      else child.kill();
+      tunnelProbe.cache = null;
+      // ⭐ 立即置空：exit 事件是异步的，不置空的话下面 tunnelStatus() 会拿 exitCode===null 判成 still running，
+      //    响应体里出现 running:true + connected:false 这种自相矛盾的组合。
+      tunnelChild = null;
+      log('[tunnel] 已请求停止 pid=' + child.pid);
+      return { stopped: true, pid: child.pid, mode: 'child' };
+    } catch (e) { return { stopped: false, reason: String((e && e.message) || e) }; }
+  }
+  // 外部实例（daemon 重启后失联的孤儿）：frpc 不监听业务端口 ⇒ 拿不到 pid，
+  // 只能按镜像名杀。本机 frpc.exe 只服务这一条隧道，且配置里 admin 密码唯一，风险可控。
+  const cached = tunnelProbe.cache && tunnelProbe.cache.value;
+  if (!(cached && cached.alive)) return { stopped: false, reason: 'not-running' };
+  try {
+    if (IS_WIN) spawnSync('taskkill', ['/IM', 'frpc.exe', '/F'], { timeout: 8000, windowsHide: true });
+    else spawnSync('pkill', ['-f', tunnelPaths().config], { timeout: 8000 });
+    tunnelProbe.cache = null;
+    log('[tunnel] 已停止外部实例');
+    return { stopped: true, pid: 0, mode: 'external' };
+  } catch (e) { return { stopped: false, reason: String((e && e.message) || e) }; }
+}
+
+/** 读隧道日志尾部（面板排障用）。 */
+function tunnelLogTail(lines) {
+  const paths = tunnelPaths();
+  const want = Math.min(Math.max(Number(lines) || 40, 1), 400);
+  let all = [];
+  try {
+    const st = fs.statSync(paths.log);
+    const start = Math.max(0, st.size - 64 * 1024);
+    const fd = fs.openSync(paths.log, 'r');
+    const buf = Buffer.alloc(st.size - start);
+    fs.readSync(fd, buf, 0, buf.length, start);
+    fs.closeSync(fd);
+    // ⚠️ frpc 的 admin API 每被探活一次就写两行 http/middleware.go（/api/status），
+    //    不清掉的话 60 行窗口里大半是噪音，真正有用的「login to server success / proxy start」会被挤出去。
+    //    从路由器 CGI 那边的同一坑学来的（那边是 grep -v http/middleware.go）。
+    all = buf.toString('utf8').split(/\r?\n/).filter((ln) => ln && ln.indexOf('http/middleware.go') === -1);
+  } catch (_) { return { lines: [], size: 0 }; }
+  return { lines: all.slice(-want), size: (() => { try { return fs.statSync(paths.log).size; } catch (_) { return 0; } })() };
+}
+
+/** 启动时：用户启用过就自动拉起（与网关 autoStart 同模式；未安装则静默跳过）。 */
+function refreshTunnelIfEnabled() {
+  const paths = tunnelPaths();
+  if (!fs.existsSync(paths.exe) || !fs.existsSync(paths.config)) return Promise.resolve();
+  return tunnelProbe(true).then((probe) => {
+    if (probe.alive) {
+      log('[tunnel] 检测到已在运行的实例，跳过拉起');
+      return;
+    }
+    if (!tunnelReadEnabled()) return;
+    tunnelStart({ auto: true });
+  }).catch((error) => {
+    log('[tunnel] 启动自动拉起失败: ' + String((error && error.message) || error));
   });
 }
 
@@ -16541,6 +16849,77 @@ function handleApiRoute(req, res) {
     });
   }
 
+  // 客户端更新策略（增强页「彻底静音」开关）。读的是 DATA_DIR 下的策略文件，
+  // 客户端进程启动时由 workbuddy-launch-env.js 读取它决定更新源。
+  if (req.method === 'GET' && p === '/api/client-update-policy') {
+    const policy = readUpdatePolicy(DATA_DIR);
+    return json(res, 200, {
+      ok: true,
+      mute: policy.mute,
+      source: policy.source,
+      updatedAt: policy.updatedAt,
+      supported: UPDATE_POLICY_PROFILES.includes(PROFILE.id),
+      // 读后台定时刷新的缓存，绝不在请求线程里同步探测（B17）：Windows 上这个
+      // 探测会冷启 powershell 做 CIM 枚举，实测 2.4~6.7s，直接把接口拖成秒级。
+      clientRunning: clientRunningState.value === true,
+    });
+  }
+
+  if (req.method === 'POST' && p === '/api/client-update-policy-set') {
+    return readBody(req).then((body) => {
+      try {
+        const mute = !!body.mute;
+        const saved = writeUpdateMute(DATA_DIR, mute);
+        // 立刻同步到客户端配置：面板改完可能很久才重启，别让 app-config 停在旧状态。
+        applyStartupForceAutoUpdate(PROFILE.dataRoot, mute);
+        log('[client-update] 被动更新' + (mute ? '已静音' : '已恢复') + '（下次启动客户端生效）');
+        return json(res, 200, { ok: true, ...saved, restartRequired: true });
+      } catch (e) {
+        return json(res, 500, { ok: false, error: String((e && e.message) || e) });
+      }
+    });
+  }
+
+  // 模型切换守卫（只读提醒）。客户端在「报错后重新发送」这条路径上不带模型参数
+  // （日志里 requestOptions.model=<none>），于是回落到会话默认模型 —— 也就是报错时那个
+  // 旧模型。用户看到的就成了「切了没用」。这里读客户端自己的日志取证，只读不改：
+  //   unstable_setSessionModel(想用的) → Sending request(实际发的，模型不一致) → refusal(确实失败)
+  // 三者齐全才算命中。4 天真实日志回放：SET=118 / REQ=3567，只命中 5 次且全部带错误码。
+  // ⚠️ 不做「自动补发切换指令到运行时会话」：那要拦客户端内部 ACP 调用，属调度层，
+  //    一旦内部 id 映射变化就静默失效，与「配置层 + 指令层 + 观测层」的边界冲突。
+  if (req.method === 'GET' && p === '/api/model-switch-check') {
+    const policy = readGuardPolicy(DATA_DIR);
+    if (!policy.enabled) return json(res, 200, { ok: true, enabled: false, hit: null });
+    // 1.5 秒节流：渲染层轮询比这密时直接复用上一次结果，省掉重复读盘解析。
+    // ?freshMs= 只读排查参数：把「多久内的命中才算新鲜」放宽（1 分钟 ~ 24 小时）。
+    // 正常轮询不传，走默认 3 分钟。它只影响回看的时间窗，不改判定、不影响请求。
+    const rawFresh = Number(new URL(req.url, 'http://127.0.0.1').searchParams.get('freshMs') || 0);
+    const freshMs = Number.isFinite(rawFresh) && rawFresh > 0
+      ? Math.min(Math.max(rawFresh, 60000), 24 * 60 * 60 * 1000)
+      : undefined;
+    const now = Date.now();
+    const cacheKey = freshMs || 0;
+    if (!switchGuardCache.at || switchGuardCache.key !== cacheKey || now - switchGuardCache.at > 1500) {
+      let hit = null;
+      try { hit = scanModelSwitch(path.join(PROFILE.dataRoot, 'logs'), { freshWindowMs: freshMs }).hit; }
+      catch (e) { hit = null; }
+      switchGuardCache = { at: now, hit, key: cacheKey };
+    }
+    return json(res, 200, { ok: true, enabled: true, hit: switchGuardCache.hit });
+  }
+
+  if (req.method === 'POST' && p === '/api/model-switch-guard-set') {
+    return readBody(req).then((body) => {
+      try {
+        const saved = writeGuardEnabled(DATA_DIR, !!body.enabled);
+        switchGuardCache = { at: 0, hit: null };
+        log('[model-switch-guard] 切换未生效提醒已' + (saved.enabled ? '开启' : '关闭'));
+        return json(res, 200, { ok: true, ...saved });
+      } catch (e) {
+        return json(res, 500, { ok: false, error: String((e && e.message) || e) });
+      }
+    });
+  }
   if (req.method === 'GET' && p === '/api/ask-mode') {
     return json(res, 200, { ok: true, ...getAskModeState() });
   }
@@ -16681,6 +17060,42 @@ function handleApiRoute(req, res) {
       const stopped = gatewayStop();
       return json(res, 200, { ok: true, ...stopped, gateway: gatewayStatus() });
     });
+  }
+
+  // 隧道：GET /api/gateway/tunnel/status —— 进程状态 + proxy 真实连通性 + 公网地址
+  if (req.method === 'GET' && p === '/api/gateway/tunnel/status') {
+    return tunnelProbe(true)
+      .then(() => json(res, 200, { ok: true, tunnel: tunnelStatus() }))
+      .catch((e) => json(res, 502, { ok: false, error: String((e && e.message) || e) }));
+  }
+
+  // 隧道：POST /api/gateway/tunnel/start —— 拉起 frpc 并记住「用户启用」（之后死了自动重拉）
+  if (req.method === 'POST' && p === '/api/gateway/tunnel/start') {
+    return readBody(req).then(async (body) => {
+      try {
+        if (!body || body.enabled !== false) tunnelSetEnabled(true);
+        await tunnelProbe(true);
+        const started = tunnelStart({ force: true });
+        return json(res, 200, { ok: true, ...started, tunnel: tunnelStatus() });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: String((e && e.message) || e) });
+      }
+    });
+  }
+
+  // 隧道：POST /api/gateway/tunnel/stop —— 停止并清掉「用户启用」（否则会被自动重拉回来）
+  if (req.method === 'POST' && p === '/api/gateway/tunnel/stop') {
+    return readBody(req).then((body) => {
+      if (!body || body.enabled !== false) tunnelSetEnabled(false);
+      const stopped = tunnelStop();
+      return json(res, 200, { ok: true, ...stopped, tunnel: tunnelStatus() });
+    });
+  }
+
+  // 隧道：GET /api/gateway/tunnel/log —— 日志尾部（判断是 token 错还是服务器不通）
+  if (req.method === 'GET' && p === '/api/gateway/tunnel/log') {
+    const tail = tunnelLogTail(60);
+    return json(res, 200, { ok: true, lines: tail.lines, size: tail.size });
   }
 
   // 反代网关：GET /api/gateway/models-available —— 「注册模型」面板的可选清单 + 各自的注册状态
@@ -20427,6 +20842,14 @@ function restoreSleepMode() {
 function startServer() {
   const server = http.createServer((req, res) => {
     if (req.url.startsWith('/api/')) return handleApi(req, res);
+    // 客户端更新检查静音：WorkBuddy 的 WORKBUDDY_UPDATE_URL 被指到本机这个地址
+    // （见 workbuddy-launch-env.js 头部说明）。永远 204 = 官方语义里的「没有新版本」，
+    // 于是它不下载安装包、不弹「重启更新」横幅。故意放在鉴权之外 —— 客户端这条
+    // 请求不带我们的 token，而它本来就只回一个空响应。
+    if (req.method === 'GET' && /^\/v2\/update(\?|$)/.test(req.url)) {
+      res.writeHead(204, { 'Cache-Control': 'no-store' });
+      return res.end();
+    }
     // 官方背景图静态服务：/wallpapers/<name>（供面板「主题」页缩略图预览）
     if (req.method === 'GET' && /^\/wallpapers\//.test(req.url)) {
       try {
@@ -20685,11 +21108,16 @@ CREDIT_USAGE_STORE.initialize().catch((error) => log('[credits-usage] 初始化�
 initBuiltinAssets();
 // 启动时刷新决策弹窗规则到最新版本（已启用时替换旧规则段）
 refreshAskModeIfEnabled();
+// 启动时套用更新策略：静音档要保证 app-config 的 startupForceAutoUpdate 是关的
+// （用户可能在客户端里手动改过，或者上一版留下的 false 需要在不静音时清掉）。
+applyStartupForceAutoUpdate(PROFILE.dataRoot, readUpdatePolicy(DATA_DIR).mute);
+
 // 启动时刷新中文思考规则到最新版本（已启用时替换旧规则段）
 refreshZhReasoningIfEnabled();
 // 启动时补偿持续会话指令块（开关开启但 app-config 块缺失/被改写时补写）
 refreshAutoContinueIfEnabled();
 refreshGatewayIfEnabled();
+refreshTunnelIfEnabled();
 // ⭐ 账号池对齐（2026-10-16）：老装机从旧版升上来时 auths/ 里可能缺后来登录的账号
 gatewaySyncAccountsQuiet('daemon 启动');
 repairMissingSessionWorkspaces().catch((error) => log('[sessions-cwd-repair] 启动修复失败: ' + error.message));

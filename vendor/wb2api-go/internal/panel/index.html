@@ -743,6 +743,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .alertbar button { color: var(--bad); border-color: rgba(240,101,95,.35); background: transparent; }
 .alertbar button:hover:not(:disabled) { border-color: var(--bad); }
 
+
+/* ── 容量与调度：三态标签 + 判定依据列 ─────────────────────────────────
+   三态用语义色（ok/warn/bad），与账号状态标签同族但独立类名，避免以后
+   改账号标签时误伤这里。 */
+.cap-st { display: inline-block; padding: 1px 7px; border-radius: 5px; font-size: 11.5px;
+  border: 1px solid transparent; white-space: nowrap; }
+.cap-st.ok { color: var(--ok); background: var(--ok-soft); border-color: rgba(61,220,151,.28); }
+.cap-st.warn { color: var(--warn); background: var(--warn-soft); border-color: rgba(245,181,68,.28); }
+.cap-st.bad { color: var(--bad); background: var(--bad-soft); border-color: rgba(240,101,95,.28); }
+.cap-why { color: var(--ink-2); font-size: 12.5px; }
+.cap-why .hint { display: inline; }
+.cap-empty { text-align: center; color: var(--ink-3); padding: 22px 0; }
+/* 余额陈旧标记：积分刷新失败时贴在数字后面，hover 看原因 */
+.cred-err { margin-left: 4px; padding: 0 5px; border-radius: 4px; font-size: 10.5px;
+  color: var(--warn); background: var(--warn-soft); border: 1px solid rgba(245,181,68,.3);
+  vertical-align: middle; cursor: help; }
+td.mono { font-family: var(--mono); font-size: 12.5px; }
+
 </style>
 <!-- 移动端适配：独立文件，必须在主 <style> 之后（@media 覆盖依赖层叠顺序） -->
 <link rel="stylesheet" href="mobile.css">
@@ -758,6 +776,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#overview" data-view="overview" class="on">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.2 2.6h4.6v4.6H2.2zM9.2 2.6h4.6v4.6H9.2zM2.2 9.2h4.6v4.2H2.2zM9.2 9.2h4.6v4.2H9.2z"/></svg>
         总览</a></li>
+      <li><a href="#capacity" data-view="capacity">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.2 12.8h2.4V7.2H2.2zM6.8 12.8h2.4V3.2H6.8zM11.4 12.8h2.4V9h-2.4z"/></svg>
+        容量与调度</a></li>
+
       <li><a href="#accounts" data-view="accounts">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
         账号池</a></li>
@@ -909,6 +931,54 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     </section>
 
     <!-- 账号池 -->
+    <!-- 容量与调度：全量模型三态（空闲 / 拥堵 / 不可用）+ 限流判定依据 + 调度参数。
+         与「账号池」的分工：账号池回答「哪个号不能用」，本页回答「哪个模型此刻还能用、
+         被什么挡住、还要等多久」。三态口径与选号严格一致（同一 healthyForModel +
+         inFlightFull），面板说可用就真的选得到号。 -->
+    <section class="view" id="view-capacity" hidden>
+      <div class="stats">
+        <div class="stat good"><div class="v" id="capIdle">-</div><div class="k">空闲模型</div></div>
+        <div class="stat warn"><div class="v" id="capBusy">-</div><div class="k">拥堵模型</div></div>
+        <div class="stat bad"><div class="v" id="capDown">-</div><div class="k">不可用模型</div></div>
+        <div class="stat"><div class="v" id="capTotal">-</div><div class="k">模型总数</div></div>
+        <div class="stat"><div class="v" id="capLockCount">-</div><div class="k">模型级限流</div></div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>调度参数<span class="hint">决定「选哪个号」的规则，配置页改完即时生效</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="capRefreshed">—</span>
+          <button class="xs" id="capRefresh">刷新</button>
+        </header>
+        <div class="pad">
+          <div class="kv4" id="capSched"></div>
+          <div class="note" id="capSchedNote">—</div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>模型容量<span class="hint">空闲 = 该域所有号都能服务 · 拥堵 = 还有号可用但已有号被挡 · 不可用 = 没有号能服务</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="capLockNote">—</span>
+          <span class="chips" id="capFilter">
+            <button class="xs chip on" data-f="all">全部</button>
+            <button class="xs chip" data-f="problem">仅异常</button>
+          </span>
+        </header>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th>模型</th><th>状态</th><th>可服务 / 总</th><th>模型锁</th>
+              <th>账号冷却</th><th>在途</th><th>最早恢复</th><th>判定依据</th>
+            </tr></thead>
+            <tbody id="capBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <section class="view" id="view-accounts" hidden>
       <div class="stats">
         <div class="stat"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>
