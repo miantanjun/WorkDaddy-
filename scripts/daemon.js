@@ -858,7 +858,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         CIM 查询加 -Filter 服务端过滤、周期性刷新 5s→15s）与 **1.2.41 失效卷保护**（会话工作目录巡检
 //         跳过卷已不存在的 cwd，同卷根只提示一次）；1.2.42–1.2.46 的「同步个性化」（persona 共享）
 //         **明确不吸纳**（用户判定对自己没用）。
-const DAEMON_VERSION = '1.9.8';
+const DAEMON_VERSION = '1.9.9';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 //
@@ -910,7 +910,7 @@ const UPSTREAM_VERSION = '1.2.18';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.9.8-20261102-unify-release-r1';
+const DAEMON_BUILD_ID = 'release-1.9.9-20261102-gateway-install-order-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -12722,6 +12722,10 @@ function accountBackupFile(uid) {
  */
 let gatewayChild = null;
 let gatewayInstallInFlight = null;
+/** 本次安装开始时网关是否在跑 —— 供 finally 兜底回滚用（见 gatewayInstall）。 */
+let gatewayInstallWasRunning = false;
+/** 本次安装尝试用的端口（回滚判定「是不是已经有人起来了」）。 */
+let gatewayInstallPort = 0;
 
 /* 隧道（frpc）托管：与网关同构，见下方「隧道托管」整段注释 */
 let tunnelChild = null;
@@ -13021,24 +13025,21 @@ async function gatewayInstall() {
   if (gatewayInstallInFlight) return gatewayInstallInFlight;
   const task = (async () => {
     const paths = apiGateway.gatewayPaths(DATA_DIR);
-    // ⭐ 升级前必须先停：Windows 下正在运行的 exe 不允许被覆盖写（EBUSY/EPERM）。
+    // ⭐ 覆盖 exe 前必须先停：Windows 下正在运行的 exe 不允许被覆盖写（EBUSY/EPERM）。
+    //    ⚠️ 停顿点已后移 —— 现在是「下载 + SHA-256 校验通过之后」才停（见下方），
+    //    原来停在这里 = 拖完 4MB（镜像 47 秒）才动手，白停近一分钟。
     // ⚠️ daemon 重启会丢网关子进程句柄，而网关仍在监听 ⇒ 只认 gatewayChild 会漏掉
     //    那个外部实例，接着覆盖 exe 就 EBUSY 失败。这里按端口兜底判定「到底有没有在跑」。
     const installPort = Number(apiGateway.readGatewayState(paths.stateFile).port) || apiGateway.DEFAULT_PORT;
     const ownRunning = !!(gatewayChild && gatewayChild.pid && gatewayChild.exitCode === null);
     const externalPid = ownRunning ? 0 : gatewayFindPidByPort(installPort);
     const wasRunning = ownRunning || !!externalPid;
-    if (wasRunning) {
-      gatewayStop();
-      for (let i = 0; i < 20; i += 1) {
-        const stillUp = ownRunning
-          ? !!(gatewayChild && gatewayChild.exitCode === null)
-          : !!gatewayFindPidByPort(installPort);
-        if (!stillUp) break;
-        await new Promise((r) => setTimeout(r, 150));
-      }
-      log('[gateway] 升级前已停止旧进程（own=' + ownRunning + ' external=' + externalPid + '）');
-    }
+    // ⭐ 2026-11-02：顺序改成「先下载校验 → 再停进程」。
+    //    原来是先 gatewayStop() 再去拉 4MB（镜像实测 47 秒）⇒ 每次「更新网关」都白停
+    //    近一分钟；而且下载/校验失败会直接 throw，把网关留在停止状态，没有任何回滚。
+    //    现在产物全部在内存里、SHA 也对上了，才动进程。
+    gatewayInstallWasRunning = wasRunning;
+    gatewayInstallPort = installPort;
     fs.mkdirSync(paths.root, { recursive: true });
     fs.mkdirSync(paths.authDir, { recursive: true });
     fs.mkdirSync(paths.stateDir, { recursive: true });
@@ -13081,6 +13082,20 @@ async function gatewayInstall() {
     } else {
       log('[gateway] 网关来源 ' + usedSource);
     }
+
+    // ✅ 到这里产物已在内存里且 SHA-256 通过 —— 现在才停进程（中断窗口从「下载全程」缩短到「解压+写配置」）。
+    if (wasRunning) {
+      gatewayStop();
+      for (let i = 0; i < 20; i += 1) {
+        const stillUp = ownRunning
+          ? !!(gatewayChild && gatewayChild.exitCode === null)
+          : !!gatewayFindPidByPort(installPort);
+        if (!stillUp) break;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      log('[gateway] 产物就绪，已停止旧进程（own=' + ownRunning + ' external=' + externalPid + '）');
+    }
+
     const written = apiGateway.extractZipToDir(zip, paths.root, {
       pick: (name) => name === 'wb2api.exe' || name === 'config.example.json',
     });
@@ -13133,7 +13148,22 @@ async function gatewayInstall() {
     return { state: state, accountErrors: collected.errors, installed: written, restarted: wasRunning };
   })();
   gatewayInstallInFlight = task;
-  try { return await task; } finally { gatewayInstallInFlight = null; }
+  try {
+    return await task;
+  } finally {
+    gatewayInstallInFlight = null;
+    // ⭐ 兜底：安装中途抛错（解压失败 / 写 config 失败 / 凭证桥没账号…）时，
+    //    如果启动前网关是在跑的、现在却没在跑，把它拉回来 —— 不能把用户的服务留在停止状态。
+    if (gatewayInstallWasRunning && !(gatewayChild && gatewayChild.exitCode === null) && !gatewayFindPidByPort(gatewayInstallPort || apiGateway.DEFAULT_PORT)) {
+      try {
+        gatewayStart();
+        log('[gateway] ⚠️ 安装未完成，已把网关拉回运行');
+      } catch (e) {
+        log('[gateway] 安装失败且回滚也失败: ' + String((e && e.message) || e));
+      }
+    }
+    gatewayInstallWasRunning = false;
+  }
 }
 
 /** 「用户是否启用」是 WorkDaddy 侧意图，与「装没装」分开记（沿用免打扰开关的记法）。 */

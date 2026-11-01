@@ -109,7 +109,18 @@ ok(daemonSrc.includes('healthyAccounts: Number(info.healthy) || 0'), 'B4 healthz
 ok(daemonSrc.includes('autoStart: gatewayReadEnabled()'), 'B5 status 透出「自动拉起」意图');
 ok(daemonSrc.includes('versionDrift:'), 'B6 status 透出版本漂移（供面板提示升级）');
 ok(daemonSrc.includes('registeredModelCount:'), 'B7 status 透出已注册模型数');
-ok(daemonSrc.includes('// ⭐ 升级前必须先停'), 'B8 install 覆盖 exe 前先停进程（Windows 文件占用）');
+// ⚠️ 这条原来靠匹配注释文字'// ⭐ 升级前必须先停'来断言，改一次注释就误报 —— 改成比调用顺序。
+{
+  const iInstall = daemonSrc.indexOf('async function gatewayInstall');
+  const iStop = daemonSrc.indexOf('gatewayStop();', iInstall);
+  const iExtract = daemonSrc.indexOf('apiGateway.extractZipToDir(', iInstall);
+  const iFetch = daemonSrc.indexOf('await fetch(base + cand.asset)', iInstall);
+  ok(iInstall > 0 && iStop > iInstall && iExtract > iStop,
+    'B8 install 覆盖 exe 前先停进程（Windows 文件占用）', { iStop: iStop - iInstall, iExtract: iExtract - iInstall });
+  // ⭐ 2026-11-02：镜像实测 4.11MB 要 47 秒 ⇒ 先停后下 = 白停近一分钟。
+  ok(iFetch > 0 && iStop > iFetch,
+    'B8b ⭐ 先下载校验、后停进程（否则整个下载时长都在断服）', { iFetch: iFetch - iInstall, iStop: iStop - iInstall });
+}
 ok(daemonSrc.includes('// ⭐ 复用既有密钥'), 'B9 install 复用既有 api_key（换密钥会让已注册模型全部 401）');
 ok(daemonSrc.includes('preserve: previous'), 'B10 install 把旧 config 传给 buildGatewayConfig（升级不丢配置）');
 ok(daemonSrc.includes('restarted: wasRunning'), 'B11 install 装完把原本在跑的进程拉回来');
