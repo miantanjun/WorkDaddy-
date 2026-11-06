@@ -231,7 +231,7 @@ rm -rf /opt/frp /etc/firewall.wd-frp.sh /etc/init.d/frps
 |---|---|
 | 阿里云 AK/SK | 明文出现在对话里，**必须轮换**。建议建一个只授权 `AliyunDNSFullAccess` 限制到 `lyonn.fun` 的 RAM 子账号 |
 | 路由器 root 密码 | 同样在对话里出现过，建议改 |
-| frp token | `LHwPF30l1TUfDJn-S8Anq4sep3Vf3QjX`，两边配置各一份，泄露就换 |
+| frp token | **不落文档**。本机值见 `.wd-tmp/frp-dl/token.txt`（已 gitignore），路由器上一份在 `/opt/frp/frps.toml`。两边必须一致，泄露就换 |
 | 网关 api key | 建议单独发一个只用于外网的 key，泄露只影响这一个 |
 
 对外只开两个端口：`17000`（控制）和 `17443`（隧道），都在 `allowPorts` 白名单内，
