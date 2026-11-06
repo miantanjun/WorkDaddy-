@@ -56,7 +56,7 @@ chmod 644 "$APP/Contents/Resources/AppIcon.icns"
 echo "==> 应用图标已同步（背景 #e1e1e1）"
 
 # 2) 只覆盖前端代码（保留壳的其余一切：launcher/Info.plist/builtin/node_modules/theme-audit.js）
-for f in daemon.js toast-runtime.js toast-options.js primary-account.js completion-report.js automation-runtime.js automation-model.js automation-packages.js automation-compatibility.js automation-transfer.js automation-discovery.js automation-zip.js automation.js automation-picker.js token-refresh.js session-db.js session-fork.js session-sync.js session-dirty.js auto-copy-judge.js auto-copy-leader.js third-party-models.js secure-transfer.js session-transfer.js windows-process-boundary.js windows-installer-launch.js workbuddy-compat.js inject.js theme-patches.js theme-text-shadow.js theme-vars.js credit-segments.js credit-resource-queries.js credit-request-usage.js credit-history-sync.js credit-usage-store.js credit-rotation.js token-stats.js stats-discipline.js thinking-stats.js context-audit.js context-fix.js memory-governance.js growth-active.js growth-daily.js growth-tasks.js atomic-file-write.js dsh-ops-bridge.mjs workbuddy-launch-env.js model-switch-guard.js client-tmp-cleanup.js ui-port.js checkin-result.js lib.js platform.js profiles.js workbuddy-target.js cdp-targets.js sentry-report.js usage-report.js usage-unified.js usage-board-html.js session-titles.js session-cost.js limit-failover.js account-health.js structured-error.js api-gateway.js markdown-preview.js codebuddy-native.js codebuddy-session-store.js codebuddy-files.js renderer-api-bridge.js account-switch-log.js schedule-ledger.js idle-switchback.js space-scan.js scheduled-send.js copy-manifest.js cloud-cleanup.js install.sh relaunch-with-cdp.sh uninstall.sh apply-update.sh; do
+for f in daemon.js toast-runtime.js toast-options.js primary-account.js completion-report.js automation-runtime.js automation-model.js automation-packages.js automation-compatibility.js automation-transfer.js automation-discovery.js automation-zip.js automation.js automation-picker.js token-refresh.js session-db.js session-fork.js session-sync.js session-dirty.js auto-copy-judge.js auto-copy-leader.js third-party-models.js secure-transfer.js session-transfer.js windows-process-boundary.js windows-installer-launch.js workbuddy-compat.js inject.js theme-patches.js theme-text-shadow.js theme-vars.js credit-segments.js credit-resource-queries.js credit-request-usage.js credit-history-sync.js credit-usage-store.js credit-rotation.js token-stats.js stats-discipline.js thinking-stats.js context-audit.js context-fix.js memory-governance.js growth-active.js growth-daily.js growth-tasks.js atomic-file-write.js dsh-ops-bridge.mjs workbuddy-launch-env.js model-switch-guard.js client-tmp-cleanup.js ui-port.js checkin-result.js side-gateway.js side-gateway-ui.js ck-memory.js ck-memory-ui.js ck-mcp.js ck-hook-prompt.js tunnel-ingress.js lib.js platform.js profiles.js workbuddy-target.js cdp-targets.js sentry-report.js usage-report.js usage-unified.js usage-board-html.js session-titles.js session-cost.js limit-failover.js account-health.js structured-error.js api-gateway.js markdown-preview.js codebuddy-native.js codebuddy-session-store.js codebuddy-files.js renderer-api-bridge.js account-switch-log.js schedule-ledger.js idle-switchback.js space-scan.js scheduled-send.js copy-manifest.js cloud-cleanup.js install.sh relaunch-with-cdp.sh uninstall.sh apply-update.sh; do
   [ -f "scripts/$f" ] && cp "scripts/$f" "$APP/Contents/Resources/scripts/$f"
 done
 # Injection reads the wordmark at runtime; keep brand assets in both profiles.
@@ -129,6 +129,13 @@ chmod 644 "$APP/Contents/Resources/scripts/session-db.js" \
   "$APP/Contents/Resources/scripts/checkin-result.js" \
   "$APP/Contents/Resources/scripts/automation-discovery.js" \
   "$APP/Contents/Resources/scripts/workbuddy-compat.js" \
+  "$APP/Contents/Resources/scripts/side-gateway.js" \
+  "$APP/Contents/Resources/scripts/side-gateway-ui.js" \
+  "$APP/Contents/Resources/scripts/ck-memory.js" \
+  "$APP/Contents/Resources/scripts/ck-memory-ui.js" \
+  "$APP/Contents/Resources/scripts/ck-mcp.js" \
+  "$APP/Contents/Resources/scripts/ck-hook-prompt.js" \
+  "$APP/Contents/Resources/scripts/tunnel-ingress.js" \
   "$APP/Contents/Resources/scripts/inject.js" \
   "$APP/Contents/Resources/scripts/limit-failover.js" \
   "$APP/Contents/Resources/scripts/account-health.js" \

@@ -653,9 +653,11 @@ ok(/if\(!\[1,2,3\]\.includes\(task\.schemaVersion\?\?1\)\)return incompatible\('
 
 const dmVersion = (DAEMON_SRC.match(/const DAEMON_VERSION = '([^']+)';/) || [])[1] || '';
 const dmBuild = (DAEMON_SRC.match(/const DAEMON_BUILD_ID = '([^']+)';/) || [])[1] || '';
+// ⚠️ 必须按数值比较：字符串比较会把 '1.10.0' 判成小于 '1.4.3'（v1.10.0 当场踩到）
+const semverGte = (a, b) => { const x = a.split('.').map(Number); const y = b.split('.').map(Number); for (let i = 0; i < 3; i++) { if (x[i] !== y[i]) return x[i] > y[i]; } return true; };
 ok(/^release-\d+\.\d+\.\d+-\d{8}-[A-Za-z0-9][A-Za-z0-9-]*$/.test(dmBuild)
   && dmBuild.indexOf('release-' + dmVersion + '-') === 0
-  && /^1\.\d+\.\d+$/.test(dmVersion) && dmVersion >= '1.4.3',
+  && /^1\.\d+\.\d+$/.test(dmVersion) && semverGte(dmVersion, '1.4.3'),
   'E15 改了 daemon.js 就递增版本 + 自洽 buildId（当前 ' + dmVersion + ' / ' + dmBuild + '）');
 
 /* 反向守卫：上游那两个会挂死的写法不许出现在本地**代码**里（注释里提它们是解释性文字，不算）。

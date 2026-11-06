@@ -64,7 +64,7 @@ const SUITES = [
   ['test-upstream-127.js', 96],  // 上游 1.2.7 吸纳/批次 1+2+3：theme-patches 3 条新补丁（patch-102/103/104 逐条 CSS 片段 + 老条目未丢）+ usageModel 行为级四形状（旧代码是 [object Object]）+ 缓存版本 1→2（常量 + **行为级**：v1 忽略/v2 采纳）+ inject.js 六处定点 10 落点与 4 处旧形态消失 + toast 第四参向后兼容 + [F] Linux 三段（11 落点 + 上游 open-url 行为规范的 vm 真跑：三平台命令/参数/unref、非 http(s) 拒且不 spawn、缺 xdg-open 时 500 且**错误不回流 URL**）；含三条边界登记（数字 0 被 String(0) 采用 / usageModel(null) 抛 TypeError 但生产不可达 / 第二处 IS_WIN||IS_LINUX 属本地既有 CDP 路径）；2026-09-27 随 1.2.8 升到 100 条并加 A2b（patch-41 已按上游删除，不许回填）
   ['test-upstream-128.js', 63],  // 上游 1.2.8 吸纳（5 批全落地）：[A] 主题三件套必须同批（patch-105/106 + patch-41 已删 + theme-vars nebula 透明变量 + nebula theme.json）+ [B] 同步备份生命周期（prune/inspect 导出面、SYNC_BACKUP_DIR、changedTargetFiles 两处调用）+ [C] 模型限流表行为级（UPSERT/**过期自动清**/resetAt=null 只记不删/参数校验）+ [D] setAccountNote 行为级（原型污染串/白名单/2000 字/账号不存在/认证备份一字未动）+ [E] daemon 六路由与**直连 require session-sync**（漏了会 ReferenceError）+ [F] 本地红线与自研未被冲掉（无 firstTargetCopy / 无 mappingTargetLifecycleRevisionMatches / 4 个旧主题函数已删且无遗留调用 / 本地 5 处自研内容仍在 / 积分趋势仍 false）+ [G] 11 个关键文件行尾
   ['test-zh-reasoning.js', 29],  // 2026-09-29 中文思考开关（写入官方「全局自定义指令」settings.personalization.customPrompt）：vm 真跑纯函数 —— 块形状（起止标记精确包裹/首句直接思考指令/豁免代码命令路径/留语言出口）+ strip 安全性（空输入安全/无块不动/标记残缺不误删）+ ⭐ 开→关往返逐字节恢复用户内容 + 幂等（重复开启只一个块）+ ⭐ 与「决策弹窗」段共存互不干扰 + 两侧接线（daemon 两路由/启动刷新/关空时删键；inject 可见开关 + 失败回滚 UI 勾选态）
-  ['test-api-gateway.js', 122],  // 2026-09-30 反代网关集成（sidecar）：checksums 解析 + 凭证桥（毫秒→秒/realm 推断/缺字段拒绝/uid 清洗防穿越）+ config 三条安全默认（listen 锁回环 / api_key 非空强制 / 定时任务全关）+ 纯 JS zip 自解压（stored+deflate / zip slip 拒绝 / 非法压缩法拒绝 / 真实官方包 sha256 与 checksums 一致且解出 PE 头）+ 状态不落 api_key + 目录布局 + 模型闭环（id/name 加前缀让同名共存 / 重复注册幂等 / 裸 id 撞车由 occupied 保护 / 撤销后用户条目逐字节恢复 / 接线 bili 后剥包裹前缀再判同源（否则 5 条已注册全判 absent、应用时多造一份副本））
+  ['test-api-gateway.js', 137],  // 2026-09-30 反代网关集成（sidecar）：checksums 解析 + 凭证桥（毫秒→秒/realm 推断/缺字段拒绝/uid 清洗防穿越）+ config 三条安全默认（listen 锁回环 / api_key 非空强制 / 定时任务全关）+ 纯 JS zip 自解压（stored+deflate / zip slip 拒绝 / 非法压缩法拒绝 / 真实官方包 sha256 与 checksums 一致且解出 PE 头）+ 状态不落 api_key + 目录布局 + 模型闭环（id/name 加前缀让同名共存 / 重复注册幂等 / 裸 id 撞车由 occupied 保护 / 撤销后用户条目逐字节恢复 / 接线 bili 后剥包裹前缀再判同源（否则 5 条已注册全判 absent、应用时多造一份副本））
   ['test-switch-presync.js', 73],
   ['test-skill-refs.js', 11],
   ['test-audit-fixes.js', 21],
@@ -79,7 +79,7 @@ const SUITES = [
   ['test-upstream-1215.js', 30],  // 2026-10-16 上游 1.2.15 吸纳守卫（只取 1.2.40 + 1.2.41）：A 正向 19 条（lightClientRunning 走 tasklist 不碰 WMI / ⭐ 探测子进程入口真的改用它 / safeClientRunning 保留给安全路径 / 刷新 5s→15s + 环境变量覆盖 / 两处 CIM 都加 -Filter / 失效卷跳过 + 同卷根只提示一次 / ⭐ UPSTREAM_VERSION 同步 1.2.15）+ B 反向 4 条（⛔ 守住「不吸纳同步个性化」：persona 那批函数与路由一个都不许进来）+ C vm 桩测 6 条（tasklist 命中/未命中/探测失败三分支 + 首个命中即返回 + Linux 分支 + 异常兜底）+ D 真跑 --probe-client-running 入口不炸
   ['test-close-popups-preset.js', 34],
   ['test-gateway-account-sync.js', 33],  // 2026-10-16 网关账号池同步（修「新登录账号永远进不了池」：auths 原本只在 install 时写一次）：A syncAuthDocuments 增量语义真值 16 条（新增 / 幂等零写入含 mtime / 内容变了只重写一个 / 不在名单则删 / ⭐ 删除前三重保险：解析不出 uid、uid 与文件名不符、非 workbuddy- 前缀一律保留 / 异常入参不炸）+ B daemon 挂钩 10 条（网关未装零开销短路 / 新路由 / ⭐ scheduleBackup 后自动同步 / 启动同步 / status 透出 accountPool.missing / install 改走 sync 且旧全量调用已移除）+ C vm 切片真跑（未装 ⇒ skipped）+ D 面板抓手 6 条（漂移提示 + 「同步账号池」按钮 + 暗色样式）  // 2026-10-16 侧栏运营位轮播广告（Shadow DOM 内的 pc_fusion_carousel_close）纳入内置关闭任务：preset 静态（rev 3 + 两个历史 hash + 新定位器 5 组不丢旧 4 组 + ⭐ 定位器不得带 visible 否则 skipMove 点不动 + 挂在 delay 之前 + pageReady 触发不变）+ daemon 遮挡判定放宽到接受「命中 el 的祖先」（附 getRootNode 与 skipMove 判据）+ 真跑 installBuiltinTask（临时 dataDir：升级到 rev3 / 保留 enabled / 标记前进 / 用户改过则 skipped 且原样保留 / 重复升级幂等）  // 2026-10-14 上游 1.2.14（1.2.38）吸纳：daemon 探测子进程不得递归派生。静态（守卫在 refreshClientRunning 体内 / 顶层无裸调用 / startClientRunningMonitor 落在 acquireDaemonLock 之后 / 两个探针超时常量已接线）+ 动态（真跑 --probe-client-running 入口 ×4 profile，preload 拦截 execFile 断言累计派生 0，且入口仍能应答 {running:…}）
-  ['test-dsh-ops-integration.js', 62],  // 2026-10-15 吸纳 T-Auto/dsh-ops（Rust 原生检索/批处理 → MCP）：桥脚本随包（shebang / -wb 标记 / 只依赖 node 内置 / HERE 相对 worker 路径 / read_only 与 write_roots）+ daemon 四路由十一函数 + 固定上游包版本与 sha512 integrity + 镜像源环境变量 + 非 Windows 拒绝 + 卸载「目录精确相等 + manifest」双重守卫 + mcp.json 损坏时拒写 + inject 专用卡（旧通用 MCP 卡已彻底移除 + 四个 API 调用 + 主按钮/暗色适配 + armed 二次确认 + 平台不支持分支）+ vm 切片真值（tar 解析 5 项 / sha512 校验 4 项）+ mac 白名单两处；含三条自检（A5b 只 node 内置 import / A5c write_roots 圈定 / B7b 有 manifest 才删）
+  ['test-dsh-ops-integration.js', 92],  // 2026-10-15 吸纳 T-Auto/dsh-ops；2026-11-02 升级 0.4.4 + 精简工具面。桥脚本随包（shebang / -wb 标记 / 只依赖 node 内置 / HERE 相对 worker 路径 / read_only 与 write_roots）+ daemon 四路由十一函数 + 固定上游包 0.4.4 与 sha512 integrity + 镜像源环境变量 + 非 Windows 拒绝 + 卸载「目录精确相等 + manifest」双重守卫 + mcp.json 损坏时拒写 + inject 专用卡（旧通用 MCP 卡已彻底移除 + 四个 API 调用 + 主按钮/暗色适配 + armed 二次确认 + 平台不支持分支）+ vm 切片真值（tar 解析 5 项 / sha512 校验 4 项）+ mac 白名单两处；含三条自检（A5b 只 node 内置 import / A5c write_roots 圈定 / B7b 有 manifest 才删）。**F 组（30 条）锁死精简工具面**：只 4 个工具、不暴露 glob/grep/inspect/replace/write_file/edit_file/copy/move/remove/diff/stat/batch、不暴露 read_pdf（实测真实发票/提单/PI 全不可用）、result 只有 page/release、read_files 用 files、B4b/B10/B11/B12 锁「上游已删 FastCtx」这一事实（不再下载 fastctx 包 / 暴露遗留条目 / 注册时清理 / 完整性只判 worker+桥）
   ['test-gateway-console.js', 177],  // 2026-10-15 反代网关「毛坯 → 控制台」重做：A 集成层真跑（版本钉 v1.13.0 + 资产名跟随 + 三条安全默认 + ⭐ preserve 升级不丢配置 12 条：用户改动保留 / 新键取模板默认 / 废弃键不带回 / 时间表保留而 *_enabled 不生效 / 管理键不被污染 / 不传 preserve 零回归 / 入参无副作用）+ B daemon（4 新路由 pool/log/set-enabled/probe + 5 新函数 + /api/gateway 改缓存快照 + healthz 的 healthy 是「可用账号数」不是布尔 + versionDrift/autoStart/registeredModelCount + install 三硬化：先停进程 / 复用 api_key 防 401 / preserve 旧配置 + 装完重拉 + 池快照白名单映射）+ C 面板（7 个新 DOM + 5 个新函数 + mini-btn 禁用态 + 启停互斥可用 + 自动拉起开关 + 日志懒加载 + 旧哑按钮写法清零）
   ['test-codebuddy-session-store.js', 4],  // 阶段① 地基：CodeBuddy 虚拟 sessions 表（VS Code state.vscdb 的 ItemTable 是 key-value，不是 SQL；读写都走官方主进程服务）
   ['test-codebuddy-files.js', 12],  // 阶段① 地基：CodeBuddy 四棵历史树（history/plan-task/check-point/file-tree）的归档/迁移/删除事务 + 用量按账号历史树采集（含已删除会话的墓碑）
@@ -92,6 +92,64 @@ const SUITES = [
   ['test-token-persist-encrypted.js', 22],  // 上游 1.2.18：加密态账号「刷新成功但存不进文件」（旧行为=只丢内存+日志「仅保存在内存」，daemon 一重启就退回旧 token）。A 加密写回语义 4（无加密模板直接拒绝 / 解密→改→加密→再解密逐字段一致 / 写回仍是密态且不含明文 / 加解密共用同一 AAD）· B lib 结构 5（AAD 抽出 / setAAD 复用 / 写前先验证原信封可解 / 凭据白名单只封这几个 / 已导出）· C daemon 落盘 12（persistRefreshedAccount 定义 / ⭐ 双 CAS：签名 + 全文比对 / 加密态按原信封重加而非写明文 / wx 独占临时文件 + rename / 失败日志不带异常原文 / ⭐ 刷新前预检可写性否则 encrypt-account-unavailable 不刷 / pendingPersistence 标记 + 补写路径 / 旧「仅保存在内存」与旧 read-failed 拼消息已清除）· D 两个文件仍纯 CRLF。⚠️ A2–A4 依赖本机存在加密态账号备份，缺失时 skip 3 条（pass 变 19）
   ['test-session-silent-refresh.js', 18],  // 上游 1.2.18：会话列表「后台刷新把用户勾选冲掉」（自动复制收尾会延迟重载，旧实现每次都 selected={} + 退出批量模式）。A 闸门 5（四个不刷场景：批量/有勾选/页面隐藏/弹窗可见 + 面板必须 active + 自动复制在跑不刷 + 入口再拦一次）· B 静默语义 10（options.silent 解析 / ⭐ readSerial 竞态只认最新响应 / 快照比对数据没变不重渲染 / 不动 selected / 不退出批量模式 / 保住滚动 / 静默失败不擦列表）· C 调用边界 2（自动收尾走静默；用户切筛选仍走普通刷新，该清勾选就清）· D 纯 CRLF
   ['test-model-switch-guard.js', 28],  // 2026-10-29 「报错后切模型重发还是同一个错，必须重启才好」：真因＝客户端「报错后重新发送」这条路径不带 model 参数（日志 requestOptions.model=<none>）⇒ 回落到会话默认模型即报错时那个旧模型。客户端本体不能改，只做提醒。A 判据 8（三段式命中 / 模型一致不命中 / 不一致但成功不命中 / custom-local: 前缀剥离 / wb-lite 忽略 / 中间夹请求不张冠李戴 / 取最后一次 / 无 SET 的失败不报）· B 解析 3 · C 尾部按行对齐 2 · D 扫描窗口 3（新鲜命中 / 超期不翻 / 目录缺失不抛）· E 策略读写 4（缺文件默认开 / 坏 JSON 退默认 / 落盘往返 / 原子写无残片）· F 接线 8（daemon 两路由 + 1.5s 节流 / 关掉直接短路 / ⭐ 守卫块禁止出现发消息或改模型的调用 / window 去重跨注入重建 / 增强页卡片与 4s 轮询 / 不用 window.confirm / mac 白名单两处 / 纯 CRLF）
+  // 2026-11-03 侧车统一网关插件化（可剥离）：A 模块契约（9 导出 + 数据目录指向 <dataDir>/unified）；
+  //   B 路由行为（status/credential/config 白名单/log/detail/models/非法 action 400/未知 404）；
+  //   C 剥离边界（daemon 挂载点 ≤12 行、inject.js 零残留、前端 teardown、端口不撞 7863/daemon）；
+  //   + 卡顿守卫（observer 只观察 body childList / 不监听 attributes / 挂载后 disconnect）
+  ['test-side-gateway.js', 49],
+  // 2026-11-03 统一网关**网页控制台**（管理面从面板搬到 http://127.0.0.1:7866/panel/）：
+  //   A 性能纪律 9（虚拟滚动 / 不整页重建 / 隐藏暂停轮询 / 明细分页）
+  //   B 安全边界 7（只监听回环 / 独立口令 / Origin 校验 / HttpOnly cookie / CSP）
+  //   C 功能契约 16（别名归一化 / 转发前改写 model / auto 兜底 + 缓存 / 档位梯子 /
+  //                  备份 + 原子写 / 走 lib / 测速 / 转义 / 一键加入 / 一键加速）
+  //   D 可剥离边界 4
+  //   ⚠️ 控制台部署在 %APPDATA%\WorkDaddy\unified\，不在本仓；找不到部署时整体跳过（不算失败）。
+  ['test-side-gateway-console.js', 72],
+  // 2026-11-03 统一网关「账号 × 模型健康矩阵 + 预热探测」（治愈面板里的「换号重试第 N 次」）：
+  //   H 后端 30 / K 面板皮肤 8（选号带 model / known-good 优先 / 冷却分作用域：429=模型级、
+  //              401 与积分不足=账号级 / health.json 持久化 / probeAt 复活探测 /
+  //              指数退避 / 预热够用就停 / 请求路径不同步探测 / 热模型才预热）
+  //   I 前端 6（模型页「可用号」列、未探显示灰「未探」、预热按钮）
+  //   J 配置 4（need=6 / cap=20 / ok TTL=12h / maxTry 6→4）
+  ['test-gateway-health.js', 48],
+  // 设置面板「记忆」标签页（scripts/ck-memory.js + ck-memory-ui.js）。
+  // 静态层锁 daemon 的 7 组挂载点与注入源占位符（少一处哑火、多一处重复挂载）；
+  // 行为层在临时目录造假 transcript 真跑索引，锁住四个回归过的坑：
+  //   ① 中文两字词命中（FTS5 默认分词对中文无效）② 压缩摘要/注入话术不入库
+  //   ③ 强制重建不翻倍（contentless FTS5 删不掉 ⇒ 25k 堆到 102k）
+  //   ④ 增量只读新增段（每 30s 走这条路）
+  //   ⑤ 面板可见性守卫：标签栏必须换行、侧车卡片必须点标签重新武装探测
+  //   ⑥ MCP 入口自包含（不依赖 ~/.workbuddy/hooks）+ 配置自维护四场景
+  //   ⑥ 时间线必须取「最近 N 条」并报总条数（长会话从头取等于看不到近期）
+  //   ⑦ 检索优先对话，工具回显只在对话无命中时兜底
+  //   ⑧ 多会话：跟踪名单能被单独回填、两条会话并存、查询互不串门、单条可删
+  //   ⑨ 绑定信号：点开会话不发消息也要跟过去（mtime 对这种事完全无感）
+  //      · 绑定优先于 mtime · 必须落盘（MCP 是独立进程）· 非法 sid 拒绝
+  //      · 指向已删会话 / 超过 TTL 都要回落 mtime，不能变成「查不了记忆」
+  //   ⑩ 官方标题：custom_title > title > 首条发言；官方库损坏要安静降级
+  //   ⑪ 会话清单：按最后活跃倒序、关键词过滤、sort=size
+  //   ⑫ 阶段 6 库外话题拦截：latinMiss（罕用英文专名整库查无）/ idMiss（强标识符查无）
+  //      · 拆开逐词断言 —— 整体只测 search() 时，「拦截生效但判据错了」和「拒得对」看不出区别
+  //      · 三个反向守卫：redis/server 这类常用词不许拦、纯中文兜不住是**已知边界**、deep=true 必须绕过
+  //      · 词表未就绪必须放行（df 全为 0 ⇒ 否则所有英文查询被误判成「库里没有」）
+  //      · 索引写入后 df 缓存必须失效（否则「刚聊过的话题」被判成没聊过）+ 换库复位 _vocabReady
+  //      · fuse 路由要清 hits/facts/fused 三样（少清一路，融合层会把拒答翻案：75%→62.5%）
+  //      · 拒答理由 miss 必须一路透传到面板（只传 via 的话「ENT-MISS」对用户是无意义的内部代码，
+  //        空结果和「功能坏了」在他眼里完全一样）
+  //   ⑬ 阶段 6 后半段 sleeptime 整理：
+  //      · 合并三道闸（数值集合相等 / 实体不交即跳过 / 状态词不对立），每道都有正反例成对验证
+  //      · **自动合并默认关** —— 实测同义组最低 jaccard 0.409 < 对照组「已装运/未装运」0.733，
+  //        单一阈值做不到既不误合又合得动；主路径是「列候选（只读）+ 人点确认」
+  //      · 人工确认必须**重新校验**，不信任前端传来的判断
+  //      · 不删行（只标 valid_to）/ 落 consol_log 快照 / 按 run_id 倒序回滚
+  //      · 恢复只认 conflict，manual 一条都不碰（人的判断优先于机器）
+  //      · 同一事实被改两次后回滚必须回到**最早**快照（顺序错了会停在中间态）
+  /* 443 → 483：2026-11-05 下午加了三批守卫（界面重构 4 条、回填策略 11 条、
+     AND 题集 8 条、WAL 上限 3 条 等）。预期值必须跟着走，否则回归会报
+     「实际 ≠ 预期」，让人以为测试坏了 —— 而其实只是加了新断言。 */
+  /* 483 → 493：2026-11-06 加了「MCP 一次重试」的 10 条守卫
+     （全虚构必须仍 0 条 / 不许循环 / 大小写不敏感剔词 / 不许 LIKE 全表扫 等）。 */
+  ['test-ck-memory.js', 493],
 ];
 
 // ── 0) 代码索引保鲜（2026-10-01 新增）─────────────────────────────────────────
@@ -149,9 +207,52 @@ for (const [file, expect] of SUITES) {
   if (code !== 0 || failn) bad++;
   out.push((code === 0 && !failn ? 'ok  ' : 'FAIL') + '  tools/updater-guard.js'.padEnd(34) + ' rc=' + code + '  PASS=' + pass + ' FAIL=' + failn);
 }
+
+// ── 反代网关面板（Go）：vendor/wb2api-go/internal/panel ─────────────────────
+// 2026-11-03 控制台重构后接入。这块代码是 Go，不在 node 套件里；单独跑。
+// ⚠️ 没有 Go 工具链时**整体跳过**（本机默认没装，装了才跑），不阻断回归。
+// ⚠️ 需要 GOPROXY 镜像：直连 proxy.golang.org 在本机会 Bad Gateway。
+{
+  const goBin = (() => {
+    // 优先 PATH，其次几个常见/临时安装位置（本机验证用的是 /d/go-toolchain）
+    const cands = ['go', 'D:/go-toolchain/go/bin/go.exe', 'C:/Go/bin/go.exe', 'C:/Program Files/Go/bin/go.exe'];
+    for (const c of cands) {
+      try {
+        execFileSync(c, ['version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
+        return c;
+      } catch (_) { }
+    }
+    return null;
+  })();
+  if (!goBin) {
+    out.push('skip  vendor/wb2api-go/internal/panel'.padEnd(34) + ' rc=-  未装 Go 工具链（跳过，不算失败）');
+  } else {
+    const gdir = path.join(ROOT, 'vendor', 'wb2api-go');
+    let text = '', code = 0;
+    try {
+      text = execFileSync(goBin, ['test', './internal/panel/', '-count=1'],
+        {
+          cwd: gdir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 600000,
+          env: Object.assign({}, process.env, {
+            GOFLAGS: '-mod=mod',
+            GOPROXY: process.env.GOPROXY || 'https://goproxy.cn,direct',
+          }),
+        });
+    } catch (e) {
+      text = String((e.stdout || '') + (e.stderr || ''));
+      code = e.status === undefined ? -1 : e.status;
+    }
+    // go test 失败时输出里有 "--- FAIL: TestXxx"
+    const fails = (text.match(/^--- FAIL: (\S+)/gm) || []).map((s) => s.replace(/^--- FAIL:\s*/, ''));
+    const okFlag = code === 0 && !fails.length;
+    if (!okFlag) bad++;
+    out.push((okFlag ? 'ok  ' : 'FAIL') + '  vendor/wb2api-go/internal/panel'.padEnd(34) +
+      ' rc=' + code + '  汇总: ' + (okFlag ? 'all pass' : ('FAIL ' + fails.length + ': ' + fails.slice(0, 6).join(', '))));
+  }
+}
 out.push('');
 out.push(bad === 0
-  ? '全部通过（' + (SUITES.length + 1) + ' 个套件 / ' + totalPass + ' 项断言）'
+  ? '全部通过（' + (SUITES.length + 2) + ' 个套件 / ' + totalPass + ' 项断言）'
   : '有 ' + bad + ' 个套件未通过');
 const file = path.join(__dirname, 'regression-all.out.txt');
 fs.writeFileSync(file, out.join('\n') + '\n', 'utf8');

@@ -1,0 +1,740 @@
+{
+  "rows": [
+    {
+      "id": "S01",
+      "cat": "single",
+      "q": "已排序目录 合并之后有多少个产品位",
+      "gold": [
+        748
+      ],
+      "segN": 5187,
+      "priN": 140,
+      "pool": 94,
+      "via": "OR",
+      "rank": 3,
+      "goldPri": [
+        {
+          "seq": 748,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "S02",
+      "cat": "single",
+      "q": "拍摄 壁炉工具 批次的 MD5 重复率是多少",
+      "gold": [
+        856
+      ],
+      "segN": 5187,
+      "priN": 140,
+      "pool": 64,
+      "via": "OR",
+      "rank": 2,
+      "goldPri": [
+        {
+          "seq": 856,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "S03",
+      "cat": "single",
+      "q": "未处理目录 全部处理完之后一共多少个文件",
+      "gold": [
+        943
+      ],
+      "segN": 5187,
+      "priN": 140,
+      "pool": 101,
+      "via": "OR",
+      "rank": 2,
+      "goldPri": [
+        {
+          "seq": 943,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "S04",
+      "cat": "single",
+      "q": "反代网关 三个账号 按什么顺序扣积分",
+      "gold": [
+        8210
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 280,
+      "via": "OR",
+      "rank": 20,
+      "goldPri": [
+        {
+          "seq": 8210,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "S05",
+      "cat": "single",
+      "q": "回归测试 42 套件 2999 断言 是哪一次",
+      "gold": [
+        1172
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 232,
+      "via": "OR",
+      "rank": 1,
+      "goldPri": [
+        {
+          "seq": 1172,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "S06",
+      "cat": "single",
+      "q": "v1.4.0 的 APK 大小是多少字节",
+      "gold": [
+        2569,
+        2571
+      ],
+      "segN": 22126,
+      "priN": 552,
+      "pool": 193,
+      "via": "OR",
+      "rank": 3,
+      "goldPri": [
+        {
+          "seq": 2569,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        },
+        {
+          "seq": 2571,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "S07",
+      "cat": "single",
+      "q": "飞鸽短信 余额还有多少条",
+      "gold": [
+        8423,
+        8427
+      ],
+      "segN": 22126,
+      "priN": 552,
+      "pool": 103,
+      "via": "OR",
+      "rank": 1,
+      "goldPri": [
+        {
+          "seq": 8423,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        },
+        {
+          "seq": 8427,
+          "pri": 2,
+          "kind": "user",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "S08",
+      "cat": "single",
+      "q": "md 快速查看器 改了哪些文件",
+      "gold": [
+        2616
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 234,
+      "via": "OR",
+      "rank": 7,
+      "goldPri": [
+        {
+          "seq": 2616,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "S09",
+      "cat": "single",
+      "q": "45S1.png 判定成哪个型号",
+      "gold": [
+        994
+      ],
+      "segN": 5187,
+      "priN": 140,
+      "pool": 72,
+      "via": "OR",
+      "rank": 16,
+      "goldPri": [
+        {
+          "seq": 994,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "S10",
+      "cat": "single",
+      "q": "上游 1.2.7 真增量 新增几个文件 改动几个",
+      "gold": [
+        5900
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 248,
+      "via": "OR",
+      "rank": 1,
+      "goldPri": [
+        {
+          "seq": 5900,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "P01",
+      "cat": "single",
+      "q": "插件卡顿是哪个进程的锅",
+      "gold": [
+        12228
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 212,
+      "via": "OR",
+      "rank": 33,
+      "goldPri": [
+        {
+          "seq": 12228,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "P02",
+      "cat": "single",
+      "q": "新登录的账号为什么进不了网关的池子",
+      "gold": [
+        13332
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 257,
+      "via": "OR",
+      "rank": 2,
+      "goldPri": [
+        {
+          "seq": 13332,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "P03",
+      "cat": "single",
+      "q": "用量看板会话排行显示未命名 怎么修的",
+      "gold": [
+        3969,
+        3970
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 248,
+      "via": "OR",
+      "rank": 1,
+      "goldPri": [
+        {
+          "seq": 3969,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        },
+        {
+          "seq": 3970,
+          "pri": 2,
+          "kind": "user",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "P04",
+      "cat": "single",
+      "q": "手机打开 app 一直转圈 什么原因",
+      "gold": [
+        236
+      ],
+      "segN": 22126,
+      "priN": 552,
+      "pool": 1,
+      "via": "AND",
+      "rank": -1,
+      "goldPri": [
+        {
+          "seq": 236,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "P05",
+      "cat": "single",
+      "q": "画册里那三个所谓空号 到底是怎么回事",
+      "gold": [
+        2183
+      ],
+      "segN": 5187,
+      "priN": 140,
+      "pool": 95,
+      "via": "OR",
+      "rank": 3,
+      "goldPri": [
+        {
+          "seq": 2183,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "P06",
+      "cat": "single",
+      "q": "旧的 apk 包能不能还原出源码",
+      "gold": [
+        935
+      ],
+      "segN": 22126,
+      "priN": 552,
+      "pool": 203,
+      "via": "OR",
+      "rank": 9,
+      "goldPri": [
+        {
+          "seq": 935,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "M01",
+      "cat": "multi",
+      "q": "已排序目录从 95 个涨到 247 个，中间合并了什么批次",
+      "gold": [
+        425,
+        748
+      ],
+      "segN": 5187,
+      "priN": 140,
+      "pool": 87,
+      "via": "OR",
+      "rank": 3,
+      "goldPri": [
+        {
+          "seq": 425,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        },
+        {
+          "seq": 748,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "M02",
+      "cat": "multi",
+      "q": "画册产品清单里相邻组撞色的问题最后怎么解决的",
+      "gold": [
+        263,
+        332
+      ],
+      "segN": 5187,
+      "priN": 140,
+      "pool": 101,
+      "via": "OR",
+      "rank": 2,
+      "goldPri": [
+        {
+          "seq": 263,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        },
+        {
+          "seq": 332,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "M03",
+      "cat": "multi",
+      "q": "卡顿问题从怀疑渲染层到定位到进程递归 结论怎么变的",
+      "gold": [
+        11933,
+        12228
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 279,
+      "via": "OR",
+      "rank": 6,
+      "goldPri": [
+        {
+          "seq": 11933,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        },
+        {
+          "seq": 12228,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "M04",
+      "cat": "multi",
+      "q": "lang app 的源码和服务器架构分别是什么技术栈",
+      "gold": [
+        115,
+        405
+      ],
+      "segN": 22126,
+      "priN": 552,
+      "pool": 331,
+      "via": "OR",
+      "rank": 5,
+      "goldPri": [
+        {
+          "seq": 115,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        },
+        {
+          "seq": 405,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "M05",
+      "cat": "multi",
+      "q": "画册没有的型号 和 有同编号但颜色不同的 各有多少个",
+      "gold": [
+        425
+      ],
+      "segN": 5187,
+      "priN": 140,
+      "pool": 106,
+      "via": "OR",
+      "rank": 1,
+      "goldPri": [
+        {
+          "seq": 425,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "T01",
+      "cat": "temporal",
+      "q": "token 速度功能最初为什么做 后来为什么又要拿掉",
+      "gold": [
+        116,
+        1813
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 267,
+      "via": "OR",
+      "rank": 12,
+      "goldPri": [
+        {
+          "seq": 116,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        },
+        {
+          "seq": 1813,
+          "pri": 2,
+          "kind": "user",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "T02",
+      "cat": "temporal",
+      "q": "上游 1.2.9 到底吸纳了没有 中间怎么反复的",
+      "gold": [
+        8442,
+        5900
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 289,
+      "via": "OR",
+      "rank": 10,
+      "goldPri": [
+        {
+          "seq": 5900,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        },
+        {
+          "seq": 8442,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "T03",
+      "cat": "temporal",
+      "q": "代码加速最后是哪两件事一起起作用才正常的",
+      "gold": [
+        12356
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 242,
+      "via": "OR",
+      "rank": 3,
+      "goldPri": [
+        {
+          "seq": 12356,
+          "pri": 2,
+          "kind": "user",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "T04",
+      "cat": "temporal",
+      "q": "证书过期之后是怎么处理的",
+      "gold": [
+        236,
+        272
+      ],
+      "segN": 22126,
+      "priN": 552,
+      "pool": 192,
+      "via": "OR",
+      "rank": 4,
+      "goldPri": [
+        {
+          "seq": 236,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        },
+        {
+          "seq": 272,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "T05",
+      "cat": "temporal",
+      "q": "1.2.15 的同步个性化功能最后到底接没接",
+      "gold": [
+        13345,
+        13420
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 221,
+      "via": "OR",
+      "rank": 19,
+      "goldPri": [
+        {
+          "seq": 13345,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        },
+        {
+          "seq": 13420,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "O01",
+      "cat": "open",
+      "q": "哪些任务适合交给团队做 哪些自己单干更划算",
+      "gold": [
+        2815
+      ],
+      "segN": 22126,
+      "priN": 552,
+      "pool": 183,
+      "via": "OR",
+      "rank": 4,
+      "goldPri": [
+        {
+          "seq": 2815,
+          "pri": 1,
+          "kind": "assistant",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "O02",
+      "cat": "open",
+      "q": "为什么不能每次改一点就发版",
+      "gold": [
+        4798
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 244,
+      "via": "OR",
+      "rank": 112,
+      "goldPri": [
+        {
+          "seq": 4798,
+          "pri": 2,
+          "kind": "user",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "O03",
+      "cat": "open",
+      "q": "人工复核为什么做成选择题和判断题文件",
+      "gold": [
+        2622
+      ],
+      "segN": 5187,
+      "priN": 140,
+      "pool": 99,
+      "via": "OR",
+      "rank": 2,
+      "goldPri": [
+        {
+          "seq": 2622,
+          "pri": 2,
+          "kind": "user",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "O04",
+      "cat": "open",
+      "q": "这个 app 是给谁用的 为什么不做给客户装",
+      "gold": [
+        652
+      ],
+      "segN": 22126,
+      "priN": 552,
+      "pool": 351,
+      "via": "OR",
+      "rank": 5,
+      "goldPri": [
+        {
+          "seq": 652,
+          "pri": 2,
+          "kind": "user",
+          "noise": 0
+        }
+      ]
+    },
+    {
+      "id": "O05",
+      "cat": "open",
+      "q": "离线环境怎么验证面板布局",
+      "gold": [
+        681
+      ],
+      "segN": 24080,
+      "priN": 540,
+      "pool": 232,
+      "via": "OR",
+      "rank": -1,
+      "goldPri": [
+        {
+          "seq": 681,
+          "pri": 2,
+          "kind": "user",
+          "noise": 0
+        }
+      ]
+    }
+  ],
+  "buckets": {
+    "前5": 19,
+    "6-20": 8,
+    "21-50": 1,
+    "51+": 1,
+    "池外": 2,
+    "gold 是过程话": 0
+  }
+}

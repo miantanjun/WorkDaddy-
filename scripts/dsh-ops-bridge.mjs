@@ -1,22 +1,25 @@
 #!/usr/bin/env node
 /**
- * dsh-ops-worker MCP bridge for WorkBuddy.
+ * dsh-ops-worker MCP bridge for WorkBuddy —— 精简版（v2，对应 dsh-ops 0.4.4）。
  *
- * ⚠️ 本文件由 WorkDaddy 随包分发（scripts/dsh-ops-bridge.mjs），安装时原样复制到
- *    %APPDATA%\WorkDaddy\dsh-ops\worker-mcp.mjs 并由 mcp.json 以 node 启动。
- *    上游：T-Auto/dsh-ops（MIT AND Apache-2.0）。桥本身零第三方依赖。
+ * 只暴露原生工具**真正做不到**的四个能力：
+ *   read_files  一次读 1~32 个文件区间（原生 Read 一次只能一个文件）
+ *   read_docx   直接读 DOCX 主体段落（不用起 python/office skill）
+ *   read_table  直接读 CSV/TSV 单元格（引号/换行/转义由 worker 处理）
+ *   result      结果超预算时按 ref:// 句柄分页取回
  *
- * 把 dsh-ops 的原生 Rust worker（dsh-ops-worker.exe，DSH 0.3.0 插件自带）
- * 包装成一个零依赖的 MCP stdio server。worker 本身是一个独立的
- * stdin->stdout JSON 进程（协议见 native/src/main.rs），与 DSH/cordis
- * 宿主完全解耦，因此只需在本桥内复刻 lib/file/worker.js 的请求构造逻辑。
+ * 刻意**不**暴露：glob / grep / inspect_local_file / replace / write_file /
+ * edit_file / copy / move / remove / diff / stat / batch —— 宿主的 Grep/Glob/
+ * Read/Edit/Write 更强，并列暴露只会增加选择歧义。
  *
- * 工具（前缀由 MCP server 名提供，调用形态 mcp__dsh-ops__<tool>）：
- *   grep / glob / inspect_local_file / replace   —— Rust 文件工具（有界输出、分页）
- *   batch / result                               —— PTC 安全批处理与有界结果引用
+ * 也刻意**不**暴露 read_pdf —— 上游只支持 classic-xref + 标准 Type1 字体
+ * （Helvetica/Courier/Times，Standard/WinAnsi）。实测真实发票、提单、PI 全部
+ * 报 UNSUPPORTED_DOCUMENT / DOCUMENT_PARSE_ERROR，不可用。PDF 请走 pdf skill。
  *
+ * worker 是 stdin->stdout 一次性 JSON 进程（native/src/main.rs），与 DSH/cordis
+ * 宿主完全解耦；本桥沿用其 v0 裸协议（envelope.rs 有显式 v0 分支，非回退）。
  * 协议：newline-delimited JSON-RPC 2.0 over stdio（MCP 2025-03-26）。
- * 无第三方依赖，node >= 18 可直接运行。
+ * 零第三方依赖，node >= 18 可直接运行。
  */
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
@@ -28,7 +31,13 @@ import { fileURLToPath } from 'node:url'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const WORKER = path.join(HERE, 'bin', 'dsh-ops-worker.exe')
 const SERVER_NAME = 'dsh-ops'
-const SERVER_VERSION = '0.3.0-wb1'
+const SERVER_VERSION = '0.4.4-wb2'
+
+/** 单次调用的输出窗口。worker 侧硬上限是 128 KiB（envelope::MAX_OUTPUT_BYTES），
+ *  这里留出余量即可；超预算的结果 worker 会自行截断或发 ref:// 句柄。 */
+const OUT_LIMIT = 2 * 1024 * 1024
+const CALL_TIMEOUT_MS = 120000
+const REQ_LIMIT = 2 * 1024 * 1024
 
 /** root：可用 DSH_OPS_ROOT 覆盖，否则取 MCP server 启动时的 cwd。 */
 function resolveRoot() {
@@ -37,7 +46,8 @@ function resolveRoot() {
   return process.cwd()
 }
 
-/** 与 dsh-ops lib/file/worker.js 对齐的路径解析：path 缺省时取 root 本身。 */
+/** 路径解析：相对路径按 root 展开。文档类工具在 worker 侧**只认绝对路径**
+ *  （否则报 "Expected one absolute, bounded host-resolved path"）。 */
 function resolveTarget(raw, root) {
   if (raw === undefined || raw === null || raw === '') return root
   if (typeof raw !== 'string' || raw.includes('\0')) return undefined
@@ -48,161 +58,158 @@ const string = { type: 'string' }
 const integer = { type: 'integer', minimum: 0 }
 const bounded = (properties, required = []) => ({ type: 'object', properties, required, additionalProperties: false })
 
-/** 工具参数 schema 与 dsh-ops lib/file/contract.js、lib/ptc/contract.js 一致。 */
+/** 工具参数 schema 与 0.4.4 的 lib/capabilities/{file,documents,result}.js 对齐。 */
 const TOOLS = [
   {
-    name: 'grep',
+    name: 'read_files',
     description:
-      'Rust regex 内容检索（ripgrep 引擎，无环视）。有界输出 + 分页（nextOffset）。path 为绝对目录路径（省略时用 root）。outputMode: files_with_matches|content|count|summary。适合在大目录里替代逐文件读取。',
+      '一次读取 1~32 个文件的指定文本区间（UTF-8，按行）。原生 Read 一次只能读一个文件，这个能一次拿多份并返回每份的 complete/error。分页用 nextOffset 续行、nextIndex 续未读文件。适合同时看多个文件的头部/片段（如同时比对多份源码或配置）。',
     inputSchema: bounded(
       {
-        path: string,
-        pattern: string,
-        glob: { type: 'array', items: string },
-        outputMode: { type: 'string', enum: ['files_with_matches', 'content', 'count', 'summary'] },
-        caseInsensitive: { type: 'boolean' },
-        lineNumbers: { type: 'boolean' },
-        beforeContext: { ...integer, maximum: 32 },
-        afterContext: { ...integer, maximum: 32 },
-        multiline: { type: 'boolean' },
-        offset: integer,
-        limit: { ...integer, minimum: 1, maximum: 10000 },
-      },
-      ['pattern'],
-    ),
-    readOnly: true,
-  },
-  {
-    name: 'glob',
-    description:
-      '按 glob 模式列文件（不遍历符号链接/隐藏文件/.git）。path 为绝对目录路径（省略时用 root）。pattern 如 ["**/*.rs","!target/**"]，前导 ! 排除。outputMode: paths|details；sort: path|modified。有界输出 + 分页。',
-    inputSchema: bounded(
-      {
-        path: string,
-        pattern: { type: 'array', minItems: 1, items: string },
-        outputMode: { type: 'string', enum: ['paths', 'details'] },
-        sort: { type: 'string', enum: ['path', 'modified'] },
-        offset: integer,
-        limit: { ...integer, minimum: 1, maximum: 10000 },
-      },
-      ['pattern'],
-    ),
-    readOnly: true,
-  },
-  {
-    name: 'inspect_local_file',
-    description:
-      '有界读取单个文件：UTF-8 文本按行（offset/limit 分页）或 hex 视图。目录会被拒绝，列目录用 glob。path 为绝对文件路径。',
-    inputSchema: bounded({
-      path: string,
-      offset: { ...integer, minimum: 1 },
-      limit: { ...integer, minimum: 1, maximum: 10000 },
-      encoding: { type: 'string', enum: ['utf-8'] },
-      view: { type: 'string', enum: ['text', 'hex'] },
-    }),
-    readOnly: true,
-  },
-  {
-    name: 'replace',
-    description:
-      '跨文件确定性替换（Rust regex）。dryRun=true 只观测不写入；真实写入带 revision 校验与原子替换。path 为绝对路径（须在 root 或系统临时目录内）。',
-    inputSchema: bounded(
-      {
-        path: string,
-        pattern: string,
-        replacement: string,
-        glob: { type: 'array', items: string },
-        maxReplacements: { ...integer, minimum: 1, maximum: 100000 },
-        dryRun: { type: 'boolean' },
-      },
-      ['pattern', 'replacement'],
-    ),
-    readOnly: false,
-  },
-  {
-    name: 'batch',
-    description:
-      'PTC 安全批处理：copy/move/remove 的预检（plan）与执行（resume/run）。action=plan 生成无副作用审计计划，之后必须用 action=resume + 同一个 id 执行该计划。operations 用相对 root 的路径，无覆盖、无符号链接穿越。危险操作，执行前向用户确认。',
-    inputSchema: bounded(
-      {
-        root: string,
-        action: { type: 'string', enum: ['plan', 'run', 'resume'] },
-        operations: {
+        files: {
           type: 'array',
-          maxItems: 512,
-          items: bounded({ op: { type: 'string', enum: ['copy', 'move', 'remove'] }, path: string, to: string }, ['op', 'path']),
+          minItems: 1,
+          maxItems: 32,
+          items: bounded(
+            {
+              path: { ...string, description: '文件绝对路径。' },
+              offset: { type: 'integer', minimum: 1, description: '起始行（1 基），默认 1。' },
+              limit: { type: 'integer', minimum: 1, maximum: 10000, description: '行数，默认 200。' },
+            },
+            ['path'],
+          ),
         },
-        operationsRef: string,
-        protect: { type: 'array', maxItems: 128, items: string },
-        id: string,
       },
-      ['action'],
+      ['files'],
     ),
-    readOnly: false,
+    readOnly: true,
+  },
+  {
+    name: 'read_docx',
+    description:
+      '读取 DOCX 正文段落（含表格的 table/row/cell 坐标），保留 Unicode 原文。范围为「正文主体」——不含页眉页脚、脚注、批注、版式。适合快速扫合同/保函/条款正文。仅支持 .docx（二进制 .doc 不支持）。段落分页：offset 1 基，limit 默认 200、上限 1000。',
+    inputSchema: bounded(
+      {
+        path: { ...string, description: 'DOCX 绝对路径。' },
+        offset: { type: 'integer', minimum: 1, description: '起始段落（1 基），默认 1。' },
+        limit: { type: 'integer', minimum: 1, maximum: 1000, description: '段落数，默认 200。' },
+      },
+      ['path'],
+    ),
+    readOnly: true,
+  },
+  {
+    name: 'read_table',
+    description:
+      '读取 CSV/TSV 的单元格（词法字符串，不做类型推断、不算公式）。正确处理引号内逗号、跨行记录、"" 转义。支持 UTF-8/UTF-16LE/UTF-16BE（严格解码，冲突 BOM 直接报错）。适合核对对账表、发票明细、PI 行项。数据行分页：offset 1 基（表头不计），limit 默认 200、上限 1000。',
+    inputSchema: bounded(
+      {
+        path: { ...string, description: 'CSV/TSV 绝对路径。' },
+        format: { type: 'string', enum: ['csv', 'tsv'], description: '省略时按扩展名推断（.tsv → tsv，其余 csv）。' },
+        encoding: { type: 'string', enum: ['utf-8', 'utf-16le', 'utf-16be'], description: '默认 utf-8。' },
+        header: { type: 'boolean', description: '首行是否为列名，默认 true。' },
+        offset: { type: 'integer', minimum: 1, description: '起始数据行（1 基，表头不计），默认 1。' },
+        limit: { type: 'integer', minimum: 1, maximum: 1000, description: '数据行数，默认 200。' },
+      },
+      ['path'],
+    ),
+    readOnly: true,
   },
   {
     name: 'result',
     description:
-      'PTC 有界结果引用：put 存入对象行；page 按 equals/fields 过滤分页读取（offset/limit/maxBytes 预算）；release 释放。24h 过期。用于把大批量结果暂存在 worker 侧、按需取页，避免一次性塞满上下文。',
+      '对某次调用返回的 ref:// 结果句柄做分页或释放。**只能 page/release**（Native 侧没有 put —— 句柄由 worker 在结果超输出预算时自动产生）。分页默认 offset=0 / limit=64 / maxBytes=16384；只有整页都展示完才可跟 nextOffset。equals 先过滤再投影；references 会随会话过期。仅当某次调用返回了 reference.refId 时才需要它。',
     inputSchema: bounded(
       {
-        action: { type: 'string', enum: ['put', 'page', 'release'] },
-        root: string,
-        id: string,
-        items: { type: 'array', maxItems: 10000, items: { type: 'object' } },
+        action: { type: 'string', enum: ['page', 'release'] },
+        id: { ...string, description: '原样使用返回的 reference.refId（形如 ref://session/tool/uuid）。' },
+        root: { ...string, description: '与该 handle 绑定的绝对根；省略用当前 root。' },
         offset: integer,
-        limit: { ...integer, minimum: 1, maximum: 512 },
-        maxBytes: { ...integer, minimum: 512, maximum: 65536 },
-        fields: { type: 'array', maxItems: 32, items: string },
-        equals: { type: 'object' },
+        limit: { type: 'integer', minimum: 1, maximum: 512, description: '默认 64。' },
+        maxBytes: { type: 'integer', minimum: 512, maximum: 65536, description: '默认 16384。' },
+        fields: { type: 'array', maxItems: 32, items: string, description: '最多 32 个顶层字段名。' },
+        equals: { type: 'object', description: '最多 16 个顶层精确值过滤（投影与分页之前生效）。' },
       },
-      ['action'],
+      ['action', 'id'],
     ),
-    readOnly: false,
+    readOnly: true,
   },
 ]
 
-/** 调用原生 worker：一次性 stdin JSON 进、stdout JSON 出（2 MiB 预算）。 */
+/** 按工具把 args 里的路径规整为绝对路径（文档类工具在 worker 侧严格要求）。 */
+function normalizeArgs(tool, args, root) {
+  const out = { ...args }
+  if (tool === 'read_files') {
+    const files = Array.isArray(args.files) ? args.files : []
+    out.files = files.map((f) => {
+      const p = resolveTarget(f && f.path, root)
+      return p ? { ...f, path: p } : f
+    })
+    return out
+  }
+  if (tool === 'read_docx' || tool === 'read_table') {
+    const p = resolveTarget(args.path, root)
+    if (p) out.path = p
+    return out
+  }
+  if (tool === 'result') {
+    const r = resolveTarget(args.root, root)
+    if (r) out.root = r
+    return out
+  }
+  return out
+}
+
+/** 调用原生 worker：一次性 stdin JSON 进、stdout JSON 出。 */
 function callWorker(tool, args, readOnly) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const root = resolveRoot()
-    const target = resolveTarget(args.path, root)
-    if (!target) {
-      resolve({ status: 'error', error: { code: 'INVALID_ARGUMENT', message: 'path must be a non-empty path.' } })
-      return
-    }
-    const { __root, ...cleanArgs } = args
     const input = {
       root,
       scope: 'workbuddy',
       tool,
-      args: { ...cleanArgs, path: target },
+      args: normalizeArgs(tool, args, root),
       read_only: readOnly,
     }
     if (!readOnly) input.write_roots = [root, os.tmpdir()]
     const payload = JSON.stringify(input)
-    if (Buffer.byteLength(payload) > 2 * 1024 * 1024) {
+    if (Buffer.byteLength(payload) > REQ_LIMIT) {
       resolve({ status: 'error', error: { code: 'OUTPUT_LIMIT', message: 'Request exceeds 2 MiB.' } })
+      return
+    }
+    if (!fs.existsSync(WORKER)) {
+      resolve({ status: 'error', error: { code: 'WORKER_MISSING', message: `worker binary missing: ${WORKER}` } })
       return
     }
     const child = spawn(WORKER, [], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] })
     let out = ''
     let err = ''
-    const timer = setTimeout(() => child.kill(), 120000)
+    let killed = false
+    const timer = setTimeout(() => { killed = true; child.kill() }, CALL_TIMEOUT_MS)
     child.stdout.on('data', (d) => {
       out += d
-      if (out.length > 8 * 1024 * 1024) child.kill()
+      if (out.length > OUT_LIMIT) { killed = true; child.kill() }
     })
-    child.stderr.on('data', (d) => {
-      err += d
-    })
+    child.stderr.on('data', (d) => { err += d })
     child.on('error', (e) => {
       clearTimeout(timer)
-      reject(e)
+      resolve({ status: 'error', error: { code: 'RESULT_UNKNOWN', message: `worker spawn failed: ${String(e && e.message)}` } })
     })
     child.on('close', (code) => {
       clearTimeout(timer)
-      if (code !== 0 && !out) {
+      if (killed) {
+        // 超时或输出超窗：worker 可能已产生副作用，绝不能报成功。
+        resolve({
+          status: 'error',
+          error: {
+            code: 'RESULT_UNKNOWN',
+            effectState: 'unknown',
+            message: `worker stopped (${code === 124 ? 'timeout' : 'output/output-limit'}); effects unknown`,
+          },
+        })
+        return
+      }
+      if (code !== 0 && !out.trim()) {
         resolve({ status: 'error', error: { code: 'RESULT_UNKNOWN', message: `worker exit ${code}: ${err.slice(0, 500)}` } })
         return
       }
@@ -238,7 +245,10 @@ rl.on('line', async (line) => {
           capabilities: { tools: {} },
           serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
           instructions:
-            'Rust 原生文件工具（dsh-ops worker）：有界输出 + 分页。大目录检索优先用 grep/glob，避免逐文件读取；replace/batch 为写操作，执行前须向用户确认。',
+            'dsh-ops 原生文件读取（精简版）。只提供宿主做不到的四件事：read_files（一次多文件多区间）、' +
+            'read_docx（DOCX 正文段落）、read_table（CSV/TSV 单元格）、result（ref:// 结果分页）。' +
+            '日常单文件读、目录检索、改名/编辑请用宿主原生 Read/Grep/Glob/Edit。' +
+            '注意：本服务不提供 PDF 读取（上游实现对真实发票/提单不适用），PDF 请用 pdf skill。',
         }
         break
       case 'ping':
@@ -258,9 +268,8 @@ rl.on('line', async (line) => {
         const name = params?.name
         const tool = TOOLS.find((t) => t.name === name)
         if (!tool) throw new Error(`unknown tool: ${name}`)
-        if (!fs.existsSync(WORKER)) throw new Error(`worker binary missing: ${WORKER}`)
         const value = await callWorker(name, params?.arguments ?? {}, tool.readOnly)
-        const isError = value?.status === 'error'
+        const isError = value?.status === 'error' || value?.status === 'rejected'
         result = {
           content: [{ type: 'text', text: JSON.stringify(value) }],
           ...(isError ? { isError: true } : {}),
@@ -278,4 +287,4 @@ rl.on('line', async (line) => {
   }
 })
 
-process.stderr.write(`[dsh-ops-mcp] worker=${WORKER} root=${resolveRoot()}\n`)
+process.stderr.write(`[dsh-ops-mcp] v${SERVER_VERSION} worker=${WORKER} root=${resolveRoot()}\n`)

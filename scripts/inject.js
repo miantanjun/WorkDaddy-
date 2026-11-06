@@ -1993,6 +1993,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     return out;
   }
 
+  /**
+   * 不在「自动化」页列表展示的内置任务。
+   * 目前只有限流换号：它的开关在账号页卡片上（唯一的用户入口），
+   * 本页若再列一遍，就变成同一件事有两个开关、两种叫法。
+   */
+  var WBS_HIDDEN_AUTO_IDS = ['mu0mg334-rate-limit-auto-switch'];
+  function wbsAutoHiddenInList(task) {
+    return !!task && WBS_HIDDEN_AUTO_IDS.indexOf(task.id) >= 0;
+  }
+
   function wbsIsBuiltinAutomation(task) {
     return !!task && (task.builtinManaged === true || [
       'buddy-fuel-station-close-on-account-switch',
@@ -6390,7 +6400,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '</button>' +
         '<div class="wbs-fold-body">' +
         '<div class="wbs-idle-row"><span class="wbs-idle-label">被限流时自动切号续跑</span>' +
-        '<label class="wbs-switch" title="开启后：检测到限流横幅自动换号并接着做。对应自动化任务「模型限流自动切号续跑」（任务本体仍在自动化页，可看日志）"><input type="checkbox" id="wbs-failover-auto"><span class="wbs-switch-slider"></span></label></div>' +
+        '<label class="wbs-switch" title="开启后：检测到限流横幅自动换号并接着做。这是「限流换号」唯一的开关入口（自动化页不再重复列出该任务；任务本体仍由后台按 1 分钟兜底运行）"><input type="checkbox" id="wbs-failover-auto"><span class="wbs-switch-slider"></span></label></div>' +
         '<div class="wbs-failover-note" id="wbs-failover-note"></div>' +
         '<div class="wbs-failover-bar">' +
         '<span class="wbs-failover-status" id="wbs-failover-status"></span>' +
@@ -8794,8 +8804,45 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
 
     // ===== Tab 切换 =====
+    // ===== 标签记忆：记住上次停在哪一页 =====
+    // ⚠️ 面板不记忆的代价是实打实的：「记忆」排在第 10 位，每次重开面板都要从「账号」
+    //    横跨整条标签栏重新点一次。存 localStorage 并按 profile 分开，多客户端互不覆盖。
+    var PANEL_TAB_KEY = 'wbs-panel-tab-' + PROFILE_ID;
+    function rememberTab(name) {
+      try { if (name && /^[a-z]{3,16}$/.test(name)) localStorage.setItem(PANEL_TAB_KEY, name); } catch (_) {}
+    }
+    function readPanelTab() {
+      try {
+        var v = localStorage.getItem(PANEL_TAB_KEY);
+        return (v && /^[a-z]{3,16}$/.test(v)) ? v : '';
+      } catch (_) { return ''; }
+    }
+    /**
+     * 打开面板时恢复到上次那一页。
+     * ⚠️ 必须带重试：外挂页（如「记忆」）是后注入的，面板刚显示时它的 tab/pane 可能还没挂上；
+     *    只试一次就会「有时恢复得回去、有时回不去」。用局部 setTimeout，不依赖外层具名定时器。
+     */
+    var panelTabRetry = null;
+    function restorePanelTab(tries) {
+      var want = readPanelTab();
+      if (!want) return;
+      var t = root.querySelector('.wbs-tab[data-tab="' + want + '"]');
+      var p = root.querySelector('.wbs-pane[data-pane="' + want + '"]');
+      if (!t || !p) {
+        if ((tries || 0) < 8 && state.open) {
+          panelTabRetry = setTimeout(function () { panelTabRetry = null; restorePanelTab((tries || 0) + 1); }, 200);
+        }
+        return;
+      }
+      if (!t.classList.contains('active')) switchTab(want);
+    }
+    // 外挂页（记忆）自己切页时不走 switchTab，这里给它一个写记忆的入口
+    try { window.__wbsRememberTab = rememberTab; } catch (_) {}
+    try { window.__wbsRestoreTab = restorePanelTab; } catch (_) {}
+
     function switchTab(name) {
       if (typeof closeAccountNotePopover === 'function') closeAccountNotePopover();
+      rememberTab(name);
       var tabs = root.querySelectorAll('.wbs-tab');
       var panes = root.querySelectorAll('.wbs-pane');
       for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle('active', tabs[i].getAttribute('data-tab') === name);
@@ -8891,7 +8938,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }
       function runFor(taskId) { var latest = null; for (var i = 0; i < automationState.runs.length; i++) { var item = automationState.runs[i]; if (item.taskId !== taskId) continue; if (item.status === 'running') return item; if (!latest || Number(item.startedAt || 0) > Number(latest.startedAt || 0)) latest = item; } return latest; }
       function selectedIds() { return Object.keys(automationState.selected).filter(function (id) { return automationState.selected[id]; }); }
-      function allSelected() { return automationState.tasks.length > 0 && automationState.tasks.every(function (task) { return automationState.selected[task.id]; }); }
+      // ⚠️ 全选只针对**列表里看得见**的任务。隐藏项（限流换号）若被顺手选上，
+      //   用户点「删除选中」会删掉一条他从没见过的任务。
+      function selectableTasks() { return automationState.tasks.filter(function (t) { return !wbsAutoHiddenInList(t); }); }
+      function allSelected() { var list = selectableTasks(); return list.length > 0 && list.every(function (task) { return automationState.selected[task.id]; }); }
       function syncBatchControls() {
         var count = automationPane.querySelector('#wbs-auto-batch-count');
         var selectAll = automationPane.querySelector('#wbs-auto-select-all');
@@ -8906,11 +8956,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         if (!list) return;
         // 【性能】不可见就别重建（innerHTML + scrollTop 读写 = 两次强制布局）
         if (!wbsPanelShown() || !wbsTabActive("automations")) return;
-        if (count) count.textContent = automationState.tasks.length ? String(automationState.tasks.length) : '';
+        // 列表里可展示的任务（隐藏掉入口已在别处的内置任务）
+        var visibleTasks = automationState.tasks.filter(function (t) { return !wbsAutoHiddenInList(t); });
+        if (count) count.textContent = visibleTasks.length ? String(visibleTasks.length) : '';
         var scrollTop = list.scrollTop;
         list.innerHTML = '';
-        if (!automationState.tasks.length) { list.innerHTML = '<div class="wbs-auto-empty">暂无自动化任务</div>'; syncBatchControls(); return; }
-        automationState.tasks.forEach(function (task) {
+        if (!visibleTasks.length) { list.innerHTML = '<div class="wbs-auto-empty">暂无自动化任务</div>'; syncBatchControls(); return; }
+        visibleTasks.forEach(function (task) {
           var row = document.createElement('div'); row.className = 'wbs-auto-row'; row.setAttribute('data-task-id', task.id);
           var run = runFor(task.id);
           var running = !!(run && run.status === 'running');
@@ -9799,7 +9851,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       automationPane.querySelector('#wbs-auto-create').addEventListener('click', showExamples);
       automationPane.querySelector('#wbs-auto-discover').addEventListener('click', showAutomationDiscovery);
       automationPane.querySelector('#wbs-auto-batch').addEventListener('click', function () { automationState.batchMode = true; automationPane.querySelector('#wbs-auto-normal-actions').style.display = 'none'; automationPane.querySelector('#wbs-auto-batch-actions').style.display = 'flex'; syncBatchControls(); render(); });
-      automationPane.querySelector('#wbs-auto-select-all').addEventListener('click', function () { var shouldSelect = !allSelected(); automationState.tasks.forEach(function (task) { automationState.selected[task.id] = shouldSelect; }); render(); syncBatchControls(); });
+      automationPane.querySelector('#wbs-auto-select-all').addEventListener('click', function () { var shouldSelect = !allSelected(); selectableTasks().forEach(function (task) { automationState.selected[task.id] = shouldSelect; }); render(); syncBatchControls(); });
       automationPane.querySelector('#wbs-auto-batch-cancel').addEventListener('click', function () { automationState.batchMode = false; automationState.selected = {}; automationPane.querySelector('#wbs-auto-normal-actions').style.display = 'flex'; automationPane.querySelector('#wbs-auto-batch-actions').style.display = 'none'; render(); });
       automationPane.querySelector('#wbs-auto-batch-apply').addEventListener('click', function () { var ids = selectedIds(); if (!ids.length) { toast('请至少选择一项', true, root); return; } showAutomationConfirm('删除选中的自动化任务？', '删除后无法恢复。', function () { api('/api/automations/bulk', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: ids, action: 'delete' }) }).then(function () { automationState.selected = {}; automationState.batchMode = false; automationPane.querySelector('#wbs-auto-normal-actions').style.display = 'flex'; automationPane.querySelector('#wbs-auto-batch-actions').style.display = 'none'; return load(); }).catch(function (e) { toast(e.message || '批量操作失败', true, root); }); }); });
       automationPane.querySelector('#wbs-auto-list').addEventListener('change', function (e) {
@@ -12053,7 +12105,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<div class="wbs-pcard-title">dsh-ops 工具<span class="wbs-pcard-sub" id="wbs-dshops-status"></span></div>' +
         '<div class="wbs-nd-row">' +
         '<span class="wbs-nd-title">原生检索 / 批处理</span>' +
-        '<span class="wbs-nd-hint">Rust 原生 MCP 工具：fastctx（glob/grep/inspect/replace，常驻进程，大目录检索比内置引擎快）＋ dsh-ops（batch/result 两段式安全批处理）。一键安装后需重启 WorkBuddy 生效</span>' +
+        '<span class="wbs-nd-hint">Rust 原生 MCP 读取工具（dsh-ops worker）：read_files 一次读 32 个文件区间 · read_docx 直读 Word 正文 · read_table 直读 CSV/TSV · result 大结果分页。仅补宿主做不到的事，单文件读/检索/编辑仍用内置工具。不含 PDF 读取。一键安装后需重启 WorkBuddy 生效</span>' +
         '</div>' +
         '<div id="wbs-dshops-body"></div>' +
         '</div>' +
@@ -12254,13 +12306,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           return '?';
         };
         if (!d.installed) {
-          var ib = mkBtn('一键安装', '从 npm 官方源下载 fastctx + dsh-ops worker，校验 sha512 后注册到 mcp.json', 'primary');
+          var ib = mkBtn('一键安装', '从 npm 官方源下载 dsh-ops worker（0.4.4，约 3.9MB），校验 sha512 后注册到 mcp.json', 'primary');
           ib.addEventListener('click', function () { install(ib, false); });
-          row('安装', '将安装 fastctx ' + pv('fastctx') + ' · worker ' + pv('worker') + ' → ' + d.managedDir, ib);
+          row('安装', '将安装 worker ' + pv('worker') + '（单二进制，已不再包含 fastctx）→ ' + d.managedDir, ib);
           return;
         }
         var ver = d.versions || null;
-        var verTxt = (ver && (ver.fastctx || ver.worker)) ? ('fastctx ' + (ver.fastctx || '?') + ' · worker ' + (ver.worker || '?') + ' · ') : '';
+        var verTxt = (ver && ver.worker) ? ('worker ' + ver.worker + ' · ') : '';
         row('已安装', verTxt + (d.managed ? 'WorkDaddy 管理' : '检测到外部部署') + (d.dir ? ' · ' + d.dir : ''), null);
         var sw = document.createElement('label');
         sw.className = 'wbs-switch';
@@ -14321,6 +14373,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       fabQuietMode.wake();
       if (open) {
         if (newlyOpened && typeof preloadAutomationDiscovery === 'function') preloadAutomationDiscovery().catch(function () {});
+        // 恢复上次停的那一页。放在 preload 之后：恢复会触发目标页的懒构建，
+        // 排在后面可避免首帧闪一下「账号」再跳走。
+        if (newlyOpened) { try { restorePanelTab(0); } catch (_) {} }
         // ⚠️ 只有「用户亲手打开」才上报：automation（daemon 程序化开合）与 restore（重注入还原）都不算。
         if (newlyOpened && !(options && (options.automation || options.restore))) {
           // 熔断：任何未知链路导致的开合自激都在这里止血（10 秒内超过 4 次就不再上报）。
@@ -21960,10 +22015,28 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-spin{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;animation:wbs-spin-rotate .8s linear infinite;vertical-align:-2px}',
     '@keyframes wbs-spin-rotate{to{transform:rotate(360deg)}}',
     /* ===== 新版 Tab 布局（账号/主题/增强）===== */
-    '.wbs-tabs{display:flex;gap:6px;padding:10px 14px 0;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 25%,transparent);overflow-x:auto;scrollbar-width:none}',
+    // ⚠️⚠️ 2026-11-03：标签从 9 个涨到 10 个（新增「🧠记忆」）后必须换行。
+    //    原来 flex:1 0 66px + overflow-x:auto + 隐藏滚动条 ⇒ 第 10 个标签被挤到右边缘
+    //    只露一条缝（实测 scrollWidth 742 > clientWidth 735），用户直接「看不见」这个功能。
+    //    改用 flex-wrap:wrap + 可压缩的 flex-basis：默认宽度下仍是一行，面板被拖窄才折行，
+    //    永远不会有标签被藏起来。
+    // ⚠️⚠️⚠️ 必须用 grid 而不是 flex-wrap。实测（面板默认 636px、10 个标签）：
+    //    flex 下每行能放 9 个，第 10 个掉到第二行，再被 flex-grow 拉成 610px 的整条黑条，
+    //    看起来像一条粗黑横杠，用户直接认不出那是「记忆」标签。
+    //    grid + auto-fill 让每行每一格等宽，行尾不会被拉伸；minmax 保证窄面板下仍可读。
+    //    同时去掉 overflow-x:auto —— grid 已按可用宽度自动排布，不需要横向滚动。
+    // ⚠️⚠️⚠️ 用「固定 5 列」而不是 auto-fill。实测 auto-fill 在矮窄面板下会算出 12 列，
+    //    把 10 个标签硬塞进一行、每个只剩 53px，「自动化」被截成「自…」——
+    //    看着像一行很整齐，实际有两个标签读不出来了。固定 5 列恒为 2 行 × 5 列，
+    //    340px（面板最小宽）到 720px 全量实测：无一个标签被截断。
+    //    10 个标签正好 2 行，将来加成 11 个是 3 行（最后一行 1 个但等宽，不再被拉伸）。
+    '.wbs-tabs{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;padding:10px 12px 0;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 25%,transparent)}',
     '.wbs-tabs::-webkit-scrollbar{display:none}',
-    '.wbs-tab{flex:1 0 66px;min-width:66px;display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 4px;border:none;border-radius:10px;background:transparent;color:var(--wb-icon-secondary,#666);font-size:13px;font-weight:600;cursor:pointer;transition:all .18s;font-family:inherit;white-space:nowrap}',
-    '.wbs-tab-ico{font-size:14px;line-height:1}',
+    // min-width:0 让网格格子能压缩到 minmax 给的下限，否则 nowrap 的文本会把格子顶宽
+    '.wbs-tab{min-width:0;display:flex;align-items:center;justify-content:center;gap:4px;padding:8px 3px;border:none;border-radius:10px;background:transparent;color:var(--wb-icon-secondary,#666);font-size:12.5px;font-weight:600;cursor:pointer;transition:all .18s;font-family:inherit;white-space:nowrap;overflow:hidden}',
+    '.wbs-tab>span:not(.wbs-tab-ico){overflow:hidden;text-overflow:ellipsis}',
+    '.wbs-tab-ico{font-size:14px;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto}',
+    '.wbs-tab-ico svg{width:14px;height:14px;display:block}',
     '.wbs-tab:hover{background:var(--wb-bg-hover,#f5f5f5);color:var(--wb-color-text-primary,#1f1f1f)}',
     '.wbs-tab.active{background:var(--wb-button-primary-bg,#1f1f1f);color:var(--wb-button-primary-fg,#fff);box-shadow:0 2px 10px color-mix(in srgb,var(--wb-button-primary-bg,#1f1f1f) 30%,transparent)}',
     '.wbs-pane{display:none;padding:2px 2px 6px}',

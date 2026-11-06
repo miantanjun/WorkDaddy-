@@ -1,0 +1,134 @@
+{
+ "dataDir": "D:\\WorkDaddy\\.wd-tmp\\evaldata\\WorkDaddy",
+ "at": "2026-11-04T09-25-16",
+ "summary": {
+  "seg": {
+   "recall": 0.4194,
+   "mrr": 0.5,
+   "rejAcc": 0.75,
+   "perCat": {
+    "single": {
+     "n": 16,
+     "hit": 8,
+     "mrr": 0.4688
+    },
+    "multi": {
+     "n": 5,
+     "hit": 2,
+     "mrr": 0.8
+    },
+    "temporal": {
+     "n": 5,
+     "hit": 1,
+     "mrr": 0.4
+    },
+    "open": {
+     "n": 5,
+     "hit": 2,
+     "mrr": 0.4
+    },
+    "negative": {
+     "n": 8,
+     "hit": 6,
+     "mrr": 0
+    }
+   }
+  },
+  "fact": {
+   "recall": 0.1935,
+   "mrr": 0.0219,
+   "rejAcc": 0.875,
+   "perCat": {
+    "single": {
+     "n": 16,
+     "hit": 5,
+     "mrr": 0.0245
+    },
+    "multi": {
+     "n": 5,
+     "hit": 1,
+     "mrr": 0.0549
+    },
+    "temporal": {
+     "n": 5,
+     "hit": 0,
+     "mrr": 0.0024
+    },
+    "open": {
+     "n": 5,
+     "hit": 0,
+     "mrr": 0
+    },
+    "negative": {
+     "n": 8,
+     "hit": 7,
+     "mrr": 0
+    }
+   }
+  },
+  "ent": {
+   "recall": 0,
+   "mrr": 0,
+   "rejAcc": 1,
+   "perCat": {
+    "single": {
+     "n": 16,
+     "hit": 0,
+     "mrr": 0
+    },
+    "multi": {
+     "n": 5,
+     "hit": 0,
+     "mrr": 0
+    },
+    "temporal": {
+     "n": 5,
+     "hit": 0,
+     "mrr": 0
+    },
+    "open": {
+     "n": 5,
+     "hit": 0,
+     "mrr": 0
+    },
+    "negative": {
+     "n": 8,
+     "hit": 8,
+     "mrr": 0
+    }
+   }
+  },
+  "fuse": {
+   "recall": 0.5484,
+   "mrr": 0.2478,
+   "rejAcc": 0.75,
+   "perCat": {
+    "single": {
+     "n": 16,
+     "hit": 10,
+     "mrr": 0.2745
+    },
+    "multi": {
+     "n": 5,
+     "hit": 3,
+     "mrr": 0.2552
+    },
+    "temporal": {
+     "n": 5,
+     "hit": 2,
+     "mrr": 0.2024
+    },
+    "open": {
+     "n": 5,
+     "hit": 2,
+     "mrr": 0.2003
+    },
+    "negative": {
+     "n": 8,
+     "hit": 6,
+     "mrr": 0
+    }
+   }
+  }
+ }
+}

@@ -17,6 +17,76 @@
 > ⚠️ **版本断层**：v1.9.2 – v1.9.7 的条目尚未回填（那几版只打了 tag 未补文档）。
 > 需要时用 `git log v1.9.1..v1.9.7 --oneline` 还原。**跨版本的完整清单以 [`docs/DONE-TODO.md`](docs/DONE-TODO.md) 为准**，本文件只管「某一版改了什么」。
 
+## v1.10.0 —— 2026-11-06
+
+**主题**：**会话记忆**整套插件首次入库（面板 / MCP / Hook 三条入口）+ **侧车统一网关**面板化 + dsh-ops 升 0.4.4。
+
+> 这一版把「记忆」从本地试验品变成随包分发的插件：4 个 `scripts/ck-*.js` 全部**可剥离**
+> （文件不在，面板标签页与接口就自然消失，不用改 `inject.js` 一行）。同批还补上了 mac DMG
+> 白名单、版本号四处真相源，以及一处**早已在公开仓库里的 frp token 明文**的善后。
+
+### 新增功能
+
+- **⭐ 会话记忆插件（`scripts/ck-memory.js`，303 KB）**（自研）：给 WorkBuddy 加一层「能自己找回来」的会话记忆。
+  索引走 **SQLite FTS5 + 中文 bigram**（中文按二字切分入 `bigram` 列，FTS 与 `text` **相互独立** ⇒ 改正文必须同步重建 FTS），
+  检索走「AND 优先 → 0 条才 OR → 全空退 LIKE」，内层用 `LIMIT -1` 防止限流把工具输出挤出名额。
+  写入侧是**分层优先级**：`2` = 用户原话、`1` = 回合末条、`0` = 过程话，检索按优先级加权。
+  另有一层**事实层（ADD-only）**，只增不改，供 `memory_facts` 查询。
+- **⭐ 「当前会话」不再靠 mtime 猜**（自研）：点开会话**并不写 `.jsonl`**，所以按 mtime 判断「你在哪条会话」必然错
+  ——切过去不发消息，它永远认为你还在旧会话上。现改为**渲染进程上报**：注入脚本每 2 秒读侧栏 `_selected_` 选中态，
+  报到 `/api/ck-memory/bind` 落盘 `bind.json`（MCP 是独立进程，内存变量互相看不见）；**2 分钟无心跳或指向已删会话则回落 mtime**。
+- **会话记忆面板（`scripts/ck-memory-ui.js`，187 KB）**（自研）：面板新增「记忆」标签页，可查看「已记住多少条 / 索引了哪几条会话」，
+  并提供**会话下拉 + 「加入跟踪」**。索引器每 30 秒在「当前会话」之外**再补一条**，不一次性灌几十 MB 卡住主线程。
+  ⚠️ 文案口径已修正：「已记住 29」= **4 条显式跟踪 + 25 条自动跟踪（≥1 MB）**，不是进度条（`UI_REV 43`）。
+- **MCP 检索服务（`scripts/ck-mcp.js`）**（自研）：暴露 `memory_search` / `memory_facts` / `memory_sessions` / `memory_recent` / `memory_timeline`。
+  `memory_search` 带**一次性重试**：只在 `via` 为 `ENT-MISS`/`ID-MISS` 时，剔除「整库查无」的词后再查**一次**，绝不循环。
+  ⚠️ 重试有硬闸：**剔词后必须还剩库内存在的锚点**（英文专名 / strongIds）才准重试 —— 否则会把「拒答」变成「胡说」。
+- **UserPromptSubmit Hook（`scripts/ck-hook-prompt.js`）**（自研）：把「本次提问可能需要的旧记忆」在提交前注入。
+  铁律：**任何异常都 `exit 0`**，绝不允许因为记忆层出错而挡住用户发消息。
+- **侧车统一网关面板（`scripts/side-gateway.js` + `side-gateway-ui.js`）**（自研）：网关（Go 侧车）的管理界面收进面板标签页。
+  实现是**纯外挂脚本**：`daemon.uiSource()` 拼接后注入，由它**自己找 `.wbs-tabs` 插标签页**，`inject.js` 零改动；
+  文件不存在就拼接空串 ⇒ 标签页自然消失，**开箱即卸**。
+- **隧道入口（`scripts/tunnel-ingress.js`）**（自研）：公网侧只当 API 入口，面板不随隧道暴露。
+- **面板标签记忆**（自研）：记住上次停在哪一页，存 `localStorage` 且**按 profile 分开**（多客户端互不覆盖）。
+  ⚠️ 恢复必须带重试：外挂页（如「记忆」）是后注入的，面板刚显示时它的 tab/pane 可能还没挂上，只试一次会「有时回得来、有时回不去」。
+- **自动化页不再重复列出「限流换号」**（自研）：该任务的唯一开关在账号页卡片上，自动化页再列一遍等于同一件事两个开关、两种叫法。
+  改用 `WBS_HIDDEN_AUTO_IDS` 白名单式隐藏，任务本体仍由后台按 1 分钟兜底运行。
+
+### 优化调整
+
+- **dsh-ops `0.3.0` → `0.4.4`**（吸纳上游）：上游**删掉了 vendored FastCtx**（功能并入 worker），许可证从 `MIT AND Apache-2.0` 收敛为 `MIT`。
+  现在只装**一个约 3.9 MB 的二进制**（原来两个）。完整判据同步改为 `hasWorker && hasBridge`（缺桥时 worker 无法被 MCP 调用 = 等于没装），
+  并在写 `mcp.json` 时**顺手清掉 0.3.0 残留的 `fastctx` 条目**——否则它指向一个已被删掉的 exe，每次启动都报一次连接失败。
+- **网关版本 `1.13.1-panel-wd8` → `wd9`**（自研）：配合面板重构。同时**禁止 fork 版降级到上游原版**：
+  上游包里没有本仓的面板改造，装上去等于把 `tunnelGuard`（公网只当 API 入口）连同全部 wd 改动一起抹掉，面板会重新暴露到公网。
+  ⇒ 宁可让「安装网关」报错，也不静默降级。
+- **网关面板重构（`vendor/wb2api-go/internal/panel`）**（自研）：`index.html` / `app.js` / `mobile.css` 重做信息架构与移动端布局，
+  新增 3 个前端断言套件（`frontend_icon_test.go` / `frontend_layout_test.go` / `information_architecture_test.go`）与设计说明 `REDESIGN.md`。
+
+### 缺陷修复
+
+- **⭐ frp token 明文已进公开仓库**（安全）：`docs/public-api-tunnel.md` 第 13 行原本直接写着 `Authorization: Bearer <token>`，
+  `git log -S` 定位到 **v1.9.8 的提交 `134d99a`**，且已确认在 `origin/main` 上。现改为占位符（全库 0 处明文）；
+  **token 本身另行更换**，历史不重写（保住与上游 `babygoton/WorkDaddy` 的对比能力）。
+- **`.gitignore` 补 5 条**（工程）：`.wd-analysis/eval/{.onnx-flat,.emb-cache,.vec-cache,out}`（114 MB 模型 + 200 MB+ 编码缓存 + 每轮跑分明细，都是本机生成物）
+  与 `.dsh-ops/`（worker 运行期 lock / 分片）。规则是**只入库 `probe-*` 脚本与 `*.json` 结论，不入库权重**。
+
+### 工程与文档
+
+- **mac DMG 白名单补 `tunnel-ingress.js`**（自研）：`daemon.js` 直接 `require('./tunnel-ingress')`，但 `build-mac-dmg.sh` 的
+  `for f in` 列表与显式白名单**两处都漏了** ⇒ Windows 包（`cp -R` 整目录）没事，**mac 包起来会 daemon 启动即崩**。
+  顺带确认：`packaging-whitelist.js` 的 `macWhitelistMissing` 当时报 **0 缺失**，即**这条守卫对「只漏显式白名单」是瞎的**。
+- **版本号四处真相源统一到 `1.10.0`**：`DAEMON_VERSION` / `DAEMON_BUILD_ID`（→ `release-1.10.0-20261106-memory-plugin-r1`）/
+  `scripts/package.json` / `scripts/package-lock.json`（顶层 + `packages['']`）/ `README.md`。
+- **新增文档**：`docs/记忆系统深度对比.md`（与外部记忆方案的能力对照，含「为什么不做跨会话」的结论）。
+- **新增评测集**：`.wd-analysis/eval/`（126 题：正例 109 / 纯负例 8 / 配对负例 9；AND 组 50 题另置，不进主集）。
+  ⚠️ 口径不许改：副本库、`ck._internal.search(sid,q,k)`、`minHit=1`、gold 须 `pri>=1 且 noise=0`。
+- **`1.10.0` 揪出一个真实的断言缺陷**（工程）：`test-automation-protocol-v3.js` 的 E15 判「版本号不低于 1.4.3」时用的是**字符串比较**，
+  于是 `'1.10.0' >= '1.4.3'` 判为 **false** —— 次版本一进两位数就必红。已改为按数值逐段比较；
+  **这不是放宽断言，是把判据改回它本来想表达的语义**（同类写法全库只此一处）。
+- **回归基线 88 套件 / 5520 项断言**（新增 `test-ck-memory.js` 493 / `test-side-gateway.js` 49 / `test-side-gateway-console.js` 72 / `test-gateway-health.js` 48）。
+
+
 ## v1.9.9 —— 2026-11-02
 
 **主题**：修 `gatewayInstall` 的两处顺序缺陷（发完 v1.9.8 当天发现）。

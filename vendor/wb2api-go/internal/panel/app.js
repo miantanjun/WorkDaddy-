@@ -336,6 +336,14 @@ $('btnKey').onclick = async () => {
     await api('overview');
     $('keyErr').hidden = true;
     $('keyVeil').classList.remove('on');
+    /* ⚠️ 这里只调 start() 是不够的。首屏的 go() 在**没有密钥**时就跑过一遍，
+       各块以自己的方式失败了（用量卡留下红字「读取失败：密钥无效或未填写」，
+       其余块留空）。start() 只补 loadOverview + loadCompensation + 5s 轮询，
+       用量卡要等到下一次轮询（最多 5 秒）才恢复 —— 实测填完密钥后 1.5s 仍是
+       红字、6.5s 才正常，中间这 5 秒看起来就像"密钥填错了"。
+       正确做法：把当前页的 VIEW_LOADERS 整体重跑一遍，填完即刷新。 */
+    const load = VIEW_LOADERS[view];
+    if (load) load();
     start();
   } catch (e) { $('keyErr').hidden = false; }
 };
@@ -350,25 +358,81 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { overview: '总览', capacity: '容量与调度', accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+/* 页面标题（2026-11-03 第二轮：9 视图 → 4 页，导航回到单层平铺）。
+   ⚠️ 这里的键必须与 index.html 里 `<section id="view-XXX">` 一一对应。
+   合并原则是「内容真的搬到同一页」，不是把入口换个地方藏 —— 所以不再有二级标签栏。 */
+const TITLES = {
+  overview: '总览与用量',
+  accounts: '账号与任务',
+  models: '模型与容量',
+  config: '系统与日志',
+};
+
+/* 旧视图名 → 新页面的映射。
+   用途：深链接兼容（旧书签 #usage / #packages / #capacity / #taskscenter / #logs）
+   与老代码里残留的 go('usage') 之类调用，一律落到合并后的那一页，不再报"找不到"。 */
+const LEGACY_VIEW = {
+  usage: 'overview', packages: 'overview', credit: 'overview',
+  capacity: 'models',
+  taskscenter: 'accounts',
+  logs: 'config',
+  system: 'config',
+};
+
+/** 每个页面进入时要加载哪些数据。
+ *  合并后一页里有多个数据块，进页面得全部拉一次（懒加载按块判断，重复调用无副作用）。 */
+const VIEW_LOADERS = {
+  overview: () => {
+    loadDashboard();                      // 顶栏 + 储蓄卡 + 命中率 + 账号分布
+    loadUsage();                          // 用量总览 / 明细 / 缓存
+    loadPackages();                       // 积分构成（内部有 lastPackages 缓存，重复调用不重复打上游）
+    loadCreditHistory();                  // 积分余额流水
+  },
+  accounts: () => {
+    loadOverview(true);                   // 账号池的数据源就是 overview 快照
+    loadTasks();                           // 任务中心
+  },
+  models: () => {
+    if (!$('mdBody').children.length) loadModels();
+    loadCapacity();                        // 模型三态 + 调度参数
+  },
+  config: () => { loadConfig(); loadLogs(); },
+};
+
 function go(v) {
+  // 旧名/分组名先归一到合并后的页面
+  if (!TITLES[v]) v = LEGACY_VIEW[v] || 'overview';
+  if (!TITLES[v]) v = 'overview';
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
-  $('ttl').textContent = TITLES[v];
-  if (v === 'overview') loadDashboard();
-  if (v === 'models' && !$('mdBody').children.length) loadModels();
-  if (v === 'config') loadConfig();
-  if (v === 'logs') loadLogs();
-  if (v === 'capacity') loadCapacity();
-  if (v === 'usage') loadUsage();
-  if (v === 'packages') loadPackages();
-  // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
-  // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
-  // 完整逐包明细由卡片上的「检查」按钮显式触发（loadPackages/loadExpiry）。
-  if (v === 'taskscenter') reattachQueueView();
+  $('ttl').textContent = TITLES[v] || v;
+  const load = VIEW_LOADERS[v];
+  if (load) load();
 }
+
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
+
+/* 卡片/提示条上的下钻链接，两种：
+   · data-go="页面名"  —— 跨页跳转（如「账号池 →」），走 go()
+   · data-jump="锚点"  —— 同页内跳（如「明细 →」「容量与调度 →」）。
+     合并后这些内容就在本页下方，再跳页反而让人以为"又换了个地方"。 */
+document.addEventListener('click', e => {
+  const j = e.target.closest('[data-jump]');
+  if (j) {
+    e.preventDefault();
+    const el = document.getElementById(j.dataset.jump);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
+  const a = e.target.closest('[data-go]');
+  if (!a) return;
+  e.preventDefault();
+  const t = a.dataset.go;
+  if (!TITLES[t]) return;
+  go(t);
+  history.replaceState(null, '', '#' + t);
+});
 /* 首次进入延到本轮脚本求值之后再 go()。
    原因：go() 会同步触发视图的数据加载（loadUsage/loadLogs/loadPackages…），而这些
    函数读到的模块级 let/const（usageRateWarmAt、PK_* 等）在文件后半段才初始化——
@@ -376,8 +440,9 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDef
    initialization"），表现为该页永远显示"读取失败"，而点导航进去一切正常。
    延迟 0ms 让整份脚本先求值完，是修这一类问题最省事也最不容易再犯的办法。 */
 setTimeout(() => {
-  const hash = (location.hash || '#overview').slice(1);
-  go(hash in TITLES ? hash : 'overview');
+  // 深链：新页面名直接用；旧书签 #usage / #packages 之类走 LEGACY_VIEW 归一
+  const hash = (location.hash || '#overview').slice(1).split('?')[0];
+  go(TITLES[hash] ? hash : (LEGACY_VIEW[hash] || 'overview'));
 }, 0);
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
@@ -598,25 +663,25 @@ function renderDashUsage() {
     + '（成功率 ' + okRate + (okRate === '—' ? '' : '%') + '）'
     + ' · 平均 ' + fmtMs(t.avg_latency_ms) + ' · ' + fmtRate(t.avg_tokens_per_second);
 
-  // 缓存命中率：上游前缀缓存。命中/未命中都按 token 计，不是按请求数。
+  // 缓存命中率：全站唯一算法（见 cacheRatePct）。后端给了 cache_hit_rate 就用它。
   const hit = Number(t.cache_hit_tokens || 0), miss = Number(t.cache_miss_tokens || 0);
-  const rate = Number(t.cache_hit_rate);
-  const p = Number.isFinite(rate) ? Math.max(0, Math.min(100, rate)) : (hit + miss > 0 ? hit / (hit + miss) * 100 : 0);
+  const p = cacheRatePct(hit, miss, t.cache_hit_rate);
   const donut = $('ovDonut');
-  donut.style.setProperty('--p', p.toFixed(1));
-  donut.style.setProperty('--ring', p >= 70 ? 'var(--ok)' : (p >= 40 ? 'var(--accent)' : 'var(--warn)'));
-  $('ovHitPct').textContent = (hit + miss) > 0 ? p.toFixed(0) + '%' : '—';
+  const hasData = Number.isFinite(p) && (hit + miss) > 0;
+  donut.style.setProperty('--p', hasData ? p.toFixed(1) : '0');
+  donut.style.setProperty('--ring', cacheRateColor(p));
+  $('ovHitPct').textContent = hasData ? Math.round(p) + '%' : '—';
   $('ovHitIn').textContent = fmtTok(hit);
   $('ovHitMiss').textContent = fmtTok(miss);
   $('ovHitOut').textContent = fmtTok(t.completion_tokens || 0);
   $('ovLatency').textContent = fmtMs(t.avg_latency_ms) + ' / ' + fmtRate(t.avg_tokens_per_second);
-  $('ovCacheNote').textContent = (hit + miss) > 0
+  $('ovCacheNote').textContent = hasData
     ? '统计范围：' + label + '。命中 ' + fmtInt(hit) + ' token，未命中 ' + fmtInt(miss)
       + ' token；输出侧不参与缓存计费。'
     : '统计范围：' + label + '。该窗口内没有可统计的输入 token。';
 }
 
-const OV_SVG_OK = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M5.2 8.3 7 10.1l3.8-4"/></svg>';
+const OV_SVG_OK = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M5.2 8.3 7 10.1l3.8-4"/></svg>';
 
 function renderDashboard(ov) {
   if (!ov) return;
@@ -763,6 +828,13 @@ async function loadOverview(quiet) {
     renderAccounts(d.accounts || []);
     renderModelLocks(d.model_locks);
     renderDashboard(d);
+    // 导航徽标：账号组显示"有问题的账号数"，让不进页面也能看到异常
+    const badAcc = Number(d.cooling || 0) + Number(d.disabled || 0);
+    const nb = $('navAccBadge');
+    if (nb) {
+      if (badAcc > 0) { nb.hidden = false; nb.textContent = String(badAcc); nb.className = 'nb' + (Number(d.healthy || 0) === 0 ? ' bad' : ' warn'); }
+      else { nb.hidden = true; nb.textContent = ''; }
+    }
     // 到期卡片跟随首页统计同步刷新（用同一份响应里的按日批次，不额外发请求）。
     // 2 分钟内的实时明细最新且更全，保留；过期后由 state 快照接管，避免点过一次
     // 「检查」之后卡片永远停在那一刻的旧数据。
@@ -1130,7 +1202,9 @@ async function loadLogs() {
     $('logNote').textContent = logCh === 'all'
       ? '任务 ' + (counts.task || 0) + ' · 对话 ' + (counts.chat || 0) + ' · 系统 ' + (counts.sys || 0)
       : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
-    renderCreditHistory(credit);
+    // 积分流水已搬到「用量与积分」页（积分相关集中一处），日志页不再渲染它。
+    // 这里保留 credit 变量仅为兼容后端响应形状，不再渲染。
+    void credit;
   } catch (e) { /* 概览已提示 */ }
 }
 
@@ -1343,10 +1417,30 @@ function requestLogText(e) {
 
 /* 缓存命中率纯文本（issue #92）：requestLogText 与积分表/kpi 卡共用。
    自包含（不依赖 trimFixed）：前端纯函数切片测试只截取本段。 */
-function cacheRateText(hit, miss) {
+/* ── 缓存命中率：全站唯一算法 ─────────────────────────────────────────
+   2026-11-03 重构前这里有两套实现（cacheRateText 取整到整数、cacheRateCell
+   保留一位小数，色阶也不同），同一时刻总览页和用量页能读出两个不一样的百分比。
+   现在统一到 cacheRatePct()：唯一真源，所有展示都从它取值。
+   口径：命中 token ÷（命中 + 未命中）token，**按 token 计，不按请求数**；
+        后端若给了 cache_hit_rate 字段则优先用它（口径由后端定义，前端不覆盖）。 */
+function cacheRatePct(hit, miss, backendRate) {
+  const r = Number(backendRate);
+  if (Number.isFinite(r)) return Math.max(0, Math.min(100, r));
   const h = Number(hit || 0), m = Number(miss || 0), total = h + m;
-  if (!total) return '—';
-  return String(Math.round(h / total * 1000) / 10) + '%';
+  return total > 0 ? h / total * 100 : NaN;
+}
+/** 命中率的统一文案（保留一位小数；整数时不带 .0）。
+ *  ⚠️ 精度定在 0.1：调用方（请求记录、KPI、总览环）都依赖它，
+ *     改成整数会让「98.1% → 98%」这类细微退化悄悄发生。 */
+function cacheRateText(hit, miss, backendRate) {
+  const p = cacheRatePct(hit, miss, backendRate);
+  if (!Number.isFinite(p)) return '—';
+  return trimFixed(p.toFixed(1)) + '%';
+}
+/** 命中率的统一色阶（越高越好）。阈值只在这里定义一次。 */
+function cacheRateColor(p) {
+  if (!Number.isFinite(p)) return 'var(--ink-4)';
+  return p >= 90 ? 'var(--ok)' : (p >= 70 ? 'var(--accent)' : (p >= 40 ? 'var(--warn)' : 'var(--bad)'));
 }
 
 function fmtBytes(bytes) {
@@ -1789,11 +1883,14 @@ if ($('btnCompClaimAll')) $('btnCompClaimAll').onclick = async () => {
 };
 
 /* ── 轮询 ─────────────────────────────────────────────────────────── */
+/* ⚠️ 这里必须用**合并后的 4 个视图名**（overview/accounts/models/config）。
+   合并导航时曾留下旧的 'logs' / 'taskscenter' 分支，那两个 view 早已不存在
+   ⇒ models/config 两页的自动刷新从来没跑过。守卫 I7 锁死。 */
 function refreshVisible() {
   if (view === 'overview') { loadOverview(true); loadDashUsage(); }
   else if (view === 'accounts') { loadOverview(true); renderCachedCompensation(); }
-  else if (view === 'logs') loadLogs();
-  else if (view === 'taskscenter') reattachQueueView();
+  else if (view === 'models') { loadCapacity(true); }
+  else if (view === 'config') { loadLogs(); }
 }
 function start() {
   loadOverview(true);
@@ -1987,7 +2084,7 @@ function staskHTML(t) {
   }
   return '<span class="stask todo"><span class="mark">○</span>未做</span>';
 }
-const LUCK_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3.2 5.2 5 1.8l3 2.4 3-2.4 1.8 3.4-1.4 2.6 1.4 2.6-3.4 2.2H6l-3.4-2.2 1.4-2.6z" opacity=".9"/><circle cx="8" cy="9" r="1.1" fill="currentColor" stroke="none"/></svg>';
+const LUCK_SVG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3.2 5.2 5 1.8l3 2.4 3-2.4 1.8 3.4-1.4 2.6 1.4 2.6-3.4 2.2H6l-3.4-2.2 1.4-2.6z" opacity=".9"/><circle cx="8" cy="9" r="1.1" fill="currentColor" stroke="none"/></svg>';
 const SCHOOL_TITLES = {
   share_invite: '分享活动 +100c', desktop_chat_1_time: '桌面端体验 +100c（单次）',
   chat_3_times: '和 AI 对话 3 次 +50c', expert_use: '召唤开学季专家 +50c',
@@ -2538,13 +2635,12 @@ function usCreditHead(dim) {
 
 /* 缓存命中率（issue #92）：颜色即健康度——≥90% 绿 / 80–90% 黄 / <80% 红，
    样本不足灰。title 带命中/未命中绝对量，供逐项核对。 */
-function cacheRateCell(hit, miss) {
-  const h = Number(hit || 0), m = Number(miss || 0), total = h + m;
-  if (!total) return '<span class="muted">—</span>';
-  const pct = h / total * 100;
-  const color = pct >= 90 ? 'var(--ok)' : (pct >= 80 ? 'var(--warn)' : 'var(--bad)');
-  const txt = trimFixed(pct.toFixed(1)) + '%';
-  return '<span style="color:' + color + '" title="命中 ' + fmtTok(h) + ' / 未命中 ' + fmtTok(m) + ' tok">' + txt + '</span>';
+function cacheRateCell(hit, miss, backendRate) {
+  const p = cacheRatePct(hit, miss, backendRate);
+  if (!Number.isFinite(p)) return '<span class="muted">—</span>';
+  const h = Number(hit || 0), m = Number(miss || 0);
+  const txt = trimFixed(p.toFixed(1)) + '%';
+  return '<span style="color:' + cacheRateColor(p) + '" title="命中 ' + fmtTok(h) + ' / 未命中 ' + fmtTok(m) + ' tok">' + txt + '</span>';
 }
 
 function renderCreditDim() {
@@ -2877,6 +2973,8 @@ async function loadUsage() {
     await warmUsageModelRates();
     const d = await api('usage?' + q.toString());
     renderUsage(d);
+    // 积分余额流水跟着用量页一起拉（它现在属于本页）；失败不影响主视图。
+    loadCreditHistory();
   } catch (e) {
     // 失败时三块都要清干净：只改图表会留下上一次窗口的数字，看起来像"刷新成功"。
     usageData = null;

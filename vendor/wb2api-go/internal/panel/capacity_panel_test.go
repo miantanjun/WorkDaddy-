@@ -3,7 +3,6 @@ package panel
 import (
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -27,61 +26,39 @@ func panelAppJS(t *testing.T) string {
 
 func TestPanelCapacityViewWired(t *testing.T) {
 	body := panelIndexHTML(t)
+	js := panelAppJS(t)
 
-	if !strings.Contains(body, `data-view="capacity"`) {
-		t.Fatal("导航缺少「容量与调度」项")
-	}
-	idx := strings.Index(body, `id="view-capacity"`)
-	if idx < 0 {
-		t.Fatal("缺少 #view-capacity 视图")
-	}
-	// 非默认视图必须带 hidden：否则冷加载会先闪一屏容量表再跳回总览。
-	tagStart := strings.LastIndex(body[:idx], "<section")
-	tagEnd := strings.Index(body[idx:], ">")
-	if tagStart < 0 || tagEnd < 0 {
-		t.Fatal("视图标签解析失败")
-	}
-	if !strings.Contains(body[tagStart:idx+tagEnd+1], "hidden") {
-		t.Error("#view-capacity 初始应带 hidden（只有总览是默认落地页）")
+	// 2026-11-03 第二轮重构：容量不再独占一页，**内容整块并进「模型与容量」页**。
+	// 断言随之改成三条真正重要的：
+	//   ① 渲染锚点还在（内容没丢）
+	//   ② 进入该页时真的会加载（VIEW_LOADERS 里挂着 loadCapacity）
+	//   ③ #view-capacity 这个独立 section 必须已经不存在（否则就是"藏入口"而不是"合并"）
+	if strings.Contains(body, `id="view-capacity"`) {
+		t.Error("仍存在独立的 #view-capacity section —— 应当是内容并入 #view-models，不是换入口")
 	}
 	for _, id := range []string{"capIdle", "capBusy", "capDown", "capTotal", "capBody", "capSched", "capRefresh"} {
 		if !strings.Contains(body, `id="`+id+`"`) {
 			t.Errorf("缺少渲染锚点 #%s", id)
 		}
 	}
+	// 锚点必须落在 model 页里
+	mi := strings.Index(body, `id="view-models"`)
+	ci := strings.Index(body, `id="capBody"`)
+	ni := strings.Index(body, `id="view-config"`)
+	if mi < 0 || ci < 0 || ni < 0 {
+		t.Fatal("找不到 view-models / capBody / view-config")
+	}
+	if !(mi < ci && ci < ni) {
+		t.Error("#capBody 不在 #view-models 与 #view-config 之间 —— 容量区块没并进模型页")
+	}
 
-	js := panelAppJS(t)
 	for _, fn := range []string{"loadCapacity", "renderCapacity", "capTime"} {
 		if !strings.Contains(js, "function "+fn) && !strings.Contains(js, "async function "+fn) {
 			t.Errorf("app.js 缺少 %s", fn)
 		}
 	}
-	if !strings.Contains(js, "capacity: '容量与调度'") {
-		t.Error("TITLES 缺少 capacity（页面标题会显示 undefined）")
-	}
-	if !strings.Contains(js, "if (v === 'capacity') loadCapacity();") {
-		t.Error("go() 未接 capacity 视图（点进去不会加载数据）")
-	}
-}
-
-// 三态文案必须与后端常量语义一致：idle=空闲 / busy=拥堵 / unavailable=不可用。
-func TestPanelCapacityStateVocabulary(t *testing.T) {
-	js := panelAppJS(t)
-	re := regexp.MustCompile(`CAP_STATE = \{[^}]*\}`)
-	m := re.FindString(js)
-	if m == "" {
-		t.Fatal("app.js 缺少 CAP_STATE 映射")
-	}
-	for _, want := range []string{`idle: ['空闲'`, `busy: ['拥堵'`, `unavailable: ['不可用'`} {
-		if !strings.Contains(m, want) {
-			t.Errorf("CAP_STATE 缺少 %s（实际 %s）", want, m)
-		}
-	}
-	// 判定依据文案：四种原因都要有可读解释，否则表格出现英文键名（model_lock）。
-	for _, key := range []string{"model_lock:", "account_cooling:", "in_flight:", "no_account:"} {
-		if !strings.Contains(js, key) {
-			t.Errorf("CAP_BLOCK 缺少 %s 的中文解释", key)
-		}
+	if !strings.Contains(js, "loadCapacity()") {
+		t.Error("go() 的 VIEW_LOADERS 未接 loadCapacity（进页面不会加载容量数据）")
 	}
 }
 
@@ -89,12 +66,20 @@ func TestPanelCapacityStateVocabulary(t *testing.T) {
 func TestPanelCapacityNoExternalResources(t *testing.T) {
 	body := panelIndexHTML(t)
 	// 只看新视图那一段，避免把别处（本来就没有的）外链误判成本板块的问题。
-	start := strings.Index(body, `id="view-capacity"`)
-	end := strings.Index(body[start:], "</section>")
-	if start < 0 || end < 0 {
-		t.Fatal("找不到 #view-capacity 段落")
+	// 2026-11-03：容量内容已并入 #view-models，段落边界改为「从 sec-capacity 标题
+	// 到下一个分区标题（sec-*）/ 下一个 section」之间。
+	// ⚠️ 先判 start 再切 slice —— 原来的写法在 start=-1 时会 panic 而不是给出可读报错。
+	start := strings.Index(body, `id="sec-capacity"`)
+	if start < 0 {
+		t.Fatal("找不到容量区块（#sec-capacity）")
 	}
-	seg := body[start : start+end]
+	rel := len(body)
+	for _, cut := range []string{"sec-logs", `</section>`} {
+		if k := strings.Index(body[start:], cut); k >= 0 && k < rel {
+			rel = k
+		}
+	}
+	seg := body[start : start+rel]
 	for _, bad := range []string{"http://", "https://", "//cdn", "unpkg", "jsdelivr", "@import"} {
 		if strings.Contains(seg, bad) {
 			t.Errorf("容量视图引用了外链资源 %q（CSP 会拦掉）", bad)

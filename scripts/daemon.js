@@ -337,11 +337,13 @@ if (codeBuddyFiles) sessionSync = codeBuddyFiles.sync;
 // 会话记录在官方主进程里，只能经 CDP 走它的服务读写；不 patch app.asar。
 const codeBuddyNative = PROFILE.kind === 'codebuddy' ? createCodeBuddyNative({ profile: PROFILE, WebSocketCtor }) : null;
 
-// ── dsh-ops 集成（Rust 原生检索 / 批处理工具接入 WorkBuddy）──────────────
-// 把上游 T-Auto/dsh-ops（MIT AND Apache-2.0）的原生 worker 与 vendored fastctx
-// 以 MCP stdio server 形态接进 WorkBuddy：WorkDaddy 负责下载（npm 官方源 + sha512 校验）、
-// 落盘、注册 mcp.json、启停与卸载；桥脚本由随包分发的 scripts/dsh-ops-bridge.mjs 提供。
-// ⚠️ 上游只发布 win32-x64 二进制，其余平台返回 unsupported（不假装支持）。
+// ── dsh-ops 集成（Rust 原生文件读取工具接入 WorkBuddy）──────────────────
+// 把上游 T-Auto/dsh-ops（MIT）的原生 worker 以 MCP stdio server 形态接进 WorkBuddy：
+// WorkDaddy 负责下载（npm 官方源 + sha512 校验）、落盘、注册 mcp.json、启停与卸载；
+// 桥脚本由随包分发的 scripts/dsh-ops-bridge.mjs 提供。
+// 0.4.4 起上游删除了 vendored FastCtx（功能并入 worker）⇒ 只装一个二进制，约 3.9MB；
+// 桥只暴露宿主做不到的 4 个工具（read_files/read_docx/read_table/result），不暴露 read_pdf。
+// ⚠️ 本构建只内置 win32-x64 二进制，其余平台返回 unsupported（不假装支持）。
 const DSH_OPS_DIR = path.join(DATA_DIR, 'dsh-ops');
 const DSH_OPS_EXTERNAL_DIR = path.join(os.homedir(), '.workbuddy', 'mcp-servers', 'dsh-ops');
 const DSH_OPS_MCP_FILE = path.join(os.homedir(), '.workbuddy', 'mcp.json');
@@ -351,26 +353,17 @@ const DSH_OPS_PACKAGES = [
   {
     key: 'worker',
     pkg: 'dsh-ops',
-    version: '0.3.0',
-    file: 'dsh-ops-0.3.0.tgz',
-    integrity: 'sha512-DZhLjvxVuPrdhDzd6ySVK1reg4uZ0HE/ep3t+r8/3eMH/ZSbNwuhlAcr1M9lfEuwbf+Qq4u4wl8EkEbdsTk8yw==',
+    version: '0.4.4',
+    file: 'dsh-ops-0.4.4.tgz',
+    integrity: 'sha512-HY8SCzrvVBInw5qdsapOz25wdrL/bzZyWUlQR9r+3ImiC+vBbj4/JdmeohmG/nxKU/3M4k83UhxCi15byiAslg==',
     entry: 'package/runtime/win32-x64/dsh-ops-worker.exe',
     dest: 'bin/dsh-ops-worker.exe',
-    license: 'MIT AND Apache-2.0',
-  },
-  {
-    key: 'fastctx',
-    pkg: '@dsh-ops/fastctx-win32-x64',
-    version: '0.2.1',
-    file: 'fastctx-win32-x64-0.2.1.tgz',
-    integrity: 'sha512-mwdh3auRfbk4Lfgjt2NKGVvn5kHWxsIsw4rrtjv5+RQLHq5bU/ZLCAVhd9zS8/NqstjXZMRYvirq0P9FsFjykQ==',
-    entry: 'package/bin/fastctx.exe',
-    dest: 'bin/fastctx.exe',
-    license: 'Apache-2.0',
+    // 0.4.x 起上游移除了 FastCtx，许可证只剩 MIT（0.3.0 是 MIT AND Apache-2.0）。
+    license: 'MIT',
   },
 ];
 // 归档内需要一并留存的文件（许可证合规 + 溯源）。
-const DSH_OPS_EXTRA_FILES = ['package/LICENSE', 'package/LICENSE.txt', 'package/NOTICE', 'package/NOTICE.txt', 'package/README.md', 'package/provenance.json'];
+const DSH_OPS_EXTRA_FILES = ['package/LICENSE', 'package/LICENSE.txt', 'package/NOTICE', 'package/NOTICE.txt', 'package/README.md', 'package/provenance.json', 'package/runtime/win32-x64/provenance.json'];
 
 /** 探测 WorkBuddy 自带的 node（mcp.json 里 dsh-ops 条目需要绝对路径）。 */
 function dshOpsFindNodeExe() {
@@ -388,19 +381,20 @@ function dshOpsFindNodeExe() {
 /** 读某目录下的部署状态（不抛异常）。 */
 function dshOpsInspectDir(dir) {
   const worker = path.join(dir, 'bin', 'dsh-ops-worker.exe');
-  const fastctx = path.join(dir, 'bin', 'fastctx.exe');
   const bridge = path.join(dir, 'worker-mcp.mjs');
   let manifest = null;
   try { manifest = JSON.parse(fs.readFileSync(path.join(dir, DSH_OPS_MANIFEST), 'utf8')); } catch (_) { manifest = null; }
   const hasWorker = fs.existsSync(worker);
-  const hasFastctx = fs.existsSync(fastctx);
+  const hasBridge = fs.existsSync(bridge);
   return {
     dir,
     hasWorker,
-    hasFastctx,
-    hasBridge: fs.existsSync(bridge),
+    hasBridge,
+    // 0.4.x 起 FastCtx 已从上游移除（功能并入 worker）。此字段只用于识别 0.3.0 遗留文件。
+    hasLegacyFastctx: fs.existsSync(path.join(dir, 'bin', 'fastctx.exe')),
     manifest,
-    complete: hasWorker && hasFastctx,
+    // 完整 = worker + 桥。缺桥时 worker 无法被 MCP 调用，等于没装。
+    complete: hasWorker && hasBridge,
   };
 }
 
@@ -421,10 +415,9 @@ function dshOpsStatus() {
   const active = managed.complete ? managed : (external.complete ? external : null);
   let servers = {};
   try { servers = (dshOpsReadMcp().config.mcpServers) || {}; } catch (_) { servers = {}; }
-  const hasFastctx = !!servers.fastctx;
   const hasWorker = !!servers['dsh-ops'];
-  const registered = hasFastctx && hasWorker;
-  const enabled = registered && servers.fastctx.disabled !== true && servers['dsh-ops'].disabled !== true;
+  const registered = hasWorker;
+  const enabled = registered && servers['dsh-ops'].disabled !== true;
   return {
     platform: process.platform,
     supported: IS_WIN,
@@ -437,6 +430,8 @@ function dshOpsStatus() {
     packages: DSH_OPS_PACKAGES.map((x) => ({ key: x.key, pkg: x.pkg, version: x.version })),
     registered,
     enabled,
+    // 0.3.0 时期注册的 fastctx 条目：上游已移除该二进制，留着只会在每次启动报连接失败。
+    legacyFastctxEntry: !!servers.fastctx,
     nodeExe: dshOpsFindNodeExe(),
     registry: DSH_OPS_REGISTRY,
   };
@@ -499,14 +494,15 @@ function dshOpsVerifyIntegrity(buf, integrity) {
   if (actual !== m[1]) throw new Error('完整性校验失败：下载内容与官方 sha512 不一致（已中止，未落盘）');
 }
 
-/** 把 dir 写成 mcp.json 里的 fastctx + dsh-ops 两条（幂等，保留既有 disabled 状态）。 */
+/** 把 dir 写成 mcp.json 的 dsh-ops 一条（幂等，保留既有 disabled 状态；顺手清 0.3.0 残留的 fastctx）。 */
 function dshOpsRegister(dir) {
   const { config } = dshOpsReadMcp();
   if (!config.mcpServers || typeof config.mcpServers !== 'object') config.mcpServers = {};
-  const prevFast = config.mcpServers.fastctx || {};
   const prevWorker = config.mcpServers['dsh-ops'] || {};
-  config.mcpServers.fastctx = { command: path.join(dir, 'bin', 'fastctx.exe'), args: ['serve'], disabled: prevFast.disabled === true };
   config.mcpServers['dsh-ops'] = { command: dshOpsFindNodeExe(), args: [path.join(dir, 'worker-mcp.mjs')], disabled: prevWorker.disabled === true };
+  // 0.4.x 起 FastCtx 被上游移除且功能已并入 worker ⇒ 清掉 0.3.0 残留条目，
+  // 否则它会指向一个已被删掉的 exe，每次启动都报一次连接失败。
+  if (config.mcpServers.fastctx) delete config.mcpServers.fastctx;
   try { fs.mkdirSync(path.dirname(DSH_OPS_MCP_FILE), { recursive: true }); } catch (_) {}
   replaceFileWithRetry(DSH_OPS_MCP_FILE, JSON.stringify(config, null, 2) + '\n');
   return { dir, nodeExe: config.mcpServers['dsh-ops'].command };
@@ -573,9 +569,8 @@ function dshOpsInstall(opts) {
 function dshOpsToggle(enabled) {
   const { config } = dshOpsReadMcp();
   const servers = config.mcpServers || {};
-  const missing = ['fastctx', 'dsh-ops'].filter((n) => !servers[n]);
-  if (missing.length) throw new Error('尚未注册：' + missing.join(' / '));
-  ['fastctx', 'dsh-ops'].forEach((n) => { servers[n].disabled = !enabled; });
+  if (!servers['dsh-ops']) throw new Error('尚未注册：dsh-ops');
+  servers['dsh-ops'].disabled = !enabled;
   replaceFileWithRetry(DSH_OPS_MCP_FILE, JSON.stringify(config, null, 2) + '\n');
   log('[dsh-ops] 已' + (enabled ? '启用' : '停用') + '（需重启 WorkBuddy 生效）');
   return { enabled, restartRequired: true };
@@ -858,7 +853,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         CIM 查询加 -Filter 服务端过滤、周期性刷新 5s→15s）与 **1.2.41 失效卷保护**（会话工作目录巡检
 //         跳过卷已不存在的 cwd，同卷根只提示一次）；1.2.42–1.2.46 的「同步个性化」（persona 共享）
 //         **明确不吸纳**（用户判定对自己没用）。
-const DAEMON_VERSION = '1.9.9';
+const DAEMON_VERSION = '1.10.0';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 //
@@ -910,7 +905,7 @@ const UPSTREAM_VERSION = '1.2.18';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.9.9-20261102-gateway-install-order-r1';
+const DAEMON_BUILD_ID = 'release-1.10.0-20261106-memory-plugin-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -7185,7 +7180,19 @@ function buildInjectScript() {
   // 组件内通过 fetch 调用本机 API，注入时写入实际端口
   // ⚠️ 拼接顺序：markdownScript 必须在最前（inject.js 依赖 window.__wbsMarkdownPreview）。
   // ⚠️ markdownScript（map 产物）与 trustedTypesBootstrap **不进重写**：前者自带可选 policy 引用。
-  let source = (PROFILE.kind === 'codebuddy' ? rendererBridgeSource() : '') + toastScript + '\n' + compatScript + '\n' + injectScript;
+  // 侧车统一网关的**面板插件**（可剥离）：纯外挂脚本，自己找 .wbs-tabs 插标签页，
+  // inject.js 一行都不用改。文件不存在就拼接空串 ⇒ 标签页自然消失（开箱即卸）。
+  // ⚠️ 它和 inject.js 共用 __WBS_API__ / __WBS_API_TOKEN__ 占位符，下面的 replace 会一并替换。
+  let sideGatewayUi = '';
+  try {
+    if (typeof sideGateway !== 'undefined' && sideGateway) sideGatewayUi = sideGateway.uiSource() || '';
+  } catch (_) { sideGatewayUi = ''; }
+  // 会话记忆面板（可剥离）：同样是纯外挂脚本，自己找 .wbs-tabs 插标签页。
+  let ckMemoryUi = '';
+  try {
+    if (typeof ckMemory !== 'undefined' && ckMemory) ckMemoryUi = ckMemory.uiSource() || '';
+  } catch (_) { ckMemoryUi = ''; }
+  let source = (PROFILE.kind === 'codebuddy' ? rendererBridgeSource() : '') + toastScript + '\n' + compatScript + '\n' + injectScript + (sideGatewayUi ? '\n' + sideGatewayUi : '') + (ckMemoryUi ? '\n' + ckMemoryUi : '');
   if (PROFILE.kind === 'codebuddy') {
     // 只重写我们自己这份脚本里的 HTML 写入点；markdown 渲染器与 bootstrap 在字符串外。
     source = source
@@ -13661,6 +13668,26 @@ function refreshTunnelIfEnabled() {
   });
 }
 
+/* ================= 侧车统一网关（可剥离插件：scripts/side-gateway.js） ================= */
+// 它管的是外部给的第三方试用号（小浣熊 + 讯飞 Loomy），在 <dataDir>/unified 起一个独立反代，
+// 与 wb2api 主网关（7863）零耦合。生命周期（随 daemon 启动 / 退避重拉 / 60s 看门狗 / 收摊）
+// 全在模块内部，本文件只保留以下挂载点（grep sideGateway 可全部找到）——
+//   ① 这里 require + configure        ② handleApiRoute 里的路由分发
+//   ③ buildInjectScript 里的前端拼接  ④ 启动钩子 startAll   ⑤⑥ 退出钩子 stopAll
+// 剥离：删 scripts/side-gateway.js 与 side-gateway-ui.js，再删掉上述 5 处（共 6 行）。
+/* ================= 会话记忆插件（可剥离插件：scripts/ck-memory.js） ================= */
+// 作用：给当前会话建本地全文索引，解决长会话被压缩多次后早期内容丢失。
+// 剥离：删 scripts/ck-memory.js 与 ck-memory-ui.js，再删掉 grep ckMemory 命中的四处。
+const ckMemory = require('./ck-memory');
+ckMemory.configure({ dataRoot: PROFILE.dataRoot, dataDir: DATA_DIR, log: log });
+
+/* ================= 侧车统一网关（可剥离插件：scripts/side-gateway.js） ================= */
+const sideGateway = require('./side-gateway');
+// 公网入口分发器（7867）：/uni → 7866，其余 → 7863。配置全在模块默认值里，
+// 这里只留一行 require —— 保持侧车网关的可剥离行数不变（有守卫锁着）。
+const tunnelIngress = require('./tunnel-ingress').createIngress();
+sideGateway.configure({ log: log });
+
 /* ================= 暂存提示词（stash）辅助 ================= */
 
 function stashDir() {
@@ -16218,6 +16245,19 @@ function handleApiRoute(req, res) {
 
   if (!isApiRequestAuthorized(req, p)) {
     return json(res, 401, { ok: false, error: '本地 API 未授权' });
+  }
+
+  // 侧车统一网关（可剥离插件）：状态 / 启停 / 探活 / 日志 / 凭据。全部由模块自理，
+  // 这里只做一次前缀分发。typeof 兜底是为了「模块被删了但 daemon 还没更新」时不 500。
+  if (p.indexOf('/api/side-gateway/') === 0) {
+    return typeof sideGateway !== 'undefined' && sideGateway
+      ? sideGateway.handleApi(req, res, p)
+      : json(res, 503, { ok: false, error: 'side-gateway 模块未加载' });
+  }
+  if (p.indexOf('/api/ck-memory/') === 0) {
+    return typeof ckMemory !== 'undefined' && ckMemory
+      ? ckMemory.handleApi(req, res, p)
+      : json(res, 503, { ok: false, error: 'ck-memory 模块未加载' });
   }
 
   if (req.method === 'POST' && p === '/api/inject') {
@@ -21148,6 +21188,16 @@ refreshZhReasoningIfEnabled();
 refreshAutoContinueIfEnabled();
 refreshGatewayIfEnabled();
 refreshTunnelIfEnabled();
+sideGateway.startAll(); // 侧车统一网关 7866（小浣熊 + Loomy 同进程），与 wb2api 零耦合
+ckMemory.startAll(); // 会话记忆索引器（可剥离）
+/* ⭐ 公网入口分发器（2026-11-03）：让 17443 一个端口同时对外提供两个网关。
+ *   公网 /uni/v1/... → 7866（150 号池）；其余 → 7863（原样）。
+ *   ⚠️ 为什么需要它：家宽 frps 只放行 17443，而 frp 的 https2http 插件只管 TLS 终结、
+ *      不做路由 ⇒ 路径分流只能在本机做。
+ *   ⚠️ 顺带承担安全职责：公网不许碰 /panel/*、/admin/*、/healthz
+ *      （7866 控制台免口令，里面有 150 个账号明细 + api_key 明文）。
+ *   必须排在侧车网关启动**之后**：转发目标得先活着（见上一行的 startAll）。 */
+tunnelIngress.start().catch((e) => log('[ingress] 启动失败: ' + e.message));
 // ⭐ 账号池对齐（2026-10-16）：老装机从旧版升上来时 auths/ 里可能缺后来登录的账号
 gatewaySyncAccountsQuiet('daemon 启动');
 repairMissingSessionWorkspaces().catch((error) => log('[sessions-cwd-repair] 启动修复失败: ' + error.message));
@@ -21251,6 +21301,9 @@ updateTimer.unref && updateTimer.unref();
 
 process.on('SIGTERM', () => {
   log('收到 SIGTERM，退出');
+  try { sideGateway.stopAll(); } catch (_) {}
+  try { ckMemory.stopAll(); } catch (_) {}
+  try { tunnelIngress.stop(); } catch (_) {}
   releaseDaemonLock();
   try { stopCaffeinate(); } catch (_) {}
   try {
@@ -21259,7 +21312,15 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 process.on('SIGINT', () => {
+  try { sideGateway.stopAll(); } catch (_) {}
+  try { ckMemory.stopAll(); } catch (_) {}
+  try { tunnelIngress.stop(); } catch (_) {}
   releaseDaemonLock();
   process.exit(0);
 });
-process.on('exit', releaseDaemonLock);
+process.on('exit', () => {
+  try { sideGateway.stopAll(); } catch (_) {}
+  try { ckMemory.stopAll(); } catch (_) {}
+  try { tunnelIngress.stop(); } catch (_) {}
+  releaseDaemonLock();
+});

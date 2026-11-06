@@ -129,6 +129,14 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 const a = src.indexOf('/* ── 总览仪表盘');
 const b = src.indexOf('async function loadOverview(');
 if (a < 0 || b < 0 || b <= a) throw new Error('dashboard region not found');
+// 缓存命中率算法（cacheRatePct / cacheRateText / cacheRateColor）定义在别处
+// （重构后收敛成唯一真源，被总览/用量/请求记录共用），要单独取进来喂给沙箱。
+// 边界：从 cacheRatePct 到 fmtBytes 之前 —— 中间正好是这一族三个函数，不多不少。
+// ⚠️ 别在沙箱里重写一份实现 —— 那样测的就不是真代码了。
+const ca = src.indexOf('function cacheRatePct(');
+const cb = src.indexOf('function fmtBytes(');
+if (ca < 0 || cb < 0 || cb <= ca) throw new Error('cache rate helpers not found');
+const cacheFns = src.slice(ca, cb);
 const sinks = {};
 function mk(id) {
   if (!sinks[id]) sinks[id] = {
@@ -143,9 +151,11 @@ const ctx = {
   $: mk,
   esc: s => String(s == null ? '' : s),
   fmtTok: v => String(v == null ? 0 : v),
+  fmtInt: v => String(v == null ? 0 : v),
   fmtCredit: v => (v == null ? '—' : String(v)),
   fmtMs: ms => (ms ? ms + 'ms' : '—'),
   fmtRate: r => (r ? r + ' t/s' : '—'),
+  trimFixed: s => { if (!String(s).includes('.')) return String(s); return String(s).replace(/0+$/, '').replace(/\.$/, ''); },
   fmtLocalDateTime: () => '2026-10-27 20:00',
   dur: s => s + 's',
   ago: () => '刚刚',
@@ -161,7 +171,7 @@ const ctx = {
   Date, Math, Number, String, Map, Array, Object, JSON, isNaN, Promise,
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(a, b) +
+vm.runInContext(cacheFns + '\n' + src.slice(a, b) +
   '\nthis.renderDashboard = renderDashboard;' +
   '\nthis.renderDashUsage = renderDashUsage;' +
   '\nthis.setHours = h => { dashHours = h; };' +

@@ -428,19 +428,20 @@ console.log('\n== I. 网关发布源：单一版本号（主 Release 资产）==
   ok(GW.ASSET_NAME === 'wb2api-windows-amd64.zip',
     'I2 资产名固定不带版本号（版本看 Release tag）', GW.ASSET_NAME);
 
-  const cands = GW.gatewayDownloadCandidates('v1.9.8');
-  ok(cands.length === 2, 'I3 主源 + 兜底共 2 项', cands.map((c) => c.repo));
-  ok(cands[0].repo === 'miantanjun/WorkDaddy-' && cands[0].tag === 'v1.9.8' && cands[0].asset === GW.ASSET_NAME && cands[0].legacy === false,
-    'I4 ⭐ 第一优先 = 自家主 Release 的该 tag', cands[0]);
-  ok(cands[1].repo === 'linguo2625469/workbuddy2api-panel' && cands[1].legacy === true,
-    'I5 兜底 = 上游官方包（且标 legacy，调用方必须打日志）', cands[1]);
+  const cands = GW.gatewayDownloadCandidates('v1.9.9');
+  ok(cands.length === 1, 'I3 ⭐ fork 版只有自家一个源（不再带上游兜底）', cands.map((c) => c.repo));
+  ok(cands[0].repo === 'miantanjun/WorkDaddy-' && cands[0].tag === 'v1.9.9' && cands[0].asset === GW.ASSET_NAME && cands[0].legacy === false,
+    'I4 ⭐ 唯一源 = 自家主 Release 的该 tag', cands[0]);
+  ok(cands.every((c) => c.legacy === false),
+    'I5 ⭐⭐ fork 版绝不返回上游原版（装了会抹掉 tunnelGuard，面板重新暴露公网）', cands.map((c) => c.repo));
+  ok(GW.isForkedGateway() === true, 'I10 版本号带 -panel-wd<n> ⇒ 判定为 fork 版');
 
-  ok(GW.gatewayDownloadCandidates('').length === 1 && GW.gatewayDownloadCandidates('')[0].legacy === true,
-    'I6 没给主 tag ⇒ 只剩兜底（不拼出 download// 这种坏 URL）');
-  ok(GW.gatewayDownloadCandidates(undefined).length === 1, 'I7 undefined 也不炸');
+  ok(GW.gatewayDownloadCandidates('').length === 0,
+    'I6 没给主 tag ⇒ 零候选（调用方报「没有可用下载源」，而不是拼出 download// 这种坏 URL）');
+  ok(GW.gatewayDownloadCandidates(undefined).length === 0, 'I7 undefined 也不炸');
 
   const base = GW.gatewayDownloadBase(cands[0]);
-  ok(base.endsWith('/releases/download/v1.9.8/') && base.startsWith('https://gh-proxy.com/https://github.com/'),
+  ok(base.endsWith('/releases/download/v1.9.9/') && base.startsWith('https://gh-proxy.com/https://github.com/'),
     'I8 下载前缀 = gh-proxy 镜像 + 标准 release 路径', base);
 
   // 集成层的 GATEWAY_VERSION 必须等于二进制自报的 appVersion，否则面板永久「版本漂移」。
@@ -448,6 +449,84 @@ console.log('\n== I. 网关发布源：单一版本号（主 Release 资产）==
   const m = /appVersion\s*=\s*"([^"]+)"/.exec(mainGo);
   ok(!!m && m[1] === GW.GATEWAY_VERSION,
     'I9 ⭐ GATEWAY_VERSION 必须等于 cmd/server/main.go 的 appVersion', { binary: m && m[1], integration: GW.GATEWAY_VERSION });
+}
+
+/* ==================================================================== */
+console.log('\n== J. 面板收口：公网只当 API 入口（隧道流量看不到面板）==');
+{
+  // 2026-11-02：frpc 的 https2http 只能整端口转发（官方只有 crtPath / keyPath /
+  // hostHeaderRewrite / requestHeaders.set 四项，没有 locations 白名单），所以 7863 上的
+  // /panel/* 会跟着 /v1/* 一起暴露到公网（实测 /panel/ 返回 200）。收口方式 = frpc 转发时
+  // 覆盖写一个标记头，网关见到它就拒 /panel/*。这一组守三件事：接线没被摘掉、头名与
+  // frpc.toml 一致、以及 /v1 千万别被一起包进去（包了就是公网 API 全挂）。
+  const handlerGo = fs.readFileSync('D:/WorkDaddy/vendor/wb2api-go/internal/server/handler.go', 'utf8');
+  const noComment = handlerGo.replace(/\/\/[^\n]*/g, '');
+
+  ok(/h\.mux\.Handle\("\/panel\/",\s*tunnelGuard\(cfg\.Panel\)\)/.test(noComment),
+    'J1 ⭐⭐ /panel/ 必须挂 tunnelGuard（挂回裸 cfg.Panel = 公网又能打开面板）');
+  ok(!/h\.mux\.Handle\("\/panel\/",\s*cfg\.Panel\)/.test(noComment),
+    'J2 不能同时保留裸挂载（语义自相矛盾，重复 Handle 还会 panic）');
+  ok(/const tunnelHeader = "X-Workdaddy-Tunnel"/.test(handlerGo),
+    'J3 头名固定 = X-Workdaddy-Tunnel（必须与 frpc.toml 的 requestHeaders.set 键一致）');
+
+  const guard = noComment.slice(noComment.indexOf('func tunnelGuard'));
+  const iGet = guard.indexOf('r.Header.Get(tunnelHeader)');
+  const iForbid = guard.indexOf('http.StatusForbidden');
+  ok(iGet > -1 && iForbid > -1 && iGet < iForbid,
+    'J4 ⭐ 先判标记头再返回 403（顺序反了等于永远放行）', { header: iGet, forbid: iForbid });
+  ok(guard.includes('next.ServeHTTP(w, r)'), 'J5 放行分支必须真的转给下游');
+
+  // 公网 API 不能被牵连：/v1、/status、/healthz 的注册行里不许出现 tunnelGuard。
+  const apiLines = noComment.split('\n').filter((l) => /Handle(Func)?\("(?:POST|GET) \/(?:v1|status|healthz)/.test(l));
+  ok(apiLines.length >= 5 && apiLines.every((l) => !l.includes('tunnelGuard')),
+    'J6 ⭐⭐ /v1/* 与 /healthz 一律不挂 tunnelGuard（挂了公网 API 全 403）', apiLines.length);
+
+  // 与真实 frpc.toml 对账：文件不在就跳过（换机器时不误红），在就必须真的下发。
+  const tomlPath = 'C:/Users/Lyon/AppData/Roaming/WorkDaddy/tunnel/frpc.toml';
+  if (fs.existsSync(tomlPath)) {
+    const toml = fs.readFileSync(tomlPath, 'utf8');
+    ok(/requestHeaders\.set\.x-workdaddy-tunnel\s*=\s*"1"/i.test(toml),
+      'J7 ⭐ frpc.toml 必须真的下发这个标记头（漏了 ⇒ 网关收不到 ⇒ 面板仍在公网）');
+  } else {
+    console.log('  SKIP J7 本机没有 frpc.toml（跳过头注入校验）');
+  }
+}
+
+/* ==================================================================== */
+console.log('\n== K. 面板 XSS 防线：账号昵称是不可信输入 ==');
+{
+  // 2026-11-02：上游作者在群里通报「wb 存在账号名称注入，攻击者通过 wb 平台 XSS 注入到
+  // 系统里，已经有不少反代被影响」。机制 = 账号昵称由上游账号持有人自定，反代面板把它
+  // 原样当 HTML 渲染 ⇒ 脚本在管理员浏览器里跑 ⇒ 读走 localStorage 里的 api_key ⇒ 面板
+  // 全权（含改 upstream.chat_base，把带 Bearer token 的请求引到攻击者服务器 = 全部账号
+  // 凭证外泄）。Go 版本地实测：昵称 4 种 payload 全被 esc 成文本，人为注入未转义 HTML
+  // 也全被 CSP 拦死（inline script / inline handler / fetch 外带 / img 外带四条全禁）。
+  // 这一组把这两个前提锁进回归：任何一个被上游同步冲掉，都必须立刻红。
+  const P = 'D:/WorkDaddy/vendor/wb2api-go/internal/panel/';
+  const idx = fs.readFileSync(P + 'index.go', 'utf8');
+  const app = fs.readFileSync(P + 'app.js', 'utf8');
+  // 剥注释后再判：注释里解释了 style-src 为什么允许 unsafe-inline，不能让它污染 script-src 的判定。
+  const idxCode = idx.replace(/\/\/[^\n]*/g, '');
+  const scriptDir = (idxCode.match(/script-src[^;]*/) || [''])[0];
+
+  ok(/default-src 'none'/.test(idxCode), "K1 ⭐ CSP 必须 default-src 'none'（默认全禁、逐个开口）");
+  ok(scriptDir !== '' && !/unsafe-inline/.test(scriptDir),
+    "K2 ⭐⭐ script-src 绝不能含 unsafe-inline（含了 ⇒ 内联事件处理器可执行 ⇒ 昵称注入直接变 XSS）", scriptDir.trim());
+  ok(/connect-src 'self'/.test(idxCode), "K3 connect-src 必须限定 'self'（XSS 即使执行也带不走数据）");
+  ok(/img-src 'self' data:/.test(idxCode), "K4 img-src 必须限定 'self' data:（堵 img 外带通道）");
+  ok(/base-uri 'none'/.test(idxCode) && /frame-ancestors 'none'/.test(idxCode),
+    "K5 base-uri / frame-ancestors 必须都是 'none'");
+
+  const escBody = /function esc\(s\)\s*\{([\s\S]*?)\n\}/.exec(app);
+  ok(!!escBody && ['&amp;', '&lt;', '&gt;', '&quot;', '&#39;'].every((e) => escBody[1].includes(e)),
+    'K6 esc() 必须同时转义 & < > " \'（少转一个引号 = 属性逃逸）', escBody ? escBody[1].replace(/\s+/g, ' ').slice(0, 120) : 'not found');
+
+  const bad = app.split('\n')
+    .map((l, i) => ({ l: l.trim(), n: i + 1 }))
+    .filter(({ l }) => /nickname/.test(l) && /['"`]\s*</.test(l) && !/esc\(/.test(l) && !/textContent/.test(l));
+  ok(bad.length === 0,
+    'K7 ⭐⭐ 含 nickname 且拼 HTML 的行必须走 esc()/textContent（昵称由上游账号持有人自定）',
+    bad.map((x) => x.n + ': ' + x.l.slice(0, 70)));
 }
 
 /* ==================================================================== */

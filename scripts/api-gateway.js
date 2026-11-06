@@ -29,12 +29,12 @@ const zlib = require('zlib');
  * 网关二进制的**自报版本**（= `vendor/wb2api-go/cmd/server/main.go` 的 `appVersion`）。
  * ⚠️ 它**不是** GitHub tag：tag 是主程序版本（`v1.9.8`），网关只是主 Release 里的一个资产。
  *    2026-11-02 之前这里钉的是上游 tag `v1.13.0` + 上游仓库，导致面板「更新网关」下载的是
- *    **上游原版**，把本仓 wd1~wd8 的改动全部覆盖 —— 现已改为指向自家仓库。
+ *    **上游原版**，把本仓 wd1~wd9 的改动全部覆盖 —— 现已改为指向自家仓库。
  * 换版本前**必须**先对比新旧 `config.example.json`（见 2026-10-15 记录）：
  * v1.11.9 → v1.13.0 是**纯增量**（新增 server.read_timeout / logging.* 三项 /
  * schedule.include_disabled_in_tasks / pool.credit_floor，**零删除**）⇒ 模板驱动无需改逻辑。
  */
-const GATEWAY_VERSION = '1.13.1-panel-wd8';
+const GATEWAY_VERSION = '1.13.1-panel-wd9';
 /** 自家仓库：网关跟主程序一起发，对外只有一个版本号。 */
 const GATEWAY_REPO = 'miantanjun/WorkDaddy-';
 /** 主 Release 里的固定资产名（不带版本号 —— 版本看 Release tag）。 */
@@ -81,14 +81,24 @@ function gatewayDownloadCandidates(mainTag) {
   if (tag) {
     out.push({ repo: GATEWAY_REPO, tag: tag, asset: ASSET_NAME, checksums: CHECKSUMS_NAME, legacy: false });
   }
-  out.push({
-    repo: LEGACY_GATEWAY_REPO,
-    tag: LEGACY_GATEWAY_VERSION,
-    asset: LEGACY_ASSET_NAME,
-    checksums: CHECKSUMS_NAME,
-    legacy: true,
-  });
+  // ⚠️⚠️ fork 版（版本号带 -panel-wd<n>）**禁止**退回上游原版：上游包里没有本仓的面板改造，
+  // 装上去等于把 tunnelGuard（公网只当 API 入口）与全部 wd 改动一起抹掉 —— 面板会重新
+  // 暴露到公网。所以宁可让「安装网关」报错（现有二进制不受影响），也不静默降级。
+  if (!isForkedGateway()) {
+    out.push({
+      repo: LEGACY_GATEWAY_REPO,
+      tag: LEGACY_GATEWAY_VERSION,
+      asset: LEGACY_ASSET_NAME,
+      checksums: CHECKSUMS_NAME,
+      legacy: true,
+    });
+  }
   return out;
+}
+
+/** 当前是否为本仓 fork 版（版本号形如 1.13.1-panel-wd9）。fork 版绝不允许退回上游原版。 */
+function isForkedGateway() {
+  return /-panel-wd\d+$/.test(GATEWAY_VERSION);
 }
 
 /** 把候选源拼成 `gh-proxy` 前置的真实下载前缀（镜像只改传输不改字节，靠 SHA-256 兜底）。 */
@@ -718,6 +728,7 @@ module.exports = {
   LEGACY_GATEWAY_VERSION,
   LEGACY_ASSET_NAME,
   gatewayDownloadCandidates,
+  isForkedGateway,
   gatewayDownloadBase,
   DEFAULT_PORT,
   gatewayPaths,

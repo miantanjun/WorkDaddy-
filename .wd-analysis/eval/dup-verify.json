@@ -1,0 +1,65 @@
+[
+ {
+  "sid": "678e84ea-b66a-4336-9aee-d7f96df5fbcc",
+  "keep": "0cbf865a-ef6a-40ff-9b29-75cd7b306e34",
+  "size": 64266,
+  "ok": true,
+  "why": "",
+  "rows": 25,
+  "keepSize": 64266
+ },
+ {
+  "sid": "24772a94-4571-460b-9f82-471da02f50f9",
+  "keep": "4706a471-c204-42eb-b435-41624f7cd103",
+  "size": 76746,
+  "ok": true,
+  "why": "",
+  "rows": 30,
+  "keepSize": 76746
+ },
+ {
+  "sid": "2a616066-b61f-480b-93d1-5642d50a1620",
+  "keep": "882c357a-6b2a-403b-b66e-43039e07c230",
+  "size": 166076970,
+  "ok": true,
+  "why": "",
+  "rows": 32219,
+  "keepSize": 166076970
+ },
+ {
+  "sid": "3ce7b0d5-2d61-4a1f-99cf-1e597de32b7c",
+  "keep": "0070ec5d-d6f2-4c50-bacb-3fca9ad2abe4",
+  "size": 194275,
+  "ok": true,
+  "why": "",
+  "rows": 44,
+  "keepSize": 194275
+ },
+ {
+  "sid": "02aeabe5-1010-4363-83cd-7363a3193fc4",
+  "keep": "ad6980e6-7df0-48d4-8f54-8f28fda44253",
+  "size": 92914,
+  "ok": true,
+  "why": "",
+  "rows": 39,
+  "keepSize": 92914
+ },
+ {
+  "sid": "ba1b6a09-ae5b-4b00-a8a9-543da3f7968a",
+  "keep": "602038c0-3796-4cb1-8d4c-b771a64b86e8",
+  "size": 100647,
+  "ok": true,
+  "why": "",
+  "rows": 44,
+  "keepSize": 100647
+ },
+ {
+  "sid": "edf6003c-eec5-4f25-a25a-98942f943bb4",
+  "keep": "6db59e51-b996-49d8-96ee-b9943d290e91",
+  "size": 116693,
+  "ok": true,
+  "why": "",
+  "rows": 52,
+  "keepSize": 116693
+ }
+]

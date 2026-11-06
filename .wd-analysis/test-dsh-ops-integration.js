@@ -58,8 +58,14 @@ ok((bridgeSrc.match(/(?<!\r)\n/g) || []).length === 0, 'A6 桥脚本纯 CRLF', (
 ['dshOpsStatus', 'dshOpsInstall', 'dshOpsToggle', 'dshOpsUninstall', 'dshOpsRegister', 'dshOpsUntar', 'dshOpsVerifyIntegrity', 'dshOpsHttpGet', 'dshOpsFindNodeExe', 'dshOpsInspectDir', 'dshOpsReadMcp'].forEach((fn, i) => {
   ok(daemonSrc.includes('function ' + fn + '('), 'B2.' + (i + 1) + ' 函数 ' + fn);
 });
-ok((daemonSrc.match(/sha512-/g) || []).length >= 2, 'B3 固定了两个包的 sha512 integrity');
-ok(daemonSrc.includes('dsh-ops-0.3.0.tgz') && daemonSrc.includes('fastctx-win32-x64-0.2.1.tgz'), 'B4 固定上游包版本（可复现）');
+ok((daemonSrc.match(/sha512-/g) || []).length >= 1, 'B3 固定了 worker 包的 sha512 integrity');
+ok(daemonSrc.includes('dsh-ops-0.4.4.tgz'), 'B4 固定上游包版本 0.4.4（可复现）');
+// 0.4.x 起上游移除了 vendored FastCtx ⇒ 面板不应再下载第二个包。
+ok(!daemonSrc.includes('fastctx-win32-x64-0.2.1.tgz'), 'B4b 不再下载 fastctx 包（上游已移除）');
+ok(daemonSrc.includes("license: 'MIT',"), 'B4c worker 许可证标记为 MIT（FastCtx 移除后不再需要 Apache 声明）');
+ok(daemonSrc.includes('legacyFastctxEntry: !!servers.fastctx'), 'B10 status 暴露 0.3.0 遗留 fastctx 条目（供 UI 提示）');
+ok(daemonSrc.includes('if (config.mcpServers.fastctx) delete config.mcpServers.fastctx;'), 'B11 注册时顺手清掉遗留 fastctx 条目（否则每次启动报连接失败）');
+ok(daemonSrc.includes('complete: hasWorker && hasBridge'), 'B12 安装完整性判定 = worker + 桥（不再要求 fastctx）');
 ok(daemonSrc.includes('WORKDADDY_DSH_OPS_REGISTRY'), 'B5 支持镜像源环境变量');
 ok(daemonSrc.includes("if (!IS_WIN) throw new Error('当前平台不支持"), 'B6 非 Windows 平台显式拒绝');
 ok(daemonSrc.includes("path.resolve(managed.dir) === path.resolve(DSH_OPS_DIR)"), 'B7 卸载有「目录精确相等」守卫');
@@ -127,12 +133,12 @@ function makeTar(entries) {
 
 if (typeof mod.dshOpsUntar === 'function') {
   const tar = makeTar([
-    { name: 'package/bin/fastctx.exe', content: 'MZ-fake-fastctx' },
-    { name: 'package/LICENSE.txt', content: 'Apache-2.0' },
+    { name: 'package/LICENSE', content: 'MIT' },
+    { name: 'package/runtime/win32-x64/provenance.json', content: '{"version":"0.4.4"}' },
     { name: 'package/runtime/win32-x64/dsh-ops-worker.exe', content: 'MZ-fake-worker' },
   ]);
   const files = mod.dshOpsUntar(tar);
-  ok(files['package/bin/fastctx.exe'] && files['package/bin/fastctx.exe'].toString('utf8') === 'MZ-fake-fastctx', 'D1 tar 解析：首项内容正确');
+  ok(files['package/LICENSE'] && files['package/LICENSE'].toString('utf8') === 'MIT', 'D1 tar 解析：首项内容正确');
   ok(files['package/runtime/win32-x64/dsh-ops-worker.exe'] && files['package/runtime/win32-x64/dsh-ops-worker.exe'].toString('utf8') === 'MZ-fake-worker', 'D2 tar 解析：深层路径项正确（worker 在上游包内的真实位置）');
   ok(Object.keys(files).length === 3, 'D3 tar 解析：条目数 = 3', Object.keys(files).length);
   let crashed = false;
@@ -164,6 +170,24 @@ if (typeof mod.dshOpsVerifyIntegrity === 'function') {
 const macSh = fs.readFileSync(path.join(ROOT, 'scripts/build-mac-dmg.sh'), 'utf8');
 const macHits = (macSh.match(/dsh-ops-bridge\.mjs/g) || []).length;
 ok(macHits === 2, 'E1 mac 白名单两处都含 dsh-ops-bridge.mjs（拷贝列表 + chmod 列表）', macHits);
+
+// ── F. 工具面（精简版：只暴露宿主做不到的四个）──
+const toolNames = Array.from(bridgeSrc.matchAll(/name:\s*'([a-z_]+)'/g)).map((m) => m[1]);
+const TOOLSET = ['read_files', 'read_docx', 'read_table', 'result'];
+ok(toolNames.length === TOOLSET.length, 'F1 恰好暴露 4 个工具', toolNames.join(','));
+TOOLSET.forEach((t2, i) => ok(toolNames.includes(t2), 'F2.' + (i + 1) + ' 暴露 ' + t2));
+['glob', 'grep', 'inspect_local_file', 'replace', 'write_file', 'edit_file', 'copy', 'move', 'remove', 'diff', 'stat', 'batch'].forEach((t2, i) => {
+  ok(!toolNames.includes(t2), 'F3.' + (i + 1) + ' 不暴露 ' + t2 + '（宿主原生更强）');
+});
+// read_pdf 有实测反证：真实发票/提单/PI 分别报 UNSUPPORTED_DOCUMENT / DOCUMENT_PARSE_ERROR / OUTPUT_LIMIT
+ok(!toolNames.includes('read_pdf'), 'F4 不暴露 read_pdf（实测对真实业务单据不可用）');
+ok(bridgeSrc.includes("enum: ['page', 'release']"), 'F5 result 只有 page/release（Native 侧没有 put）');
+ok(!/name:\s*'result'[\s\S]{0,600}?'put'/.test(bridgeSrc), 'F5b result schema 不含 put');
+ok(bridgeSrc.includes('files: {') && !/name:\s*'read_files'[\s\S]{0,400}?\bpaths:/.test(bridgeSrc), 'F6 read_files 用 files 参数（0.4.4 契约）');
+ok(bridgeSrc.includes('nextIndex') && bridgeSrc.includes('nextOffset'), 'F7 桥描述覆盖 nextIndex / nextOffset 续读语义');
+ok(bridgeSrc.includes('normalizeArgs'), 'F8 有路径规整（文档类工具在 worker 侧只认绝对路径）');
+ok(bridgeSrc.includes('SERVER_VERSION = \'0.4.4-wb2\''), 'F9 桥版本标记与 worker 0.4.4 对齐');
+ok(!daemonSrc.includes('batch/result 两段式'), 'F10 面板文案不再宣称 batch（已不暴露）');
 
 console.log('');
 console.log('结果：' + pass + ' 通过 / ' + fail + ' 失败');

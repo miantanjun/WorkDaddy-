@@ -152,9 +152,36 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
-		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
+		// 面板只留本机 / 内网：经公网隧道（frpc https2http）转进来的请求一律 403。
+		// /panel → /panel/ 由 ServeMux 自动重定向，重定向后的请求同样落到这里。
+		h.mux.Handle("/panel/", tunnelGuard(cfg.Panel))
 	}
 	return h
+}
+
+// tunnelHeader 由 frpc 的 https2http 插件在转发时覆盖写入（见 frpc.toml 的
+// [proxies.plugin] 段 requestHeaders.set）。判据取「头存在」而非具体值：
+// 以后换标记值只改 frpc.toml，不用重新编译。
+const tunnelHeader = "X-Workdaddy-Tunnel"
+
+// tunnelGuard 把管理面板挡在公网隧道之外：公网入口只承担 API（/v1/* 与 /healthz），
+// 面板只允许本机或内网直连（127.0.0.1:7863、ZeroTier 内网）。
+//
+// 为什么不能按 RemoteAddr 判断：frpc 与本机浏览器都是从 127.0.0.1 发起连接，
+// 两者的 RemoteAddr 完全相同，只有 frp 注入的请求头能区分「这条请求是隧道来的」。
+// frp 的 requestHeaders.set 是转发时**覆盖写**，外部客户端自带同名头也会被改写，
+// 因此拿不到「自己伪造一个标记头就绕过」的口子。
+func tunnelGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(tunnelHeader) != "" {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"panel_not_available_over_tunnel","ok":false}`))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

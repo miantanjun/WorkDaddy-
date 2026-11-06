@@ -1,0 +1,10 @@
+{
+  "n": 31,
+  "onlylex": 7,
+  "onlyvec": 1,
+  "both": 5,
+  "neither": 18,
+  "lexOnly": 0.3871,
+  "vecOnly": 0.1935,
+  "union": 0.4194
+}

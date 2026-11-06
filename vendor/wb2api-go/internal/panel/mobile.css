@@ -30,6 +30,11 @@
   /* 基础两行：视口高度链路 + 禁止手机浏览器自动放大字号（避免横向溢出） */
   html, body { height: 100%; -webkit-text-size-adjust: 100%; }
 
+  /* ⚠️⚠️ 必须单列：侧栏在手机上是「fixed 抽屉」，已脱离网格流。
+     若 .shell 仍保留 `200px 1fr`，主内容会被塞进第一列（实测只有 ~190px 宽，
+     统计卡竖着堆、文字每行两三个字）。旧版在同一个断点里就有这条。 */
+  .shell { grid-template-columns: 1fr; }
+
   /* ── 1. 侧栏 → 抽屉 ────────────────────────────────────────────────
      position:fixed + transform（走合成层，不触发重排）；开合由 app.js 切 .open。
      用 transform 而不是 left：left 每帧都要重排整页。 */
@@ -58,6 +63,10 @@
   .topbar .sep, .topbar .meta { display: none; }
   .topbar button { padding: 5px 9px; font-size: 12.5px; border-radius: 8px; }
   .topbar button.icon { padding: 5px 8px; }
+  /* 子标签栏：手机上一行放不下就横向滚动（不换行，避免吃掉正文高度）。
+     top 跟着 topbar 变矮（57px → 约 45px）。 */
+  .subnav { padding: 6px 10px; top: 45px; gap: 2px; }
+  .subnav a { padding: 5px 10px; font-size: 12px; }
   .topbar #btnAdd { padding: 5px 12px; }
 
   /* ── 3. 宽表 → 卡片 ────────────────────────────────────────────────
