@@ -135,12 +135,12 @@ ok(/^\d+\.\d+\.\d+$/.test(up || ''), 'E2 上游基线是三段式', up);
 // ⭐ 核心断言：已吸纳的上游版本必须**等于**我们实际同步到的版本。
 //    v1.9.5 吸纳了 1.2.10、v1.9.6 吸纳了 1.2.11，但两次都忘了改这个常量，
 //    于是 semverCompare(latest, 1.2.8) 恒 > 0 ⇒ 面板永远误报「上游有新版」。
-ok(up === '1.2.18',
-  'E3 ⭐⭐ 上游基线 = 1.2.18（2026-10-26：取 1.2.16 launch-env + 1.2.18 token 加密落盘等；wallpaper / client-launch-settings / 官方自动化同步 / 1.2.17 / persona 均不吸纳）', up);
+ok(up === '1.2.20',
+  'E3 ⭐⭐ 上游基线 = 1.2.20（2026-11-11：取会话复制错误文案 + 限流码并集六码 + workspace repair opt-in + inject 拖动排序；session-deletion-sync 不吸纳）', up);
 
 // 防止倒退：基线不该低于本轮实际吸纳的版本
-ok(semverGte(up, '1.2.18'),
-  'E4 ⭐ 上游基线不得低于 1.2.18（不许倒退）', up);
+ok(semverGte(up, '1.2.20'),
+  'E4 ⭐ 上游基线不得低于 1.2.20（不许倒退）', up);
 
 // 提醒：常量附近的注释必须写清「每次吸纳都要改这里」
 const around = daemon.slice(Math.max(0, daemon.indexOf("const UPSTREAM_VERSION = '") - 2600),

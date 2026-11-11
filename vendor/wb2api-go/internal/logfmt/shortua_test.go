@@ -13,7 +13,7 @@ func TestShortUA(t *testing.T) {
 		{"curl", "curl/8.4.0", "curl/8.4.0"},
 		{"python", "python-requests/2.31.0", "python-requests/2.31.0"},
 		{"openai", "OpenAI/Python 1.30.0", "OpenAI/Python"},
-		{"workbuddy", "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1", "WorkBuddy/5.5.6"},
+		{"workbuddy", "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0", "WorkBuddy/5.9.3"},
 		{
 			"chrome skips engine tokens",
 			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

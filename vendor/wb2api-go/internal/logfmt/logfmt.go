@@ -91,7 +91,7 @@ func Pad(s string, width int) string {
 	return s
 }
 
-// maxShortUALen ShortUA 的返回上限（显示列宽足够放下 "WorkBuddy/5.5.6"、
+// maxShortUALen ShortUA 的返回上限（显示列宽足够放下 "WorkBuddy/5.9.3"、
 // "python-requests/2.31.0" 这类常见客户端标签）。
 const maxShortUALen = 40
 
@@ -103,7 +103,7 @@ var shortUAEngines = map[string]bool{
 }
 
 // ShortUA 从 User-Agent 提取便于人眼识别的客户端标签（"curl/8.4.0"、
-// "WorkBuddy/5.5.6"、"Chrome/120.0.0.0"）。
+// "WorkBuddy/5.9.3"、"Chrome/120.0.0.0"）。
 //
 // 为什么需要：面板「运行日志」与 stdout 流水行都要展示调用来源，而完整 UA 动辄
 // 120+ 字符（浏览器尤其），直接铺进表格会把其它列挤没。这里只留"是什么客户端"，

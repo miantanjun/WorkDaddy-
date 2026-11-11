@@ -82,8 +82,8 @@ ok(/for \(const root of missingCwdRoots\) \{[\s\S]{0,200}reportedMissingCwdRoots
 ok(daemonSrc.includes('跳过所在卷不存在的会话：${root}'),
   'A18 提示只写卷根，不把完整会话路径写进日志');
 
-ok(daemonSrc.includes("const UPSTREAM_VERSION = '1.2.18';"),
-  'A19 ⭐⭐ UPSTREAM_VERSION 同步到 1.2.18（漏更 ⇒ 面板 upstreamHasUpdate 恒 true 假警报）');
+ok(daemonSrc.includes("const UPSTREAM_VERSION = '1.2.20';"),
+  'A19 ⭐⭐ UPSTREAM_VERSION 同步到 1.2.20（漏更 ⇒ 面板 upstreamHasUpdate 恒 true 假警报）');
 
 /* ── B 组：反向 —— persona「同步个性化」一个都不许进来 ── */
 const forbidden = ['syncSharedPersonaForSwitch', 'configurePersona', 'readPersonaSettings',

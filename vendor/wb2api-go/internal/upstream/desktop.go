@@ -1,11 +1,11 @@
-// desktop.go 桌面客户端（WorkBuddy Desktop 5.5.6）行为指纹上报。
+// desktop.go 桌面客户端（WorkBuddy Desktop 5.9.3）行为指纹上报。
 //
 // 来源：2026-09-12 Sunny 抓包实测（data/desktop-task-protocol.md）。桌面端点亮
 // 「需电脑端」类任务的关键不是独立端点，而是同一 POST /v2/report 通道上
 // **不同的客户端指纹**：
 //
 //	POST https://copilot.tencent.com/v2/report        ← chatBase（CLI 上报走 billingBase）
-//	User-Agent: WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1
+//	User-Agent: WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
 //	X-Domain: copilot.tencent.com, X-Product: SaaS, X-User-Id: <uid>
 //	Body: [ {...event...} ]                           ← 数组
 //
@@ -39,8 +39,8 @@ import (
 const (
 	desktopReportPath    = "/v2/report"
 	desktopAppearanceSet = "/v2/user-asset/appearance/set"
-	// desktopUA 实测桌面客户端 UA（5.5.6 内嵌 CLI 2.137.1）。
-	desktopUA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
+	// desktopUA 实测桌面客户端 UA（5.9.3 内嵌 CLI 2.165.0）。
+	desktopUA = "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"
 )
 
 // desktopBase 桌面端 /v2/report 与 user-asset 走 chatBase（copilot.tencent.com）。
@@ -57,6 +57,13 @@ func deriveID(a *auth.Auth, salt string) string {
 type DesktopEvent map[string]any
 
 // desktopFingerprint 公共桌面指纹字段（注入每个事件，覆盖同名业务键）。
+//
+// ⚠️ commit / releaseDate 必须与 ideVersion 同源：三者都取自桌面端
+// `cli/product.json` 的（commit, date）+ 安装清单 appVersion。2026-10-27 从本机
+// 5.9.3 实测取值（commit=d4692421…、date=2026-10-27T09:24:10.922Z）。若只升版本号
+// 而保留旧构建指纹，会形成「版本 5.9.3 + commit 属于 5.5.6」的自相矛盾特征，
+// 比统一到同版本更可疑。os/osVersion/cpuCores/memorySize 是模拟设备的硬件画像，
+// 与客户端版本无关，刻意保持不变（改动只会引入新的不一致特征）。
 func desktopFingerprint(a *auth.Auth) map[string]any {
 	now := time.Now().UnixMilli()
 	return map[string]any{
@@ -66,15 +73,15 @@ func desktopFingerprint(a *auth.Auth) map[string]any {
 		"username":     a.Nickname,
 		"userNickname": a.Nickname,
 		"product":      "SaaS",
-		"releaseDate":  int64(1789036585355),
-		"commit":       "5f9692923c93033111c51ad7b003eb80204a9b75",
+		"releaseDate":  int64(1793093050922),
+		"commit":       "d46924219e79332f49c37ccebf27292f87001b19",
 		"ideName":      "WorkBuddy",
 		"ideType":      "WorkBuddy",
-		"ideVersion":   "5.5.6",
+		"ideVersion":   "5.9.3",
 		"machineId":    deriveID(a, "machine"),
 		"sessionId":    deriveID(a, "session"),
 		"extName":      "workbuddy-desktop",
-		"extVersion":   "5.5.6",
+		"extVersion":   "5.9.3",
 		"os":           "win32",
 		"arch":         "x64",
 		"osVersion":    "10.0.26220",
@@ -296,7 +303,7 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 
 // ---------------------------------------------------------------------------
 // 2026-09-12 第五轮：客户端 asar 逆向 + Sunny 真实样本驱动的新判据（三账号实测点亮）。
-// 来源：WorkBuddy.exe 5.5.6 app.asar 渲染层事件枚举/载荷 + 抓包真实专家召唤样本
+// 来源：WorkBuddy.exe 5.9.3 app.asar 渲染层事件枚举/载荷 + 抓包真实专家召唤样本
 // （data/desktop-task-protocol.md §7.3）。
 // ---------------------------------------------------------------------------
 
@@ -451,7 +458,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("X-Agent-Type", "main")
 	h.Set("X-IDE-Name", "WorkBuddy")
 	h.Set("X-IDE-Type", "WorkBuddy")
-	h.Set("X-IDE-Version", "5.5.6")
+	h.Set("X-IDE-Version", "5.9.3")
 	h.Set("x-codebuddy-request", "1")
 	if expertID != "" {
 		h.Set("X-Expert-Id", expertID)

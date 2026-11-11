@@ -32,7 +32,7 @@
   //   33：新增「事实」入口与事实卡片视图（阶段 4）
   //   42：2026-11-05 记忆页重构 —— 状态条改大字摘要 + 详情折叠表、
   //       三个开关收成「启用」总开关 + 高级折叠区、默认视图改为事实、底栏换管理入口
-  var UI_REV = '43';   // 43: 大字摘要去掉 29/73 分母，新增 .ckm-note 说明行
+  var UI_REV = '44';   // 44: 高级里新增「自动清理临时文件」一行（回收 WorkBuddy 临时根里的历史浏览器 profile）
   var TAB = 'ckmemory';
   var PANE = 'ckmemory';
   var SLOT = 'data-ckm-slot';
@@ -83,6 +83,14 @@
     //   ⚠️ 两者互斥（展开一个自动收起另一个）：面板最小 340px 高，
     //     两个都开着会把结果区压到 0 —— 那正是旧版「什么都看不见」的成因。
     adv: false, detail: false,
+
+    // ── 临时文件清理（2026-11-09 新增）──
+    // tsw    最近一次清理结果（后端 tempsweep.json 的回读：时间 / 删了几个目录 / 回收多少）
+    // tswCfg 开关与天数
+    // tswBusy 后端此刻正在跑清理（GET /tempsweep 的 busy 字段）
+    //   ⚠️ 为什么要显示「上次清了什么」：这个功能一旦静默失效（比如临时根换路径、
+    //     权限变了），表现跟「最近没垃圾」完全一样。没有这个数字就没法区分。
+    tsw: null, tswCfg: null, tswBusy: false,
 
     // ── 自动注入（阶段 2）──
     // inj    最近一次注入的记录（后端 lastInject 的回读）
@@ -913,6 +921,12 @@
 
     // 自动注入区块（自成一个渲染单元，避免它失败影响整个面板）
     try { renderInject(); } catch (_) {}
+
+    // 临时文件清理区块（同理自成单元）。
+    //   ⚠️ 只在「高级」展开时才真去写 DOM —— 折叠状态下那几个节点根本没建，
+    //      renderTempSweep() 自己会 querySelector 到 null 然后直接 return，
+    //      但每帧多一次无谓的查询也没意义，所以这里先判 S.adv。
+    try { if (S.adv) renderTempSweep(); } catch (_) {}
 
     // 结果区
     var list = wrap.querySelector('.ckm-list');
@@ -2593,6 +2607,84 @@
       .catch(function (e) { S.err = '切换失败：' + e.message; render(); });
   }
 
+  /* ── 临时文件清理（2026-11-09）────────────────────────────────────
+   *
+   * 背景：WorkBuddy 把子进程的 TMP 指到 <Roaming>\WorkDaddy\client-tmp\workbuddy-cn，
+   *   历史截图脚本每次在那里留一个完整浏览器配置目录（800MB~1.2GB），实测攒到 37 GB。
+   *   后端见 ck-memory.js「临时文件清理」小节（四道安全闸门都写在那里）。
+   */
+
+  function setTswMeta(text) {
+    var m = paneEl.querySelector('[data-tsw-meta]');
+    if (m) m.textContent = text;
+  }
+
+  function toggleTempSweep(on) {
+    api('/api/ck-memory/tempsweep', { method: 'POST', body: { tempSweep: !!on } })
+      .then(function (j) { S.tswCfg = (j && j.config) || S.tswCfg; return loadTempSweep(); })
+      .catch(function (e) { S.err = '切换失败：' + e.message; render(); });
+  }
+
+  /**
+   * 手动清一次。
+   * ⚠️ 删盘要几十秒，期间必须给「清理中」的反馈：后端有 tempSweepBusy 兜着不会重复删，
+   *   但界面上毫无变化等于让人以为按钮坏了，然后反复点。
+   */
+  function actTempSweep() {
+    setTswMeta('清理中…（大目录要几十秒）');
+    api('/api/ck-memory/tempsweep', { method: 'POST', body: { run: true } })
+      .then(function (j) {
+        if (j && j.busy) { setTswMeta('已经在清理了，稍等'); return; }
+        if (j && j.ok === false) { setTswMeta('清理失败：' + (j.error || '未知错误')); return; }
+        S.tsw = (j && j.last) || S.tsw;
+        renderTempSweep();
+      })
+      .catch(function (e) { setTswMeta('清理失败：' + e.message); });
+  }
+
+  /**
+   * 读清理状态。
+   * ⚠️ 不用 .then(render) 串行：这个请求失败不该让整个面板不可用，所以自己兜住错误。
+   */
+  function loadTempSweep() {
+    return api('/api/ck-memory/tempsweep')
+      .then(function (j) {
+        S.tsw = (j && j.last) || null;
+        S.tswCfg = (j && j.config) || null;
+        S.tswBusy = !!(j && j.busy);
+        renderTempSweep();
+      })
+      .catch(function () { renderTempSweep(); });
+  }
+
+  function renderTempSweep() {
+    var chk = paneEl.querySelector('[data-tsw]');
+    var m = paneEl.querySelector('[data-tsw-meta]');
+    // 状态还没读回来（S.tswCfg 为 null）时按「默认开启」显示：
+    //   后端 DEFAULT_CONF.tempSweep 就是 true，这里如果默认画成未勾选，
+    //   会让人以为功能是关的，实际上它正跑着。
+    if (chk) chk.checked = !S.tswCfg || S.tswCfg.tempSweep !== false;
+    if (!m) return;
+    // 正在跑的时候不要把刚才那句「清理中…」盖掉
+    if (S.tswBusy) { m.textContent = '正在清理…'; return; }
+    var l = S.tsw;
+    if (!l || !l.at) { m.textContent = '还没清理过'; return; }
+    var days = (S.tswCfg && S.tswCfg.tempSweepDays) || 7;
+    var when = timeLabel(l.at);
+    if (!l.removed) { m.textContent = when + ' 查过，没有 ' + days + ' 天以上的'; return; }
+    // 删了但空间没回来：必须单独说，否则「清了 12 个」看着是好消息，
+    // 实际 C 盘一个字节都没多。2026-11-09 真遇到过（删除被改道进回收站）。
+    if (l.recycled) {
+      m.textContent = when + ' 清了 ' + l.removed + ' 个 · 空间未回收（疑似进了回收站）';
+      return;
+    }
+    var b = Number(l.bytes) || 0;
+    var size = b >= 1073741824
+      ? (Math.round(b / 1073741824 * 10) / 10) + ' GB'
+      : Math.round(b / 1048576) + ' MB';
+    m.textContent = when + ' 清了 ' + l.removed + ' 个 · 回收 ' + size;
+  }
+
   /**
    * 读「上次注入」。
    * ⚠️ 不用 .then(render) 串行：这个请求失败不该影响整个面板可用性，
@@ -2912,6 +3004,38 @@
     bCl.onclick = actClear;
     opRow.appendChild(bCl);
     adv.appendChild(opRow);
+
+    // ②d 自动清理临时文件（2026-11-09）
+    //   ⚠️ 为什么放在「高级」而不是首屏：它属于维护动作，正常情况下一周自动跑一次，
+    //      用户一辈子不用点。但它必须可见 —— 「C 盘莫名少了 30G」正是靠这里解释的。
+    var tsRow = el('div', 'ckm-adv-row');
+    var tsLab = el('label', 'ckm-chk');
+    var tsChk = document.createElement('input');
+    tsChk.type = 'checkbox';
+    tsChk.setAttribute('data-tsw', '1');
+    tsChk.onchange = function () { toggleTempSweep(tsChk.checked); };
+    tsLab.appendChild(tsChk);
+    tsLab.appendChild(document.createTextNode('清理临时文件'));
+    tsLab.title = 'WorkBuddy 把自己的临时目录指到了\n'
+      + '%APPDATA%\\WorkDaddy\\client-tmp\\<profile>（本机是 workbuddy-cn）。\n'
+      + '以前的截图/探测脚本每次都会在那里留一个完整的浏览器配置目录\n'
+      + '（每个 800MB~1.2GB，跑完不删）。实测攒到过 37 GB。\n'
+      + '开着的话每周自动扫一次，只删「7 天以上 + 确认是浏览器配置」的目录。\n'
+      + '你的办公文件（xlsx/docx）、交付截图、项目副本都在白名单里，永远不会碰。';
+    tsRow.appendChild(tsLab);
+    var tsMeta = el('span', 'ckm-adv-meta', '');
+    tsMeta.setAttribute('data-tsw-meta', '1');
+    tsRow.appendChild(tsMeta);
+    tsRow.appendChild(el('span', 'ckm-grow'));
+    var tsGo = el('button', 'ckm-btn', '立即清理');
+    tsGo.title = '现在扫一次。\n'
+      + '⚠️ 只跳过「一周一次」的间隔限制，安全判据一条都不放宽：\n'
+      + '仍然只删 7 天以上、且确认为浏览器配置目录的。\n'
+      + '删的时候不会卡面板（走异步），大目录要几十秒。';
+    tsGo.onclick = actTempSweep;
+    tsRow.appendChild(tsGo);
+    adv.appendChild(tsRow);
+
     wrap.appendChild(adv);
 
     // ①b 会话行：查哪一条 / 要不要长期跟踪
@@ -3081,6 +3205,11 @@
         return loadRecent();
       });
     loadInjectLast();
+    // 临时清理状态：跟自动注入同批拉，但它不进主链。
+    //   ⚠️ 不能用 .then 串进去 —— 首屏主链一旦被它拖慢（临时根下有 20 万文件时
+    //      statfs/readdir 都可能慢），整个面板首屏就跟着卡。它只是「高级」里一行灰字，
+    //      晚几百毫秒到位完全无所谓，所以独立发、失败也不影响任何东西。
+    loadTempSweep();
   }
 
   /* ── 挂载 ───────────────────────────────────────────────────────── */

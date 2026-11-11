@@ -68,8 +68,8 @@ const MODEL_DEFAULT_NAME = 'DeepSeek V4 Flash';
 const MODEL_FAST = 'fast-model';
 const MODEL_GLM52 = 'glm-5.2';
 
-/** 桌面端 UA（上游实测抓包口径：5.5.6 内嵌 CLI 2.137.1）。 */
-const DESKTOP_UA = 'WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1';
+/** 桌面端 UA（官方 5.9.3 内嵌 CLI 2.165.0；实测 install-manifest.json + cli/package.json）。 */
+const DESKTOP_UA = 'WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0';
 /** Web 端 UA（浏览器形状，仅 web 域事件用）。 */
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
 
@@ -169,15 +169,15 @@ function desktopFingerprint(account, nowMs, hashImpl) {
     username: nickname,
     userNickname: nickname,
     product: 'SaaS',
-    releaseDate: 1789036585355,
-    commit: '5f9692923c93033111c51ad7b003eb80204a9b75',
+    releaseDate: 1793093050922,
+    commit: 'd46924219e79332f49c37ccebf27292f87001b19',
     ideName: 'WorkBuddy',
     ideType: 'WorkBuddy',
-    ideVersion: '5.5.6',
+    ideVersion: '5.9.3',
     machineId: deriveId(uid, 'machine', hashImpl),
     sessionId: deriveId(uid, 'session', hashImpl),
     extName: 'workbuddy-desktop',
-    extVersion: '5.5.6',
+    extVersion: '5.9.3',
     os: 'win32',
     arch: 'x64',
     osVersion: '10.0.26220',
@@ -1082,7 +1082,7 @@ async function realChat(token, account, chatBase, params, options) {
     'x-agent-type': 'main',
     'x-ide-name': 'WorkBuddy',
     'x-ide-type': 'WorkBuddy',
-    'x-ide-version': '5.5.6',
+    'x-ide-version': '5.9.3',
     'x-codebuddy-request': '1',
   };
   if (p.expertId) headers['x-expert-id'] = String(p.expertId);

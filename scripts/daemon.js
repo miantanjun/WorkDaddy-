@@ -246,6 +246,8 @@ const { createCodeBuddyFiles } = require('./codebuddy-files.js');
 const { createCodeBuddyNative } = require('./codebuddy-native.js');
 const { createCodeBuddySessionStore } = require('./codebuddy-session-store.js');
 const { forkedTitle, planForkAtMessage } = require('./session-fork.js');
+// 上游 1.2.19：会话复制异常文案白名单（防止 SQL 行/凭据/用户输入透出 UI 与日志）。
+const { sanitizeSessionCopyError } = require('./session-copy-error.js');
 const { pipeline: transferPipeline } = require('node:stream/promises');
 const { replaceFileWithRetry } = require('./atomic-file-write.js');
 const { parseUiPortState, profileUiPortCandidates } = require('./ui-port.js');
@@ -853,7 +855,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         CIM 查询加 -Filter 服务端过滤、周期性刷新 5s→15s）与 **1.2.41 失效卷保护**（会话工作目录巡检
 //         跳过卷已不存在的 cwd，同卷根只提示一次）；1.2.42–1.2.46 的「同步个性化」（persona 共享）
 //         **明确不吸纳**（用户判定对自己没用）。
-const DAEMON_VERSION = '1.10.0';
+const DAEMON_VERSION = '1.11.0';
 // 本「修改版」所基于的上游基线版本（原作者仓库 babygoton/WorkDaddy 的发布版本号）。
 // 「关于」页同时展示两个版本号：上游基线 + 本修改版；合并上游新版后由维护者手工更新此常量。
 //
@@ -885,7 +887,16 @@ const DAEMON_VERSION = '1.10.0';
 //      official-automation-sync + automation-account-sync（官方 automations 表跨账号 reconcile，判定不需要）；
 //   ❌ 1.2.17 整体跳过（官方导航改 CSS 隐藏 —— 本仓压根没有 remove 官方导航那条路径）；
 //   ❌ persona 系列一仍不吸纳。
-const UPSTREAM_VERSION = '1.2.18';
+// ⭐ 1.2.19–1.2.20 吸纳范围（2026-11-11）：
+//   ✅ 1.2.20 会话复制错误文案白名单（新增 session-copy-error.js）+ taskFailed 语义 + fork 会话 sessionId 重绑；
+//   ✅ 1.2.20 限流码表 —— ⚠️ 上游把码表**收窄**成 [6000,6004] 并加 `if (reason !== 6000 && reason !== 6004) throw`，
+//      与本地 BUG4 修复（放宽出的 14012/14014/14018/14019）方向相反 ⇒ **取并集六码**，码表收归单一真源
+//      （credit-usage-store.js 的 MODEL_LIMIT_CODES + daemon 路由共用），并加 reasonCode 维度。
+//   ✅ 1.2.20 workspace repair 改 opt-in（`WORKDADDY_REPAIR_MISSING_SESSION_WORKSPACES !== '1'` 时不再自动重建）；
+//   ✅ 1.2.20 inject 侧快捷短语拖动排序 + 仅插入（结构守卫，手工适配本仓自研 `.wbs-qp-row[data-id]`）；
+//   ❌ `session-deletion-sync.js` **不吸纳** —— 上游 1.2.19 引入（+97 行）、1.2.20 **自我回退**（−97，issue #505）
+//      ⇒ 不可吞并；本地无此文件恰等于 1.2.20 的正确状态。
+const UPSTREAM_VERSION = '1.2.20';
 // 上游源码用内部构建号（1.2.42/1.2.59 这类），安装包在打包时改写成宣传版本号（1.2.5）。
 // 本机 fork 用自己的修改版版本号（当前 1.8.x = 上游 1.2.6 基线 + 本地增强），否则更新检查会误判。
 // 1.5.0-b：省 token 专项批次 —— 账号页通用折叠卡片（自动切换 / 换号续跑 / 上下文体检三卡默认收起，
@@ -905,7 +916,7 @@ const UPSTREAM_VERSION = '1.2.18';
 //         .wd-analysis/fixtures/session-sync.deltas.js 的 UPSTREAM_VERSION 已是 1.2.5），只有 daemon 这个常量漏更，
 //         导致「检查更新」把上游基线显示成 1.2.3、与代码事实不符。同步改了 README「与上游的差异」一节。
 //         ⚠️ 行为变化：semverCompare(原作者 latest, UPSTREAM_VERSION) 不再把 1.2.4/1.2.5 报成「上游有新版」。
-const DAEMON_BUILD_ID = 'release-1.10.0-20261106-memory-plugin-r1';
+const DAEMON_BUILD_ID = 'release-1.11.0-20261111-upstream-1220-ua593-r1';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -7545,6 +7556,11 @@ function repairMissingSessionWorkspaces() {
   if (sessionCwdRepairInFlight) return sessionCwdRepairInFlight;
   sessionCwdRepairInFlight = (async () => {
     if (!IS_WIN || PROFILE.kind !== 'workbuddy') return { repaired: [], skipped: 0 };
+    // 上游 1.2.20（a41c943）：自动重建「已不存在的会话工作目录」是**副作用型**行为 ——
+    //   WorkBuddy 只是打开一个会话就可能被重新建出一堆目录，用户预期的「我删了就该没了」会被推翻。
+    //   改为显式 opt-in：只有 WORKDADDY_REPAIR_MISSING_SESSION_WORKSPACES=1 才跑，默认关闭。
+    //   ⚠️ 行为变化：升级后本机的自动目录重建不再发生；确需恢复时设该环境变量重启 daemon。
+    if (process.env.WORKDADDY_REPAIR_MISSING_SESSION_WORKSPACES !== '1') return { repaired: [], skipped: 0 };
     const wbHome = path.dirname(SESSIONS_DB);
     const rows = await sqliteQuery("SELECT id, cwd FROM sessions WHERE deleted_at IS NULL AND cwd IS NOT NULL AND cwd != '';" );
     const repaired = [];
@@ -9377,7 +9393,14 @@ async function createForkSession(src, selection) {
   const id = crypto.randomUUID();
   const target = path.join(path.dirname(source), id + '.jsonl');
   ensureArchiveParentNoFollow(root, target);
-  await fs.promises.writeFile(target, plan.text, { flag: 'wx', mode: 0o600 });
+  // 上游 1.2.19（a5f77f1）：resume 是按记录里的 sessionId 还原运行时身份，**不是按文件名**。
+  // 只重绑「源会话外壳」那一行（value.sessionId === src.id ⇒ 改成新 id）；消息 ID、payload
+  // 与子会话必须保留各自原身份，否则会串进源会话。不改的话新会话文件身份与 sessions 表不一致。
+  const text = plan.records.slice(0, plan.keptRecords).map(({ line, value }) => {
+    if (!value || value.sessionId !== src.id) return line;
+    return JSON.stringify(Object.assign({}, value, { sessionId: id }));
+  }).join('\n') + '\n';
+  await fs.promises.writeFile(target, text, { flag: 'wx', mode: 0o600 });
   try {
     const now = Date.now();
     const title = forkedTitle(src.custom_title || src.title);
@@ -9910,9 +9933,12 @@ function runAutoCopyQueue() {
     .catch((e) => {
       const job = item.job;
       job.status = 'error';
-      job.error = e.message;
+      // 上游 1.2.19：异常原文可能含 SQL 行/凭据/用户输入 ⇒ 一律走白名单文案，不进 UI 与日志。
+      job.error = sanitizeSessionCopyError(e);
+      // 与「部分失败(partial)」区分：整个任务没跑起来 ⇒ UI 才能给出「重试」而非「查看详情」。
+      job.taskFailed = true;
       job.finishedAt = Date.now();
-      log(`[sessions-auto-copy] 任务失败: ${e.message}`);
+      log(`[sessions-auto-copy] 任务失败: ${job.error}`);
       const cleanup = setTimeout(() => autoCopyJobs.delete(job.id), 30 * 60 * 1000);
       if (cleanup.unref) cleanup.unref();
       pruneAutoCopyJobs();
@@ -11188,6 +11214,9 @@ function publicAutoCopyJob(job) {
     conflicts: job.conflicts,
     divergences: job.divergences || 0,
     details: Array.isArray(job.details) ? job.details.slice(0, 500) : [],
+    // 上游 1.2.19：任务级失败（整个任务没跑起来）与「部分会话失败(partial)」语义不同，
+    // 前端据 taskFailed 决定给「重试」还是「查看详情」。
+    taskFailed: job.status === 'error',
     error: job.error,
     sourceUid: job.sourceUid,
     targetUid: job.targetUid,
@@ -12274,6 +12303,34 @@ function deleteQuickPhrases(ids) {
   st.phrases = st.phrases.filter((x) => list.indexOf(x.id) === -1);
   writeSessionState(st);
   return readSessionState();
+}
+// 上游 1.2.19：拖动排序。全量校验（数量一致 + 无重复 + 每个 id 都存在）后才落盘，
+// 任一不满足直接抛错 ⇒ 面板刷新后重试，避免「顺序被半截写入」把短语弄丢。
+function reorderQuickPhrases(ids) {
+  if (!Array.isArray(ids)) throw new Error('快捷短语顺序无效');
+  const state = readSessionState();
+  if (ids.length !== state.phrases.length) throw new Error('快捷短语列表已变化，请刷新后重试');
+  const byId = new Map(state.phrases.map((item) => [String(item.id), item]));
+  const seen = new Set();
+  const ordered = ids.map((value) => {
+    const id = String(value || '').trim();
+    if (!id || seen.has(id) || !byId.has(id)) throw new Error('快捷短语顺序无效');
+    seen.add(id);
+    return byId.get(id);
+  });
+  state.phrases = ordered;
+  writeSessionState(state);
+  return readSessionState();
+}
+// 上游 1.2.19：把短语插到当前输入光标处（不发送）。优于 /api/quick-phrase-send 的
+// 「替换并发送」语义 —— 用户可以先插入再自己改，不会误发。
+async function insertQuickPhraseIntoComposer(text) {
+  const value = String(text || '');
+  if (!value.trim()) throw new Error('短语不能为空');
+  if (value.length > 10000) throw new Error('快捷短语过长');
+  if (!cdp.connected) throw new Error('CDP 未连接');
+  await cdpSend('Input.insertText', { text: value });
+  return { inserted: true };
 }
 function normalizeQuickPhraseIds(ids) {
   if (!Array.isArray(ids)) throw new Error('快捷短语选择必须是数组');
@@ -17463,6 +17520,22 @@ function handleApiRoute(req, res) {
       }
     });
   }
+  // 会话模块：POST /api/quick-phrase-reorder { ids: [...] }（拖动排序；上游 1.2.19）
+  if (req.method === 'POST' && p === '/api/quick-phrase-reorder') {
+    return readBody(req).then((body) => {
+      try {
+        return json(res, 200, { ok: true, ...reorderQuickPhrases(body && body.ids) });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: e.message });
+      }
+    });
+  }
+  // 会话模块：POST /api/quick-phrase-insert { text }（在当前输入光标处插入，不发送；上游 1.2.19）
+  if (req.method === 'POST' && p === '/api/quick-phrase-insert') {
+    return readBody(req).then((body) => insertQuickPhraseIntoComposer(body && body.text))
+      .then((result) => json(res, 200, { ok: true, ...result }))
+      .catch((e) => json(res, 400, { ok: false, error: e.message }));
+  }
   // 快捷短语加密导出：POST /api/quick-phrases/export { ids, password }
   if (req.method === 'POST' && p === '/api/quick-phrases/export') {
     return readBody(req).then((body) => {
@@ -17906,15 +17979,19 @@ function handleApiRoute(req, res) {
         //   14012/14014/14018/14019/6004），而旧实现只放行 6004 ⇒ 另外四种码全被 400 拒掉，
         //   表里永远没有记录、账号页永远不会出现限流徽标 = 功能「未生效」。
         //   这里改成与渲染层同一份码表；6004 单独标记为「模型维度」。
-        const RATE_LIMIT_CODES = [14012, 14014, 14018, 14019, 6004];
+        // 上游 1.2.20：新增 6000（官方「模型用量限制」，与 6004「频率限制」并列）。
+        //   ⚠️ 上游把码表**收窄**成 [6000, 6004]，会直接打掉本地 14012/14014/14018/14019
+        //   （= 上面这处 BUG4 修复回退）⇒ 本地取**并集六码**，不照抄上游。
+        //   码表单一真源在 credit-usage-store.js 的 MODEL_LIMIT_CODES（与 store 内层校验共用）。
+        const RATE_LIMIT_CODES = CREDIT_USAGE_STORE.MODEL_LIMIT_CODES;
         if (RATE_LIMIT_CODES.indexOf(reasonCode) < 0) {
-          return json(res, 400, { ok: false, error: '仅记录限流业务码（14012/14014/14018/14019/6004）' });
+          return json(res, 400, { ok: false, error: '仅记录限流业务码（' + RATE_LIMIT_CODES.join('/') + '）' });
         }
         const resetAt = body && body.resetAt === null ? null : Number(body && body.resetAt);
         if (resetAt !== null && (!Number.isSafeInteger(resetAt) || resetAt < Date.now() - 86400000 || resetAt > Date.now() + 90 * 86400000)) {
           return json(res, 400, { ok: false, error: '解封时间无效' });
         }
-        if (resetAt !== null && await CREDIT_USAGE_STORE.hasModelRateLimitElsewhere({ uid, modelId, resetAt, now: Date.now() })) {
+        if (resetAt !== null && await CREDIT_USAGE_STORE.hasModelRateLimitElsewhere({ uid, modelId, resetAt, reasonCode, now: Date.now() })) {
           return json(res, 200, { ok: true, skipped: 'duplicate-across-accounts' });
         }
         await CREDIT_USAGE_STORE.saveModelRateLimit({

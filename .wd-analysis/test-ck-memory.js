@@ -2700,6 +2700,93 @@ if (typeof L.searchWithRetry === 'function') {
 }
 }
 
+// ── 17) 临时文件清理（2026-11-09 新增）──
+//   这是整个项目里**唯一会真删用户文件**的功能 ⇒ 四道闸门必须逐条守住，
+//   少一条就可能删掉不该删的东西。写这些断言不为覆盖率，是为了让人以后不敢裸改。
+//   ⚠️ 全部用字面量精确匹配，不做花括号配对切函数体 —— 注释里也有花括号，
+//      按字符数/贪婪正则切会假失败（这个坑在本项目踩过三次）。
+console.log('\n17) 临时文件清理：四道安全闸门');
+{
+  const tsSrc = fs.readFileSync(path.join(ROOT, 'scripts', 'ck-memory.js'), 'utf8');
+  const tsUi = fs.readFileSync(path.join(ROOT, 'scripts', 'ck-memory-ui.js'), 'utf8');
+
+  chk(/async function tempSweep\(/.test(tsSrc),
+    '⭐ tempSweep 必须是 async（同步删二十万文件会把 daemon 主线程连同面板/网关一起卡死）');
+  chk(/if \(tempSweepBusy\) return/.test(tsSrc) && /finally \{ tempSweepBusy = false; \}/.test(tsSrc),
+    '防重入：tempSweepBusy 拦并发 + finally 里一定复位（否则一次异常就永久锁死）');
+
+  // ① 只处理一级子目录
+  chk(/if \(!ent\.isDirectory\(\)\) continue;/.test(tsSrc),
+    '⚠️ 闸门① 只处理临时根下面的一级**目录**（散落在根上的文件是 daemon 正在写的）');
+  // ② 年龄
+  chk(/if \(st\.mtimeMs > cutoff\) continue;/.test(tsSrc),
+    '⚠️ 闸门② 目录 mtime 必须早于 cutoff（在用 profile 时刻在写，过不了这条）');
+  // ③ 形态优先于命名
+  chk(/if \(!CHROMIUM_TEMP_RE\.test\(name\) && !looksLikeChromiumProfile\(dir\)\) continue;/.test(tsSrc),
+    '⚠️ 闸门③ 命名只是兜底通道，主判据是磁盘形态（三件套齐全）');
+  chk(/function looksLikeChromiumProfile\(/.test(tsSrc)
+    && /'Local State'/.test(tsSrc) && /'Crashpad'/.test(tsSrc),
+    '形态判据 = Local State + Default\\ + Crashpad\\ 三件套');
+  // ④ 白名单
+  chk(/if \(KEEP_NAMES\.has\(name\)\) continue;/.test(tsSrc),
+    '⚠️ 闸门④ 白名单命中一律跳过（宁可留垃圾，不能误删）');
+  ['xltest', 'packcalc_shot', 'langapp_be_test', 'officecli', 'Diagnostics'].forEach((n) => {
+    chk(new RegExp(`'${n}'`).test((tsSrc.match(/const KEEP_NAMES = new Set\(\[[\s\S]*?\]\);/) || [''])[0]),
+      `白名单里有 ${n}（那是用户真放进去的东西）`);
+  });
+
+  // 临时根必须自动发现，不能把 profile 名写死
+  //   ⚠️ 写死的代价是静默失效：换 profile（lite）之后永远扫不到东西，
+  //      而面板只会显示「还没清理过」，跟「真没垃圾」长得一模一样。
+  chk(/function tempRoots\(/.test(tsSrc) && !/'workbuddy-cn'/.test(tsSrc),
+    '⚠️ 临时根按 client-tmp 下的 profile 子目录自动发现，不写死 workbuddy-cn');
+
+  // 定时器：独立于 enabled，且必须挂在 `!available() || !state.enabled` 早退之前
+  const iMount = tsSrc.indexOf('if (state.tempSweep) startTempTimer();');
+  const iGuard = tsSrc.indexOf('if (!available() || !state.enabled) return;', iMount);
+  chk(iMount > 0 && iGuard > iMount,
+    '⭐ 临时清理定时器挂在「未启用就 return」**之前**（关掉自动索引不等于愿意让 C 盘被吃光）');
+  chk(/if \(state\.enabled\) startAll\(\); else startTempTimer\(\);/.test(tsSrc),
+    'restartTimer 里有关闭分支（否则改一次配置就把清理定时器永久弄没，日志里一句话都没有）');
+
+  // 存活证明：没有这个时间戳，静默失效和「最近没垃圾」长得完全一样
+  chk(/tempsweep\.json/.test(tsSrc) && /function readTempSweepState\(/.test(tsSrc),
+    '⭐ 上次清理结果持久化到 tempsweep.json（否则无法区分「没清过」和「一直在清但没东西删」）');
+
+  // 端点 + 导出
+  chk(/sub === 'tempsweep' && method === 'GET'/.test(tsSrc),
+    'GET /api/ck-memory/tempsweep 在');
+  chk(/sub === 'tempsweep' && method === 'POST'/.test(tsSrc),
+    'POST /api/ck-memory/tempsweep 在（run=true 立即清 / 否则存配置）');
+  chk(/^\s{2}tempSweep,\s*$/m.test(tsSrc),
+    'tempSweep 已导出（面板「立即清理」走它）');
+
+  // 前端接线
+  chk(/setAttribute\('data-tsw', '1'\)/.test(tsUi) && /立即清理/.test(tsUi),
+    '面板「高级」里有「清理临时文件」勾选 + 「立即清理」按钮');
+  chk(/try \{ if \(S\.adv\) renderTempSweep\(\); \} catch \(_\) \{\}/.test(tsUi),
+    'render() 里挂了 renderTempSweep（自成单元，失败不拖垮整个面板）');
+  chk(/^\s{4}loadTempSweep\(\);$/m.test(tsUi),
+    'loadBoot() 尾部有 loadTempSweep()，且不串进主链（临时根 20 万文件时不能拖慢首屏）');
+  const rev = Number((tsUi.match(/var UI_REV = '(\d+)'/) || [])[1] || 0);
+  chk(rev >= 44, 'UI_REV ≥ 44（新增一行 DOM ⇒ 必须 +1，否则新旧 DOM 叠加）', 'UI_REV=' + rev);
+  /* ⭐⭐⭐ 删除必须走「干净子进程」，不能直连 fs.rm
+   * 2026-11-09 的真实损失：宿主用 NODE_OPTIONS 给子进程挂了 safe-delete 垫片，它的
+   * fs.rm 在 Windows 上等于 SendToRecycleBin ⇒ 删了 5.9 万项，C 盘可用量一个字节没涨，
+   * 还白跑 40 分钟。这几条断言的作用：以后谁把删除改回 fs.rm，测试立刻红。
+   */
+  chk(/function purgeViaChild\(/.test(tsSrc) && /process\.execPath/.test(tsSrc),
+    '⭐⭐⭐ 删除走子进程（purgeViaChild + process.execPath），不直连 fs.rm');
+  chk(/SHIM_RE\.test\(String\(env\.NODE_OPTIONS/.test(tsSrc) && /delete env\.NODE_OPTIONS;/.test(tsSrc),
+    '⭐⭐⭐ 子进程里摘掉了 NODE_OPTIONS（不摘就等于「把文件搬进回收站」还说成功）');
+  chk(!/fs\.promises\.rm\(/.test(tsSrc),
+    'tempSweep 里没有残留的 fs.promises.rm（守住上面两条，防止有人改回去）');
+  chk(/purgeViaChild\(dir\)/.test(tsSrc) && /fs\.existsSync\(dir\)/.test(tsSrc),
+    '⭐ 删完复核目录真的不存在（子进程报成功但目录还在，也算失败）');
+  chk(/recycled: removed > 0 && delta <= 0/.test(tsSrc),
+    '⭐⭐ 保留 recycled 标记：真出「删了但空间没回来」时面板会显示「空间未回收」而不是骗人的「回收 X GB」');
+}
+
 try { db.close(); } catch (_) {}
 cleanup();
 console.log(`\n结果：${pass} 通过 / ${fail} 失败\n`);

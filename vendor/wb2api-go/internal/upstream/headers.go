@@ -14,12 +14,14 @@ import (
 
 const (
 	// defaultClientVersion 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
-	// 白名单头组的 X-IDE-Version）。对齐官方 WorkBuddy Desktop 分发包版本（5.5.4）。
+	// 白名单头组的 X-IDE-Version）。对齐官方 WorkBuddy Desktop 分发包版本（5.9.3，
+	// 实测 `resources/install-manifest.json` 的 appVersion）。
 	// config upstream.client_version 可覆盖（空 = 内置默认）。
-	defaultClientVersion = "5.5.4"
-	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.137.1）。
+	defaultClientVersion = "5.9.3"
+	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.165.0，
+	// 实测 `resources/app.asar.unpacked/cli/package.json` 的 version，即 @genie/agent-cli）。
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
-	defaultCliVersion = "2.137.1"
+	defaultCliVersion = "2.165.0"
 
 	// originRefererCN CN 账号的 Origin/Referer 基址。
 	//
@@ -62,7 +64,7 @@ func (c *Client) cliVersion() string {
 // `WorkBuddy/<clientVersion> <platform>/<clientVersion> CLI/<cliVersion>`。
 // 平台段（第二段）品牌按 realm 切换——CN 用 applicationName 同值 `WorkBuddy`，
 // global 用官方国际版 productName `WorkBuddy AI`（intl 项目逆向证据：
-// `WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2`）。
+// `WorkBuddy/<ver> WorkBuddy AI/<ver> CLI/<ver>`）。
 // global 账号送错平台段（`WorkBuddy` 非 `WorkBuddy AI`）可能触发上游 403 code 11140
 // "request illegal" 风控。官方无任何 UA 随机化，故默认确定性。
 func (c *Client) defaultWorkBuddyUAFor(a *auth.Auth) string {

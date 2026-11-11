@@ -244,6 +244,21 @@ func isPromptTooLongStatus(status int) bool {
 var alreadyCheckinMarkers = []string{"已签到", "already"}
 var badParamsMarkerCode = `"code":11101`
 
+// invalidRequestParamsCode 上游对「请求参数不合法」的统一业务码（HTTP 400 +
+// msg "Invalid request parameters"）。与 11101 的差别只是拦截阶段：11101 发生在
+// 解析 body 阶段，11133 发生在参数校验/模型路由阶段——两者的「确定性」完全一样。
+//
+// 为什么必须与 11101 同待遇（不轮转、fail-fast 400）：上游信封里自己就写了
+// `retry_policy:{"retry":false}`，并注明「与网络无关，请换模型或新建任务」
+// （actions = SWITCH_MODEL / SUBMIT_FEEDBACK / NEW_CONVERSATION）。同一 body
+// 换任何账号都会被同样拒绝。实测（2026-11-06 16:58）一条坏图片引用连打 3 个
+// 账号（177****6382 → 186****6454 → 177****1047）全部 11133，6~7 秒后末端把
+// 确定失败伪装成 `503 no_healthy_account`，客户端于是对必然失败的请求重试 5 次。
+//
+// 线上最高频成因：image_url 里塞了 `file:///...` 或失效链接——上游只认 data: URI
+// 形态的 base64。这也解释了为什么它总在「图片预处理结果为空」之后 1~2 秒出现。
+const invalidRequestParamsCode = "11133"
+
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
 // 与容器时区无关）。
 var softRateResetLoc = time.FixedZone("UTC+8", 8*60*60)
@@ -772,6 +787,15 @@ func Classify(status int, body string) ErrKind {
 		if strings.Contains(body, badParamsMarkerMsg) || strings.Contains(body, badParamsMarkerCode) {
 			return ErrBadParams
 		}
+		// 参数被上游拒绝（HTTP 400 + code 11133 "Invalid request parameters"）：
+		// 与 11101 同一哲学——确定性请求级错误，换账号结果不变，轮转只会把健康号
+		// 白耗一遍，最后把确定失败包装成 503 让客户端无限重试（见常量注释里的实测）。
+		// 判据双通道：hasBusinessCode 走 JSON 遍历（容忍空白/嵌套/字符串码），
+		// codeMarker 兜底畸形 JSON 里的字面量——漏判的代价是退回轮转，故宁宽勿窄。
+		// 顺序上仍让 11135/图片文案优先：它们在本分支之前已分类（见上）。
+		if hasBusinessCode(body, invalidRequestParamsCode) || codeMarker(lower, invalidRequestParamsCode) {
+			return ErrBadParams
+		}
 		return ErrClient
 	}
 	// HTTP 200 但业务 code 非 0 且含余额关键词的情况已被上面 hardMarkers 捕获。
@@ -827,10 +851,10 @@ type Client struct {
 	UserAgent string
 
 	// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` + X-IDE-Version）。
-	// 空 = 内置默认（对齐官方 5.5.4 分发包）。
+	// 空 = 内置默认（对齐官方 5.9.3 分发包）。
 	ClientVersion string
 
-	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认（官方内置 CLI 2.137.1）。
+	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认（官方内置 CLI 2.165.0）。
 	CliVersion string
 
 	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。

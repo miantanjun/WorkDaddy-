@@ -17,6 +17,16 @@ const INSERT_USAGE_SQL = `
     agent_purpose = excluded.agent_purpose
 `;
 
+/**
+ * 模型限制业务码白名单（**并集**：本地原有四码 + 上游 1.2.20 的 6000）。
+ *   14012/14014/14018/14019 —— 本地 BUG4 修复纳入的账号级额度码；
+ *   6000 —— 上游 1.2.20 新增，官方「模型用量限制」；
+ *   6004 —— 官方「频率限制」（历史既有）。
+ * ⚠️ 上游 1.2.20 把该表**收窄**为 [6000, 6004]，本地不采纳收窄（会打掉 BUG4 修复）。
+ * 单一定义处：daemon 路由侧与 store 内层校验都引用同一常量，避免两处漂移。
+ */
+const MODEL_LIMIT_CODES = [14012, 14014, 14018, 14019, 6000, 6004];
+
 function validIdentity(value, label) {
   const text = String(value || '').trim();
   if (!text || text.length > 512 || text.includes('\0')) throw new Error(`${label} 无效`);
@@ -421,6 +431,9 @@ function createCreditUsageStore(options = {}) {
     if (reset !== null && (!Number.isSafeInteger(reset) || reset < 0)) throw new Error('限流解封时间无效');
     const reason = reasonCode === null || reasonCode === undefined ? null : Number(reasonCode);
     if (reason !== null && !Number.isSafeInteger(reason)) throw new Error('限流 code 无效');
+    // 上游 1.2.20 在此加了 `if (reason !== 6000 && reason !== 6004) throw`。本地**不采纳**该收窄
+    // （会拒绝 14012/14014/14018/14019）⇒ 改为按本地并集六码校验，语义等价且不破坏 BUG4 修复。
+    if (reason !== null && MODEL_LIMIT_CODES.indexOf(reason) < 0) throw new Error('不支持的模型限制 code');
     await db.run(
       `INSERT INTO model_rate_limit_records
          (profile_id, uid, model_id, model_name, reset_at, observed_at, source, reason_code)
@@ -436,20 +449,27 @@ function createCreditUsageStore(options = {}) {
     try { fs.chmodSync(dbPath, 0o600); } catch (_) {}
   }
 
-  async function hasModelRateLimitElsewhere({ uid, modelId, resetAt, now }) {
+  // 上游 1.2.20：加 reasonCode 维度 —— 6000（模型用量限制）与 6004（频率限制）是**两种不同**
+  // 的封锁，若不区分，A 账号因「用量」被封会被误判成与 B 账号的「频率」封重复 ⇒ 漏记一条。
+  // ⚠️ 本地码表比上游宽（上游只认 6000/6004，本地另有 14012/14014/14018/14019）⇒
+  //    这里只做「是并集内合法码」的兜底校验，不做上游那种收窄，否则本地四码会被打成非法。
+  async function hasModelRateLimitElsewhere({ uid, modelId, resetAt, reasonCode, now }) {
     await initialize();
     const accountUid = validIdentity(uid, 'uid');
     const id = validIdentity(modelId, 'model id');
     const reset = Number(resetAt);
     if (!Number.isSafeInteger(reset) || reset < 0) throw new Error('限流解封时间无效');
+    // 上游默认值 6004；本地保持同默认（理由：6004 是历史既有码，旧调用点未传该参时不改变行为）。
+    const reason = reasonCode === null || reasonCode === undefined ? 6004 : Number(reasonCode);
+    if (MODEL_LIMIT_CODES.indexOf(reason) < 0) throw new Error('限流 code 无效');
     const timestamp = Number(now === undefined ? Date.now() : now);
     if (!Number.isSafeInteger(timestamp) || timestamp < 0) throw new Error('限流查询时间无效');
     const rows = await db.all(
       `SELECT 1
        FROM model_rate_limit_records
-       WHERE profile_id = ? AND uid <> ? AND model_id = ? AND reset_at = ? AND reset_at > ?
+       WHERE profile_id = ? AND uid <> ? AND model_id = ? AND reset_at = ? AND reason_code = ? AND reset_at > ?
        LIMIT 1`,
-      [profileId, accountUid, id, reset, timestamp]
+      [profileId, accountUid, id, reset, reason, timestamp]
     );
     return rows.length > 0;
   }
@@ -508,6 +528,7 @@ function createCreditUsageStore(options = {}) {
     saveModelRateLimit,
     hasModelRateLimitElsewhere,
     listModelRateLimits,
+    MODEL_LIMIT_CODES,
   };
 }
 

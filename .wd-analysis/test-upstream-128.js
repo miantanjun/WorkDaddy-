@@ -34,6 +34,8 @@ const ROOT = path.resolve(__dirname, '..');
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 const DAEMON_SRC = read('scripts/daemon.js');
 const INJECT_SRC = read('scripts/inject.js');
+// 2026-11-11 上游 1.2.20 吸纳后：限流码表的**单一真源**挪到了 credit-usage-store.js
+const CREDIT_STORE_SRC = read('scripts/credit-usage-store.js');
 const LIB_SRC = read('scripts/lib.js');
 const patches = require(path.join(ROOT, 'scripts', 'theme-patches.js'));
 const themeVars = require(path.join(ROOT, 'scripts', 'theme-vars.js'));
@@ -59,7 +61,7 @@ section('[A] 主题三件套必须同批（拆批 = 暂存按钮毛玻璃丢失�
 /* ==================================================================== */
 
 const byId = new Map(patches.map((p) => [p && p.id, p]));
-ok(Array.isArray(patches) && patches.length === 101, 'A1 theme-patches 条目数 = 101（新增 1.2.12 的 patch-107）', Array.isArray(patches) ? patches.length : typeof patches);
+ok(Array.isArray(patches) && patches.length === 102, 'A1 theme-patches 条目数 = 102（1.2.12 的 patch-107 + 1.2.20 的 patch-108）', Array.isArray(patches) ? patches.length : typeof patches);
 ok(!byId.has('patch-41'), 'A2 ⭐ patch-41 已按上游删除（.wbs-stash-inline 毛玻璃改由变量接管，不许回填）');
 const p105 = byId.get('patch-105');
 const p106 = byId.get('patch-106');
@@ -231,8 +233,11 @@ ok(bootIdx > DAEMON_SRC.indexOf("process.on('unhandledRejection'"),
 // 2026-09-29 BUG4 修复：旧实现只放行 6004，而渲染层会上报 AUTO_CONTINUE_QUOTA_CODES 里的
 // 5 个码（14012/14014/14018/14019/6004）⇒ 另外四种全被 400 拒，限流表永远为空、
 // 账号页徽标永不显示（用户看到的「功能未生效」）。现在改成与渲染层同一份码表。
-ok(/const RATE_LIMIT_CODES = \[14012, 14014, 14018, 14019, 6004\]/.test(DAEMON_SRC),
-  'E6 ⭐ model-rate-limit 路由接受与 inject 码表对齐的 5 个限流码（旧实现只收 6004 = 功能未生效）');
+// 2026-11-11 上游 1.2.20 吸纳：并入上游新增的 6000（模型用量限制）⇒ **六码并集**。
+// ⚠️ 上游 1.2.20 自己把码表**收窄**成 [6000,6004]，本地明确不采纳（会回退上面的 BUG4 修复）。
+ok(/const RATE_LIMIT_CODES = CREDIT_USAGE_STORE\.MODEL_LIMIT_CODES;/.test(DAEMON_SRC)
+  && /const MODEL_LIMIT_CODES = \[14012, 14014, 14018, 14019, 6000, 6004\];/.test(CREDIT_STORE_SRC),
+  'E6 ⭐ model-rate-limit 路由接受与 inject 码表对齐的**并集六码**（14012/14014/14018/14019/6000/6004；旧实现只收 6004 = 功能未生效）');
 ok(/resetAt < Date\.now\(\) - 86400000 \|\| resetAt > Date\.now\(\) \+ 90 \* 86400000/.test(DAEMON_SRC),
   'E7 解封时间窗夹在 [-1d, +90d]（不用离谱时间污染面板）');
 ok(/createSessionExportJobs\(\{/.test(DAEMON_SRC) && /exportJobs\.start\(/.test(DAEMON_SRC.replace(/\n/g, ' ')) === false ? true : /sessionExportJobs\.start\(/.test(DAEMON_SRC),
@@ -270,8 +275,9 @@ const NEW_FNS = [
 ];
 const missingFns = NEW_FNS.filter((f) => !INJECT_SRC.includes(f));
 ok(missingFns.length === 0, 'F7 1.2.8 的 12 个新函数都落到了本地', missingFns);
-ok(/AUTO_CONTINUE_QUOTA_CODES = \{ 14012: true, 14014: true, 14018: true, 14019: true, 6004: true \}/.test(INJECT_SRC),
-  'F8 限流/耗尽码表原样（自动续跑据此停手）');
+// 2026-11-11 上游 1.2.20 吸纳：并入 6000（模型用量限制）⇒ 六码。
+ok(/AUTO_CONTINUE_QUOTA_CODES = \{ 14012: true, 14014: true, 14018: true, 14019: true, 6000: true, 6004: true \}/.test(INJECT_SRC),
+  'F8 限流/耗尽码表 = 本地四码 ⊕ 上游 6000/6004（自动续跑据此停手）');
 ok(/'账号备注': 'Account note'/.test(INJECT_SRC) && /'模型限流': 'Model rate limited'/.test(INJECT_SRC) && /'模型用量': 'Model usage'/.test(INJECT_SRC),
   'F9 i18n 英俄表补齐新组件词条（缺了面板会露出中文）');
 ok(/class="wbs-account-name" data-uid=/.test(INJECT_SRC) && /wbs-model-rate-limit/.test(INJECT_SRC),

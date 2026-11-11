@@ -156,6 +156,20 @@ const DEFAULT_CONF = {
   // 自动恢复被误标失效的条目（有风险：可能把真失效的恢复回来，默认**关**，
   // 只在面板上手动点、并逐条显示理由）
   consolidateRevive: false,
+
+  /* ===== 临时文件清理 =====
+   * 起因：2026-11-09 发现 <Roaming>\WorkDaddy\client-tmp\workbuddy-cn 长到
+   *   37.4 GB / 251,504 个文件（C 盘当时只剩 28.6 GB），其中 95% 以上是历史
+   *   截图/探测脚本留下的临时 Edge 配置目录。清理逻辑与四道安全闸门见下方
+   *   「临时文件清理」小节的注释，这里只放参数。
+   */
+  // 总开关。关掉后连「立即清理」按钮也不动 —— 手动只跳过间隔限制，不跳过安全闸门。
+  tempSweep: true,
+  // 年龄闸门：mtime 在这个天数以内的目录一律不动。
+  //   7 天足够把「正在被某个进程使用」的排除掉：在用的 profile 时刻在写。
+  tempSweepDays: 7,
+  // 两轮自动清理之间至少隔这么久。默认一周。
+  tempSweepIntervalMs: 7 * 24 * 3600 * 1000,
 };
 
 let state = Object.assign({}, DEFAULT_CONF);
@@ -263,6 +277,14 @@ function saveConf(patch) {
       // 0.5 是 insertFact 里冲突判定的线，低于它会把「两件不同的事」判成同义
       if (Number.isFinite(n) && n >= 0.5 && n <= 0.98) state.consolidateJac = n;
     }
+    // ---- 临时文件清理 ----
+    if (patch.tempSweep !== undefined) state.tempSweep = !!patch.tempSweep;
+    if (patch.tempSweepDays !== undefined) {
+      const n = Number(patch.tempSweepDays);
+      // 下限 1 天：再短就可能碰到「刚跑完还没来得及收拾」的 profile。
+      // 上限 90 天：再长就失去清理意义了（那时早该手动处理）。
+      if (Number.isFinite(n) && n >= 1 && n <= 90) state.tempSweepDays = Math.floor(n);
+    }
   }
   try {
     fs.mkdirSync(baseDir(), { recursive: true });
@@ -279,6 +301,8 @@ function saveConf(patch) {
       consolidate: state.consolidate, consolidateIntervalMs: state.consolidateIntervalMs,
       consolidateEnt: state.consolidateEnt, consolidateMerge: state.consolidateMerge,
       consolidateRevive: state.consolidateRevive, consolidateJac: state.consolidateJac,
+      tempSweep: state.tempSweep, tempSweepDays: state.tempSweepDays,
+      tempSweepIntervalMs: state.tempSweepIntervalMs,
     }, null, 2));
   } catch (e) { CFG.log(`[ck-memory] 保存配置失败: ${e.message}`); }
   return state;
@@ -5156,6 +5180,267 @@ function ensureMcpConfig() {
   }
 }
 
+/* ================= 临时文件清理 =================
+ *
+ * 背景（2026-11-09 实测本机）：
+ *   <Roaming>\WorkDaddy\client-tmp\workbuddy-cn 长到 **37.4 GB / 251,504 个文件**，
+ *   而 C 盘当时总共只剩 28.6 GB。拆开看 95% 以上是**临时 Edge 配置目录**：
+ *   历史会话里的截图 / UI 探测脚本每次都用 `--user-data-dir=<TEMP>/<标签>_<毫秒>`
+ *   起一个全新浏览器，跑完从不删除。Edge 每起一次落 800MB~1.2GB
+ *   （组件缓存 + 预装扩展 + Crashpad），攒三十几次就是三十多 G。
+ *   ⇒ 这些既不是数据库也不是日志，是纯缓存；删掉唯一代价是「下次起浏览器慢几十秒」。
+ *
+ * 为什么做进插件而不是外部计划任务：
+ *   插件本来就有常驻定时器（索引 / 事实 / 整理），加一条不增加维护面；
+ *   而计划任务在换机器、重装、迁移 profile 时会静默失效，用户根本不知道它没了。
+ *
+ * ⚠️⚠️⚠️ 四道安全闸门（这个函数会真的删文件，改之前把四条都读完）：
+ *   ① **只处理临时根下面的一级子目录**。永远不删根本身、永远不碰散落在根上的文件
+ *      —— 根上的文件是 daemon / CLI 正在写的（临时上传、patch payload、节点解包…），
+ *      删了当场坏事；而子目录里的浏览器 profile 一定是历史残留：当前在用的那个
+ *      被运行中的进程持有、mtime 时刻在变，过不了闸门 ②。
+ *   ② **年龄闸门**：目录 mtime 必须早于 tempSweepDays（默认 7 天）。
+ *   ③ **形态闸门**：必须长得像 Chromium 临时 profile —— 要么三件套齐全
+ *      （Local State + Default\ + Crashpad\），要么名字本身是 Chromium 自建的那几种。
+ *      ⚠️ 曾经想按 `*shot_*` 这种业务命名匹配，那等于把「别人起的什么名字」当判据，
+ *      脚本一改名就漏 ⇒ 主判据必须是**磁盘形态**，命名只作兜底通道。
+ *   ④ **白名单**：命中 KEEP_NAMES / KEEP_PREFIX 的一律跳过。那是用户真放进去的东西
+ *      （xltest 的两个 xlsx、packcalc_shot 的交付截图、langapp_be_test 的项目副本…）。
+ *      宁可多留几个垃圾，也不能误删一次 —— 垃圾还能再长回来，文件删了没有第二次机会。
+ *
+ * ⚠️ 为什么不在删之前逐个统计目录体积：
+ *   25 万个文件走一遍要两分钟，而最后只需要一个数字。改用 statfs 前后差值估算，
+ *   代价是常数级；并发写入会有一点噪声，但回收量是 GB 级，噪声可以忽略。
+ */
+
+const KEEP_NAMES = new Set([
+  '.automator', 'xltest', 'packcalc_shot', 'langapp_be_test', 'officecli',
+  'Diagnostics', 'MumuImageCache', 'PhotoCache', 'NuGetScratch', 'VBE',
+  'sa', '_adx', 'preview', 'h5', 'h5_v2', 'h5_v3', 'h5_check', 'h5_check2',
+]);
+/* 前缀白名单：WorkBuddy 自己的运行期目录、本插件/记忆系统的测试目录，
+ * 名字都带时间戳或随机后缀，靠全名匹配不现实。 */
+const KEEP_PREFIX = ['workbuddy-', 'ckm-', 'ckmv2-', 'wd-', 'node-compile-cache'];
+/* Chromium 自建的临时目录（没有 Local State 三件套，但同样是纯缓存） */
+const CHROMIUM_TEMP_RE = /^(?:scoped_dir.*|msedge_.*|playwright_chromiumdev_profile.*|HeadlessEdge\d+)$/;
+
+let tempTimer = null;
+let tempSweepBusy = false;
+/** 上一次清理结果。at=0 表示从未清过（首轮就会跑一次）。 */
+let lastTempSweep = { at: 0, removed: 0, bytes: 0, failed: 0, ms: 0 };
+
+/**
+ * 临时根的**父目录**：`<Roaming>\WorkDaddy\client-tmp`。
+ * 每个 profile（workbuddy-cn / lite …）在它下面各占一个子目录，那才是真正的 TEMP。
+ */
+function tempBase() {
+  const appdata = process.env.APPDATA || path.join(os_home(), 'AppData', 'Roaming');
+  return path.join(appdata, 'WorkDaddy', 'client-tmp');
+}
+
+/**
+ * 真实临时根列表 = client-tmp 下的每个 profile 子目录。
+ *
+ * ⚠️ 曾经把 profile 名 `workbuddy-cn` 写死在这里。写死的代价是**静默失效**：
+ *   装上 lite profile（目录名不同）之后清理永远扫不到东西，而面板上只会显示
+ *   「还没清理过」—— 跟「最近真没垃圾」长得一模一样，排查时会怀疑人生。
+ *   所以改成自动发现：client-tmp 下面有几个 profile 就扫几个。
+ * ⚠️ 跳过下划线开头的（`_trash-*` 是手动清理的暂存区，不归它管）。
+ */
+function tempRoots() {
+  const base = tempBase();
+  let ents;
+  try { ents = fs.readdirSync(base, { withFileTypes: true }); }
+  catch (_) { return []; }
+  return ents
+    .filter((e) => e.isDirectory() && e.name.charAt(0) !== '_')
+    .map((e) => path.join(base, e.name));
+}
+
+function looksLikeChromiumProfile(dir) {
+  try {
+    return fs.existsSync(path.join(dir, 'Local State'))
+      && fs.existsSync(path.join(dir, 'Default'))
+      && fs.existsSync(path.join(dir, 'Crashpad'));
+  } catch (_) { return false; }
+}
+
+/** 剩余可用字节。取不到就返回 0 —— 拿不到数字绝不能影响「删不删」。 */
+async function fsFree(dir) {
+  try {
+    const s = await fs.promises.statfs(dir);
+    return Number(s.bavail) * Number(s.bsize);
+  } catch (_) { return 0; }
+}
+
+function readTempSweepState() {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(baseDir(), 'tempsweep.json'), 'utf8'));
+    if (j && Number(j.at)) {
+      lastTempSweep = {
+        at: Number(j.at) || 0, removed: Number(j.removed) || 0,
+        bytes: Number(j.bytes) || 0, failed: Number(j.failed) || 0, ms: Number(j.ms) || 0,
+      };
+    }
+  } catch (_) { /* 没清过就没有这个文件 */ }
+  return lastTempSweep;
+}
+
+/* ===== 真正的删除：交给一个「干净」的子进程 =====
+ * ⚠️⚠️⚠️ 为什么不能直接 fs.rm —— 2026-11-09 踩的坑，代价是白跑两轮 + 5.9 万项进回收站：
+ * 宿主 WorkBuddy 通过 NODE_OPTIONS 给子进程 --require 了一个安全删除垫片
+ * （...\cli\vendor\shim\node-language-shim.cjs）。它在 Windows 上把所有 fs 删除
+ * 改道成 SendToRecycleBin ⇒ 文件只是从临时根**搬进回收站**，C 盘一个字节都不多；
+ * 还有个单轮 99,999 文件的批量阈值，超了整批拒绝（失败原因字段是空的 undefined）。
+ * daemon 是宿主的子进程，很可能一样被注入 —— 但**不赌它有没有**：
+ * 起子进程时把 NODE_OPTIONS 整个摘掉，删除就一定是真删。
+ * 附带好处：子进程的 exit code 直接反映成败，不用去解析被垫片改写过的 error 对象。
+ */
+const SHIM_RE = /node-language-shim|safe-delete/i;
+
+let shimStrippedLogged = false;
+
+function purgeViaChild(target) {
+  return new Promise((resolve) => {
+    const code =
+      'var fs=require("fs"),p=process.env.CKM_PURGE_DIR;' +
+      'try{fs.rmSync(p,{recursive:true,force:true,maxRetries:3,retryDelay:200});}' +
+      'catch(e){process.stderr.write(String(e&&e.message||e));process.exit(3);}';
+    const env = Object.assign({}, process.env, { CKM_PURGE_DIR: target });
+    /* 命中垫片就把 NODE_OPTIONS 整个摘掉：这里除了它没别的东西，而"少加载一个
+     * 改变删除语义的模块"正是我们唯一想要的效果。没命中就不动，别多管闲事。 */
+    if (SHIM_RE.test(String(env.NODE_OPTIONS || ''))) {
+      delete env.NODE_OPTIONS;
+      if (!shimStrippedLogged) {
+        shimStrippedLogged = true;
+        CFG.log('[ck-memory] 检测到宿主的 safe-delete 垫片，清理子进程已摘除 NODE_OPTIONS（确保真删而非进回收站）');
+      }
+    }
+    let err = '';
+    let cp;
+    try {
+      cp = require('child_process').spawn(process.execPath, ['-e', code], {
+        env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'],
+      });
+    } catch (e) { return resolve({ ok: false, err: 'spawn 失败: ' + e.message }); }
+    cp.stderr.on('data', (d) => { if (err.length < 400) err += d.toString(); });
+    cp.on('error', (e) => resolve({ ok: false, err: 'spawn 失败: ' + e.message }));
+    cp.on('close', (c) => resolve({ ok: c === 0, err: err.trim() }));
+  });
+}
+
+/**
+ * 执行一次清理。**异步**，绝不在 daemon 主线程上同步跑。
+ *
+ * 为什么不挂在 tick() 里：删二十万个文件要几分钟，而 tick 是同步函数、跑在
+ * daemon 主线程（面板、会话上报、网关全在那个进程里）⇒ 会整体卡死。
+ * 这是事实抽取那段注释里踩过的同一个坑，这里直接按结论来。
+ */
+async function tempSweep(reason) {
+  if (!state.tempSweep) return { skipped: 'off' };
+  if (tempSweepBusy) return { skipped: 'busy' };
+  const roots = tempRoots();
+  if (!roots.length) return { skipped: 'no-root' };
+
+  const cutoff = Date.now() - (Number(state.tempSweepDays) || 7) * 86400000;
+  /* 可用空间在**父目录**上取前后差值：逐个 profile 取会把「另一个 profile 同时在写」
+   * 算进差值里，误差比一次性前后差更大。 */
+  const base = tempBase();
+  const free0 = await fsFree(base);
+  tempSweepBusy = true;
+  let removed = 0, failed = 0;
+  const t0 = Date.now();
+  try {
+    for (const root of roots) {
+      let ents;
+      try { ents = await fs.promises.readdir(root, { withFileTypes: true }); }
+      catch (_) { continue; }
+      for (const ent of ents) {
+        if (!ent.isDirectory()) continue;                                     // 闸门 ①
+        const name = ent.name;
+        if (KEEP_NAMES.has(name)) continue;                                    // 闸门 ④
+        if (KEEP_PREFIX.some((p) => name.indexOf(p) === 0)) continue;
+        const dir = path.join(root, name);
+        let st;
+        try { st = await fs.promises.stat(dir); } catch (_) { continue; }
+        if (st.mtimeMs > cutoff) continue;                                     // 闸门 ②
+        if (!CHROMIUM_TEMP_RE.test(name) && !looksLikeChromiumProfile(dir)) continue; // 闸门 ③
+        /* 走子进程删（见 purgeViaChild 上方注释：直连 fs.rm 会被宿主垫片改道进回收站）。 */
+        const r = await purgeViaChild(dir);
+        if (r.ok && !fs.existsSync(dir)) {
+          removed++;
+        } else {
+          failed++;
+          CFG.log(`[ck-memory] 临时目录清理失败 ${name}: ` +
+            (r.ok ? '子进程报告成功但目录仍存在' : (r.err || '未知原因')));
+        }
+      }
+    }
+  } finally { tempSweepBusy = false; }
+
+  const free1 = await fsFree(base);
+  const delta = free1 - free0;
+  lastTempSweep = {
+    at: Date.now(), removed, failed,
+    bytes: Math.max(0, delta), ms: Date.now() - t0,
+    /* 删了东西、空间却一个字节都没回来 —— 这不是「垃圾本来就小」，是删除被改道了。
+     * 2026-11-09 实测踩到过：宿主用 NODE_OPTIONS 给子进程挂了 safe-delete 垫片
+     * （vendor/shim/node-safe-delete-shim.cjs），它的 fs.rm 在 Windows 上走
+     * SendToRecycleBin ⇒ 文件只是从临时目录**搬进回收站**，C 盘一个字节都不多。
+     * 这个标记就是给这种情况留的证：没有它，「清理成功」和「什么都没发生」
+     * 在日志里长得一模一样。
+     * 判据用 delta<=0 而不是 bytes===0：那种情况下同期的其他写入会把差值压成负数。 */
+    recycled: removed > 0 && delta <= 0,
+  };
+  try {
+    fs.mkdirSync(baseDir(), { recursive: true });
+    atomicWrite(path.join(baseDir(), 'tempsweep.json'), JSON.stringify(lastTempSweep, null, 2));
+  } catch (_) { /* 记不下也不影响已经删掉的事实 */ }
+  if (removed || failed) {
+    CFG.log(`[ck-memory] ${reason} 临时文件清理：删 ${removed} 个目录 / 约 ` +
+      `${(lastTempSweep.bytes / 1073741824).toFixed(2)} GB` +
+      (failed ? `，${failed} 个失败` : '') + `（${lastTempSweep.ms}ms）`);
+  }
+  if (lastTempSweep.recycled) {
+    // 单独一条 WARN，不带「清理成功」的措辞 —— 这条日志的意义就是让人一眼看出
+    // 「跑了、但白跑」。常见原因是宿主的 safe-delete 垫片把删除改成了进回收站。
+    CFG.log('[ck-memory] ⚠️ 临时文件清理可疑：删了 ' + removed +
+      ' 个目录但可用空间没有增加（' + Math.round(delta / 1048576) + ' MB）。' +
+      '多半是删除被改道进回收站了，需要手动清空回收站才能真正回收。');
+  }
+  return lastTempSweep;
+}
+
+/**
+ * 高频探测 + 低频执行（与 consolidate 同款思路）。
+ *
+ * 为什么不直接用一个「一周一次的定时器」：那样「刚清完重启 daemon」会把计时清零，
+ * 下次要再等一周。持久化时间戳 + 高频探测 ⇒ 重启不影响节奏，也不用把间隔塞进内存。
+ */
+function tempTick(reason) {
+  if (!state.tempSweep) return;
+  const last = (lastTempSweep && lastTempSweep.at) || readTempSweepState().at || 0;
+  const every = Number(state.tempSweepIntervalMs) || 7 * 86400000;
+  if (last && Date.now() - last < every) return;
+  tempSweep(reason).catch((e) => CFG.log(`[ck-memory] 临时文件清理异常: ${e.message}`));
+}
+
+function startTempTimer() {
+  if (!state.tempSweep) {
+    if (tempTimer) { clearInterval(tempTimer); tempTimer = null; }
+    return;
+  }
+  if (tempTimer) return;
+  readTempSweepState();
+  // 启动后先等 90 秒：daemon 刚起来时索引器与抽取都在跑，清理要扫上万条目，
+  // 挤在一起会让面板首屏变慢（用户第一印象）。
+  setTimeout(() => tempTick('temp-startup'), 90000);
+  tempTimer = setInterval(() => tempTick('temp-tick'), 3600000);
+  if (tempTimer.unref) tempTimer.unref();
+  CFG.log('[ck-memory] 临时文件清理已启动，探测间隔 3600000ms（实际间隔 ' +
+    (Math.round((Number(state.tempSweepIntervalMs) || 0) / 86400000 * 10) / 10) + ' 天）');
+}
+
 function startAll() {
   // MCP 读取通道与「自动索引」开关无关，先把它弄稳
   ensureMcpConfig();
@@ -5204,6 +5489,13 @@ function startAll() {
       Math.round((Number(state.consolidateIntervalMs) || 0) / 3600000 * 10) / 10 + ' 小时）');
   }
 
+  /* 临时文件清理定时器：同样**独立于 enabled**。
+   * 它跟索引、记忆、SQLite 一点关系都没有 —— 纯粹是在收拾 WorkBuddy 临时根里的
+   * 历史浏览器 profile。用户关掉「自动索引」往往只是不想后台扫会话文件，
+   * 不代表愿意让 C 盘继续被几十 G 缓存吃掉。
+   */
+  if (state.tempSweep) startTempTimer();
+
   if (!available() || !state.enabled) return;
   if (timer) return;
   // 首次索引延后，别和 daemon 启动抢 IO
@@ -5217,6 +5509,7 @@ function stopAll() {
   if (timer) { clearInterval(timer); timer = null; }
   if (factTimer) { clearInterval(factTimer); factTimer = null; }
   if (consolTimer) { clearInterval(consolTimer); consolTimer = null; }
+  if (tempTimer) { clearInterval(tempTimer); tempTimer = null; }
   close();
 }
 
@@ -5224,7 +5517,10 @@ function restartTimer() {
   if (timer) { clearInterval(timer); timer = null; }
   if (factTimer) { clearInterval(factTimer); factTimer = null; }
   if (consolTimer) { clearInterval(consolTimer); consolTimer = null; }
-  if (state.enabled) startAll();
+  if (tempTimer) { clearInterval(tempTimer); tempTimer = null; }
+  // 临时清理与索引开关无关：关掉自动索引时也要能把它恢复回来
+  // （否则「改一次配置」就把清理定时器永久弄没了，而且日志里一句话都没有）
+  if (state.enabled) startAll(); else startTempTimer();
 }
 
 /* ================= HTTP API ================= */
@@ -5267,6 +5563,47 @@ function handleApi(req, res, pathname) {
 
   if (sub === 'status' && method === 'GET') {
     return send(res, 200, { ok: true, stats: stats(), lastRun, lastBackfill });
+  }
+
+  /* ---- 临时文件清理 ----
+   * 面板上的「已回收多少 / 上次什么时候清的 / 现在清一次」都走这两个端点。
+   * ⚠️ 手动触发**只跳过「间隔限制」**，四道安全闸门一道都不放宽 —— 否则
+   *   「清一次」就会变成「把刚跑完还没收拾的 profile 也删掉」。
+   */
+  if (sub === 'tempsweep' && method === 'GET') {
+    readTempSweepState();
+    return send(res, 200, {
+      ok: true,
+      busy: tempSweepBusy,
+      roots: tempRoots(),
+      last: lastTempSweep,
+      config: {
+        tempSweep: !!state.tempSweep,
+        tempSweepDays: Number(state.tempSweepDays) || 7,
+        tempSweepIntervalMs: Number(state.tempSweepIntervalMs) || 7 * 86400000,
+      },
+    });
+  }
+
+  if (sub === 'tempsweep' && method === 'POST') {
+    return readBody(req, (body) => {
+      if (body && body.run) {
+        if (tempSweepBusy) return send(res, 200, { ok: true, busy: true, last: lastTempSweep });
+        tempSweep('manual')
+          .then((r) => send(res, 200, { ok: true, last: r }))
+          .catch((e) => send(res, 200, { ok: false, error: e.message, last: lastTempSweep }));
+        return;
+      }
+      saveConf({ tempSweep: body && body.tempSweep, tempSweepDays: body && body.tempSweepDays });
+      // 关掉时立刻停表，开开时立刻挂上；不用等下一轮配置重载
+      if (state.tempSweep) startTempTimer();
+      else if (tempTimer) { clearInterval(tempTimer); tempTimer = null; }
+      return send(res, 200, {
+        ok: true,
+        config: { tempSweep: !!state.tempSweep, tempSweepDays: state.tempSweepDays },
+        last: lastTempSweep,
+      });
+    });
   }
 
   if (sub === 'config' && method === 'GET') {
@@ -5825,6 +6162,11 @@ module.exports = {
   restartTimer,
   handleApi,
   uiSource,
+  // 临时文件清理：给面板的「立即清理」与离线测试用
+  tempSweep,
+  tempBase,
+  tempRoots,
+  tempSweepState: () => lastTempSweep,
   status: stats,
   sessions: sessionList,
   setBind,

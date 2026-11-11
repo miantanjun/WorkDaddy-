@@ -17,6 +17,76 @@
 > ⚠️ **版本断层**：v1.9.2 – v1.9.7 的条目尚未回填（那几版只打了 tag 未补文档）。
 > 需要时用 `git log v1.9.1..v1.9.7 --oneline` 还原。**跨版本的完整清单以 [`docs/DONE-TODO.md`](docs/DONE-TODO.md) 为准**，本文件只管「某一版改了什么」。
 
+## v1.11.0 —— 2026-11-11
+
+**主题**：吸纳上游 **1.2.20**（四批）+ **反代网关出站指纹对齐本机 WorkBuddy 5.9.3 / CLI 2.165.0**。
+
+> 这一版把上游 1.2.20 里**方向不冲突**的部分取进来，同批修掉一个「平时被 config 覆盖兜着、
+> 换机就暴露」的旧账：`wb2api-go` 内置默认版本段还停在 5.5.4 / 2.137.1，而本机客户端已是
+> **5.9.3 / 2.165.0**。生产 `config.json` 原先用一句硬编码 `user_agent` 覆盖着，这回改成
+> **只留 `client_version` / `cli_version`**，让代码里的 realm 感知组装接管（global 账号才拿得到
+> 应有的 `WorkBuddy AI` 平台段）。
+
+### 新增功能
+
+- **快捷短语拖动排序 + 仅插入（上游 1.2.20）**：短语行支持拖拽改序（持久化 `quickPhrases` 顺序），
+  并新增「仅插入不发送」。本地是自研结构（`.wbs-qp-row[data-id]`），**手工适配**而非照抄上游 hunk。
+  ⚠️ 拖动排序持 `qpSortCleanup` 句柄、**重建列表前先拆旧 sorter**（否则每刷一次多一套 document/window
+  监听 ⇒ 堆积泄漏）；拖动仅在**非批量模式**启用。
+- **会话复制错误文案白名单（`scripts/session-copy-error.js`，上游 1.2.20）**：新增模块**零依赖**
+  （内联 `AMBIGUOUS_SESSION_ACCOUNT` 常量，不补 require 身份层），随包分发需进 mac 白名单。
+
+### 缺陷修复
+
+- **出站 UA 版本段落后于实际客户端**（旧待办 T3）：`headers.go` 的 `defaultClientVersion`
+  5.5.4 → **5.9.3**、`defaultCliVersion` 2.137.1 → **2.165.0**；`desktop.go` 的 `desktopUA` /
+  `ideVersion` / `extVersion` / `X-IDE-Version` 同步；`scripts/growth-tasks.js` 的 `DESKTOP_UA` 四处同步。
+  ⚠️ **commit / releaseDate 必须与 ideVersion 同源**：只升版本号而留着 5.5.6 的构建指纹，
+  会形成「版本 5.9.3 + commit 属于 5.5.6」的自相矛盾特征，比统一到同版本更可疑 ⇒ 一并取本机
+  5.9.3 `cli/product.json` 的 `commit` / `date`。
+- **`user_agent` 硬编码短路 realm 感知**：生产 config 原先写死
+  `WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0`，会**绕过** `defaultWorkBuddyUAFor()` 的
+  platform 分支 ⇒ global 账号拿不到 `WorkBuddy AI` 平台段（官方对送错平台段有 403 code 11140 风控）。
+  现改为**清空 `user_agent`**、只留版本段配置；CN 账号结果逐字节相同（零回归），global 恢复正确形态。
+- **fork 会话身份重绑**（上游 1.2.20）：`createForkSession` 的 resume 按**记录里的 `sessionId`**
+  还原身份、非文件名 ⇒ 只改 `value.sessionId === src.id` 那一行；消息 ID / payload / 子会话
+  必须保留原身份，否则串会话。
+
+### 优化调整
+
+- **限流码表取并集六码（上游方向相反，必须并）**：⚠️ 上游 1.2.20 把码表**收窄**成 `[6000, 6004]`
+  并加 `if (reason !== 6000 && reason !== 6004) throw`，与本地 BUG4 修复（放宽出的
+  14012/14014/14018/14019）**方向相反** ⇒ **照抄即回退 BUG4**。正解取并集
+  `[14012,14014,14018,14019,6000,6004]`，且码表收归**单一真源**
+  （`credit-usage-store.js` 的 `MODEL_LIMIT_CODES`，daemon 路由与 store 内层共用）。
+  另 `hasModelRateLimitElsewhere` 加 `reasonCode` 维度（6000 用量限制 ≠ 6004 频率限制）；
+  **缺省值必须保持 6004**，不动旧调用点。
+- **workspace repair 改 opt-in（上游 1.2.20）**：`WORKDADDY_REPAIR_MISSING_SESSION_WORKSPACES !== '1'`
+  时不再自动重建「已不存在的会话工作目录」（该函数是 5 秒一拍的**副作用型**定时器）。
+  这是**行为变更**：确需恢复要设环境变量并重启 daemon。
+
+### 判定不做
+
+- **`session-deletion-sync.js` 不吸纳**：上游 1.2.19 引入（+97 行）、1.2.20 **自我回退**（−97，issue #505）
+  ⇒ 不可吞并；本地无此文件**恰等于 1.2.20 的正确状态**。
+
+### 工程与文档
+
+- **版本号四处真相源统一到 `1.11.0`**：`DAEMON_VERSION` / `DAEMON_BUILD_ID`
+  （→ `release-1.11.0-20261111-upstream-1220-ua593-r1`）/ `scripts/package.json` / `scripts/package-lock.json`
+  / `README.md`；`UPSTREAM_VERSION` 1.2.18 → **1.2.20**（同步两处硬断言守卫 `test-upstream-1211.js` E3/E4、
+  `test-upstream-1215.js` A19）。
+- **实测取证（本机 5.9.3）**：`install-manifest.json` `appVersion=5.9.3`；`cli/package.json`
+  `version=2.165.0`（`@genie/agent-cli`）；`cli/product.json` `commit=d4692421…`、`date=2026-10-27T09:24:10.922Z`。
+  另从 `app.asar` 二进制扫描取到官方 UA 构造原文，确认**三段式格式未变**、`version` 已非 `0.0.0` 占位
+  （旧文档教「读 `publishConfig.customPackage.version`」在本机已失效）。
+- **端到端实证**：隔离实例 + 假上游抓包，实测出站 UA = `WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0`、
+  `X-IDE-Version: 5.9.3`；生产网关零中断替换（旧 PID 46052 → 新 PID 37180），真实聊天请求返回正常。
+- ⚠️ **升级带出的新事实（已实测排除风险）**：本机 5.9.3 已跨过 5.6 门槛，账号文件**真的带
+  `$wbEncrypted` 信封**了（`auth.accessToken` / `refreshToken` / `account.nickname` / `phoneNumber`）。
+  1.2.6 吸纳的信封解密适配层据此从「死代码」变成**活路径** —— 实测解密成功（取出明文 JWT + 昵称 + 手机号），
+  网关侧账号为明文格式、路由正常。
+
 ## v1.10.0 —— 2026-11-06
 
 **主题**：**会话记忆**整套插件首次入库（面板 / MCP / Hook 三条入口）+ **侧车统一网关**面板化 + dsh-ops 升 0.4.4。

@@ -278,7 +278,8 @@ function classifyAutoContinueReply(snapshot) {
   return { trigger: false, reason: 'no-incomplete-evidence' };
 }
 
-var AUTO_CONTINUE_QUOTA_CODES = { 14012: true, 14014: true, 14018: true, 14019: true, 6004: true };
+// 额度/限额业务码。上游 1.2.20 加 6000（官方「模型用量限制」），6004 为「频率限制」。
+var AUTO_CONTINUE_QUOTA_CODES = { 14012: true, 14014: true, 14018: true, 14019: true, 6000: true, 6004: true };
 
 function normalizeAutoContinueError(error) {
   if (!error || typeof error !== 'object') return null;
@@ -2202,6 +2203,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2Z"/></svg>';
   var AUTO_LOG_SVG =
     '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h8l4 4v14H7z"/><path d="M15 3v5h5"/><path d="M10 12h6M10 16h6"/></svg>';
+  // 上游 1.2.19：快捷短语拖动排序手柄（六点握把）。
+  var QP_DRAG_SVG =
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">' +
+    '<circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/>' +
+    '<circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/>' +
+    '<circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>';
+  // 上游 1.2.19：快捷短语「仅插入」按钮（下箭头落入横线）。
+  var QP_INSERT_SVG =
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M12 4v11"/><path d="m7.5 11 4.5 4.5L16.5 11"/><path d="M5 20h14"/></svg>';
   var AUTO_PICK_SVG =
     '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h6M4 4v6M20 4h-6M20 4v6M4 20h6M4 20v-6M20 20h-6M20 20v-6"/><circle cx="12" cy="12" r="2.5"/></svg>';
   var AUTO_DISCOVER_SVG =
@@ -3629,6 +3640,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     };
     var sessLastExploreSig = ''; // 面板选项渲染签名（内容未变不重建保留 tooltip 状态）
     var sessLastQpSig = ''; // 增强页列表渲染签名（内容/批量模式/选中集未变不重建）
+    // 上游 1.2.19：拖动排序器的清理句柄（每次重建列表先拆旧的，避免事件处理器跨版本堆积/泄漏）。
+    var qpSortCleanup = null;
     function applySessionModule(d) {
       if (!d || !d.ok) return;
       sessState.stash = !!d.stashEnabled;
@@ -3811,6 +3824,119 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         selectionQuotePending = null;
       });
     }
+    /* 上游 1.2.19：增强页快捷短语拖动排序器（FLIP 动画 + 自动滚动 + Esc 取消 + 提交失败回滚）。
+     * 本地为自研列表结构（.wbs-qp-row[data-id] + [data-qp-drag] 手柄），故按本地 DOM 约定重写，
+     * 不改上游原文（上游 hunk 依赖其自身的 renderQpList 结构，照抄会错位）。
+     * 返回一个 cleanup 函数：重建列表前调用，摘掉 document/window 级监听，防止处理器堆积。 */
+    function createQuickPhraseSorter(list, commit, reportError) {
+      var dragging = null, original = [], saving = false, disposed = false;
+      var listeners = [], animations = new Map(), scrollFrame = null, pointerY = 0;
+      function listen(target, name, handler, options) {
+        target.addEventListener(name, handler, options);
+        listeners.push(function () { target.removeEventListener(name, handler, options); });
+      }
+      function rows() { return Array.prototype.slice.call(list.querySelectorAll('.wbs-qp-row')); }
+      function cancelAnimations() { animations.forEach(function (a) { a.cancel(); }); animations.clear(); }
+      function move(change) {
+        var items = rows();
+        var tops = items.map(function (row) { return row.getBoundingClientRect().top; });
+        cancelAnimations();
+        var scrollTop = list.scrollTop;
+        change();
+        list.scrollTop = scrollTop;
+        if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        items.forEach(function (row, index) {
+          var delta = tops[index] - row.getBoundingClientRect().top;
+          if (row === dragging || !delta || !row.animate) return;
+          var animation = row.animate(
+            [{ transform: 'translateY(' + delta + 'px)' }, { transform: 'translateY(0)' }],
+            { duration: 160, easing: 'cubic-bezier(.2,.8,.2,1)' }
+          );
+          animations.set(row, animation);
+          animation.onfinish = function () { if (animations.get(row) === animation) animations.delete(row); };
+        });
+      }
+      function preview(y) {
+        if (!dragging) return;
+        var localY = y - list.getBoundingClientRect().top - list.clientTop + list.scrollTop;
+        var before = null;
+        var items = rows();
+        for (var i = 0; i < items.length; i++) {
+          if (items[i] === dragging) continue;
+          if (localY < items[i].offsetTop + items[i].offsetHeight / 2) { before = items[i]; break; }
+        }
+        if (dragging.nextElementSibling === before) return;
+        move(function () { list.insertBefore(dragging, before); });
+      }
+      function stopScroll() { if (scrollFrame !== null) cancelAnimationFrame(scrollFrame); scrollFrame = null; }
+      function scrollStep() {
+        scrollFrame = null;
+        if (!dragging) return;
+        var rect = list.getBoundingClientRect(), edge = Math.min(28, rect.height / 4);
+        var speed = pointerY < rect.top + edge ? -6 : pointerY > rect.bottom - edge ? 6 : 0;
+        if (!speed || pointerY < rect.top || pointerY > rect.bottom) return;
+        var previous = list.scrollTop;
+        list.scrollTop = Math.max(0, Math.min(list.scrollHeight - list.clientHeight, previous + speed));
+        if (list.scrollTop !== previous) { preview(pointerY); scrollFrame = requestAnimationFrame(scrollStep); }
+      }
+      function finish() {
+        stopScroll();
+        if (dragging) dragging.classList.remove('wbs-qp-dragging');
+        dragging = null;
+      }
+      function restore(order) { move(function () { order.forEach(function (row) { list.appendChild(row); }); }); }
+      function cancel() { if (!dragging) return; finish(); restore(original); }
+      rows().forEach(function (row) {
+        var handle = row.querySelector('[data-qp-drag]');
+        if (!handle) return;
+        listen(handle, 'dragstart', function (event) {
+          event.stopPropagation();
+          if (saving || disposed) { event.preventDefault(); return; }
+          cancelAnimations();
+          original = rows();
+          dragging = row;
+          if (event.dataTransfer) {
+            event.dataTransfer.setData('text/plain', row.getAttribute('data-id'));
+            event.dataTransfer.effectAllowed = 'move';
+            var rect = row.getBoundingClientRect();
+            if (event.dataTransfer.setDragImage) event.dataTransfer.setDragImage(row, event.clientX - rect.left, event.clientY - rect.top);
+          }
+          row.classList.add('wbs-qp-dragging');
+        });
+        listen(handle, 'dragend', function (event) { event.stopPropagation(); cancel(); });
+      });
+      listen(list, 'dragover', function (event) {
+        if (!dragging) return;
+        event.preventDefault(); event.stopPropagation();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+        pointerY = event.clientY;
+        preview(pointerY);
+        if (scrollFrame === null) scrollFrame = requestAnimationFrame(scrollStep);
+      });
+      listen(list, 'dragleave', function (event) { if (!list.contains(event.relatedTarget)) stopScroll(); });
+      listen(list, 'drop', function (event) {
+        if (!dragging) return;
+        event.preventDefault(); event.stopPropagation();
+        preview(event.clientY);
+        var ordered = rows(), previous = original.slice();
+        finish();
+        if (ordered.every(function (row, i) { return row === previous[i]; })) return;
+        saving = true;
+        list.setAttribute('aria-busy', 'true');
+        Promise.resolve()
+          .then(function () { return commit(ordered.map(function (row) { return row.getAttribute('data-id'); })); })
+          .catch(function (error) { if (!disposed) { restore(previous); reportError(error); } })
+          .finally(function () { saving = false; if (!disposed) list.removeAttribute('aria-busy'); });
+      });
+      listen(document, 'keydown', function (event) {
+        if (dragging && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); }
+      }, true);
+      listen(window, 'blur', cancel);
+      return function () {
+        disposed = true; finish(); cancelAnimations(); list.removeAttribute('aria-busy');
+        listeners.forEach(function (remove) { remove(); });
+      };
+    }
     /** 增强页快捷短语列表渲染（含批量模式） */
     function renderQpList() {
       var pane1 = enhancePane;
@@ -3849,8 +3975,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var ph = phrases[i];
         var checked = sessState.qpSel[ph.id] ? ' checked' : '';
         var cb = sessState.qpBatch ? '<input type="checkbox" class="wbs-qp-check" data-id="' + escAttr(ph.id) + '"' + checked + '>' : '';
+        // 上游 1.2.19：非批量模式下提供拖动手柄（批量模式下拖动会与勾选/全选交互打架 ⇒ 不渲染）。
+        var handle = sessState.qpBatch ? '' : '<span class="wbs-qp-drag" data-qp-drag draggable="true" title="拖动排序">' + QP_DRAG_SVG + '</span>';
         html +=
           '<div class="wbs-qp-row" data-id="' + escAttr(ph.id) + '">' +
+          handle +
           cb +
           '<span class="wbs-qp-text" title="' + escAttr(ph.text) + '">' + esc(ph.text) + '</span>' +
           '<span class="wbs-qp-actions">' +
@@ -3859,7 +3988,27 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           '</span>' +
           '</div>';
       }
+      // 上游 1.2.19：重建列表会丢滚动位置 ⇒ 先存后还。
+      var listScrollTop = listEl.scrollTop;
       listEl.innerHTML = html;
+      listEl.scrollTop = listScrollTop;
+      // 重建前先摘掉上一轮 sorter 的 document/window 监听（否则每刷新一次就多一套处理器）。
+      if (qpSortCleanup) { try { qpSortCleanup(); } catch (_) {} qpSortCleanup = null; }
+      if (!sessState.qpBatch) {
+        qpSortCleanup = createQuickPhraseSorter(listEl, function (ordered) {
+          return api('/api/quick-phrase-reorder', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ ids: ordered }),
+          }).then(function (d) {
+            if (!d || !d.ok) throw new Error((d && d.error) || 'daemon 未确认');
+            applySessionModule(d);
+          });
+        }, function (error) {
+          toast('排序失败: ' + (error.message || error), true, root);
+          syncSessionModule();
+        });
+      }
       var checks = listEl.querySelectorAll('.wbs-qp-check');
       for (var c = 0; c < checks.length; c++) {
         checks[c].addEventListener('change', function () {
@@ -3896,6 +4045,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         var ph = phrases[i];
         html += '<div class="wbs-explore-item" data-qp-send="' + escAttr(ph.id) + '">' +
           '<span class="wbs-explore-it">' + esc(ph.text) + '</span>' +
+          // 上游 1.2.19「仅插入」：与整行点击（替换并发送）并列，插到光标处不发送，避免误发。
+          '<span class="wbs-explore-ins" data-qp-insert="' + escAttr(ph.id) + '" title="仅插入（不发送）">' + QP_INSERT_SVG + '</span>' +
           '<span class="wbs-explore-tip"><span class="wbs-explore-tip-body">' + esc(ph.text) + '</span></span>' +
           '</div>';
       }
@@ -3927,6 +4078,29 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             tipK.addEventListener('mouseenter', function () { if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; } });
             tipK.addEventListener('mouseleave', hideTipDelayed);
           }
+          // 上游 1.2.19「仅插入」：插到当前光标处不发送（与本行点击的「替换并发送」区分）。
+          // ⚠️ 本地 findComposer 已存在；无输入框时只提示不发请求，避免 daemon 侧白失败。
+          var insertK = itemK.querySelector('[data-qp-insert]');
+          if (insertK) insertK.addEventListener('click', function (ev) {
+            ev.preventDefault(); ev.stopPropagation();
+            var iid = this.getAttribute('data-qp-insert');
+            var insertPhrase = null;
+            for (var m3 = 0; m3 < sessState.phrases.length; m3++) {
+              if (sessState.phrases[m3].id === iid) { insertPhrase = sessState.phrases[m3]; break; }
+            }
+            if (!insertPhrase) return;
+            var editor = findComposer();
+            if (!editor) { toast('未找到输入框', true, root); return; }
+            try { editor.focus(); } catch (_) {}
+            api('/api/quick-phrase-insert', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ text: insertPhrase.text }),
+            }).then(function (result) {
+              if (!result || !result.ok) throw new Error((result && result.error) || 'daemon 未确认');
+              acMenuClose();
+            }).catch(function (e4) { toast('插入失败: ' + (e4.message || e4), true, root); });
+          });
           itemK.addEventListener('click', function (eve) {
             qpDiag('click:start', { phraseId: itemK.getAttribute('data-qp-send'), target: eve.target && eve.target.className || '' });
             eve.stopPropagation();
@@ -21964,6 +22138,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-explore-item{position:relative;display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:8px;font-size:12px;color:var(--wb-color-text-primary,#1f1f1f);line-height:1.4;cursor:pointer}',
     '.wbs-explore-it{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.wbs-explore-item:hover{background:color-mix(in srgb,var(--wb-bg-hover,#f3f3f3) 76%,transparent)}',
+    /* 上游 1.2.19「仅插入」按钮：默认低调，行 hover 才明显（避免与整行「点击发送」抢视觉）。 */
+    '.wbs-explore-ins{display:flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;border-radius:6px;color:var(--wb-icon-secondary,#666);opacity:0;transition:opacity .12s,background .12s;cursor:pointer}',
+    '.wbs-explore-item:hover .wbs-explore-ins,.wbs-explore-item:focus-within .wbs-explore-ins{opacity:1}',
+    '.wbs-explore-ins:hover{background:color-mix(in srgb,var(--wb-bg-hover,#f3f3f3) 85%,transparent);color:var(--wb-color-text-primary,#1f1f1f)}',
     /* 选项 hover：antd 风格 tooltip（半透明毛玻璃小气泡，出现在选项左侧，完全展示文字） */
     '.wbs-explore-tip{position:absolute;right:calc(100% + 10px);top:50%;transform:translateY(-50%);display:block;width:max-content;padding:5px 11px;border-radius:8px;font-size:11px;line-height:1.35;white-space:normal;word-break:break-word;max-width:240px;color:var(--wb-color-text-primary,#1f1f1f);background:var(--wb-bg-popover,#fff);border:1px solid color-mix(in srgb,var(--wb-border-subtle,#ececec) 65%,transparent);box-shadow:0 6px 20px rgba(0,0,0,.16);opacity:0;visibility:hidden;transition:opacity .15s ease;pointer-events:none;z-index:2}',
     'html[data-wbs-theme-id="nebula"] .wbs-explore-tip{background:color-mix(in srgb,var(--wb-bg-popover,#1a1729) 94%,transparent);background-color:color-mix(in srgb,var(--wb-bg-popover,#1a1729) 94%,transparent);border-color:var(--wb-border-strong,#3a3160);box-shadow:0 8px 24px rgba(0,0,0,.4);backdrop-filter:blur(14px) saturate(1.12);-webkit-backdrop-filter:blur(14px) saturate(1.12)}',
@@ -21991,6 +22169,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-qp-batch-action{color:#d64545}',
     '.wbs-qp-list{display:flex;flex-direction:column;max-height:220px;overflow-y:auto}',
     '.wbs-qp-row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-bottom:1px solid var(--wb-border-subtle,#eee)}',
+    /* 上游 1.2.19：拖动排序手柄 + 拖动中的行态（拖动行半透明，FLIP 位移动画由 JS Web Animations 负责）。 */
+    '.wbs-qp-drag{display:flex;align-items:center;justify-content:center;width:16px;height:20px;flex:0 0 auto;color:var(--wb-icon-tertiary,#aaa);cursor:grab;opacity:.55;transition:opacity .12s}',
+    '.wbs-qp-drag:hover{opacity:1;color:var(--wb-icon-secondary,#666)}',
+    '.wbs-qp-drag:active{cursor:grabbing}',
+    '.wbs-qp-row.wbs-qp-dragging{opacity:.45;background:color-mix(in srgb,var(--wb-bg-hover,#f3f3f3) 60%,transparent)}',
+    '.wbs-qp-list[aria-busy="true"]{pointer-events:none;opacity:.85}',
     '.wbs-qp-row:hover{background:color-mix(in srgb,var(--wb-bg-hover,#f3f3f3) 45%,transparent)}',
     '.wbs-qp-check{margin:0;width:14px;height:14px;flex:0 0 auto;accent-color:var(--wb-button-primary-bg,#1f1f1f)}',
     '.wbs-qp-text{flex:1;font-size:12px;line-height:1.5;color:var(--wb-color-text-primary,#1f1f1f);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;white-space:nowrap;word-break:break-all}',

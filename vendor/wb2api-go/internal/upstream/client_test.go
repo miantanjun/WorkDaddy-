@@ -67,6 +67,15 @@ func TestClassify(t *testing.T) {
 		{400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, ErrBadParams},
 		{400, `Unmarshal chat params failed`, ErrBadParams},
 		{400, `{"code":11101,"msg":"x"}`, ErrBadParams},
+		// 11133「参数被上游拒绝」与 11101 同待遇：确定性请求级错误，换账号结果不变，
+		// 不轮转、fail-fast 400 透传上游原文（详见 invalidRequestParamsCode 注释）。
+		// 线上主因是 image_url 传了 file:/// 或失效链接，实测连打 3 个账号全 11133。
+		{400, `{"code":11133,"msg":"Invalid request parameters"}`, ErrBadParams},
+		{400, `{"code": 11133, "msg":"Invalid request parameters"}`, ErrBadParams},
+		{400, `{"error":{"code":"11133","message":"Invalid request parameters"}}`, ErrBadParams},
+		// 防过宽：11133 归 bad_params，但绝不归 image_invalid（两者都不轮转，
+		// 区别在客户端拿到的错误码与提示文案）。
+		{400, `{"code": 11133, "msg":"model does not support image"}`, ErrBadParams},
 		// 图片格式/数据错误是确定性请求错误，分类后不轮转、不罚号。
 		{400, `{"code":11101,"msg":"Parse message failed: invalid image_url content at index 2: json: cannot unmarshal string into Go value of type v2.ImageContent"}`, ErrImageInvalid},
 		{400, `{"code":11135,"msg":"invalid_image_data"}`, ErrImageInvalid},
@@ -75,7 +84,7 @@ func TestClassify(t *testing.T) {
 		{400, `{"code": 11135, "msg":"image data invalid"}`, ErrImageInvalid},
 		{400, `{"error":{"code": "11135", "message":"image invalid"}}`, ErrImageInvalid},
 		// 防过宽：11133（模型不支持图片）不进 image_invalid。
-		{400, `{"code": 11133, "msg":"model does not support image"}`, ErrClient},
+		// （期望值已随 11133 归入 ErrBadParams 调整，见上方用例。）
 		{200, `quota exceeded`, ErrHardCredit},
 		// session 死亡优先于限流文案（401+12153 需人工重登，短冷却无意义）。
 		{401, `{"code":12153,"msg":"Offline user session not found, rate limit"}`, ErrSessionDead},

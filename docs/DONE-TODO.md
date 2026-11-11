@@ -120,7 +120,7 @@
 | # | 项 | 现状 | 说明 |
 |---|---|---|---|
 | T2 | **面板健康检查按钮** | 🟡 后端 API 可用，前端没接 | `go:embed` 的 `app.js` / `index.html` 没有回归兜底，改前得先补守卫 |
-| T3 | **内置默认版本段落后于实际客户端** | ⬜ | `headers.go` 的 `defaultClientVersion=5.5.4`、`defaultCliVersion=2.137.1`，而实际客户端是 **5.8.3 / CLI 2.161.0**。生产 `config.json` 已显式覆盖所以现在没事，但**换机 / 重装 / 配置丢失时新装网关会自称 5.5.4** —— 旧版本号本身就是可疑特征 |
+| T3 | **内置默认版本段落后于实际客户端** | ✅ 已修（v1.11.0） | `headers.go` 的内置默认已对齐本机实测的 **5.9.3 / CLI 2.165.0**（`desktop.go` 的 `desktopUA` 与 `growth-tasks.js` 的 `DESKTOP_UA` 同步）；另把生产 config 的硬编码 `user_agent` **清空**，改由 realm 感知的 `defaultWorkBuddyUAFor()` 组装（否则 global 账号拿不到 `WorkBuddy AI` 平台段） |
 | T4 | **B11 余额初始化鉴权失败提示** | ✅ 已证实并做完（见 C12） | Go 版的问题不是「启动时崩」，而是**失败静默 + 余额变陈旧值**；已加留痕与前端标记。剩下可选的增强：把 `credits_error` 也接到总览告警条（当前只在账号行显示） |
 
 ### P2 —— 观察项 / 有前置条件
